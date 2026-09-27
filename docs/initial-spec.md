@@ -1,1062 +1,119 @@
 # Hinagata（雛形）
 
-> Reproducible PostgreSQL test environments and fixtures for integration and end-to-end testing.
+Reproducible PostgreSQL fixtures and disposable test databases for Haskell services.
 
-## 1. Overview
+## Purpose and scope
 
-**Hinagata** is a CLI for creating, managing, and running disposable PostgreSQL-backed test environments.
+Hinagata is a Haskell library with a thin CLI. It prepares state for integration tests, including those driven by `mori://shinzui/hurl-workbench`, using PostgreSQL that the service or test harness has already bootstrapped. Local Unix sockets are a first-class connection mode. No additional server or container is required.
 
-It is designed primarily for integration and end-to-end tests where:
+Support both direct fixture loading into an explicitly selected caller-owned test database and isolated databases cloned from a reusable baseline on the same server. Loading fixtures never transfers database ownership. Hinagata never automatically drops, resets, or truncates a caller-owned database.
 
-- services depend on PostgreSQL;
-- tests require realistic and repeatable database state;
-- HTTP tests are executed with tools such as Hurl;
-- database schemas evolve frequently;
-- manually maintaining local test databases is unreliable;
-- rebuilding test state from scratch is currently too cumbersome.
+The first release must handle both small scenarios and large bulk loads, as requested by the user. Performance includes repeated setup latency, bulk throughput, bounded client memory, and bounded concurrency.
 
-Hinagata treats a test database as a **generated artifact rather than persistent development state**.
+This revision supersedes the earlier CLI-first spec. Hurl composition, execution, reports, service startup, and readiness belong to hurl-workbench or the caller. Dump snapshots/restore, capture, schema diffing, automatic event generation, a daemon, and PostgreSQL provisioning are deferred. Initial reset means obtaining a fresh owned clone. Template cloning replaces dump/restore in the hot path.
 
-The fundamental lifecycle is:
+## Architecture and ownership
 
 ```text
-Migrations
-    ↓
-Base Fixtures
-    ↓
-Canonical Database
-    ↓
-Snapshot
-    ↓
-Ephemeral Database
-    ↓
-Scenario Fixtures
-    ↓
-Tests
-    ↓
-Destroy
+Caller-owned PostgreSQL (Unix socket or explicit TCP endpoint)
+  ├── Existing migrated test database → fixture load → caller runs tests
+  └── New baseline → migrations → base fixtures → verification → seal
+       └── Clone → scenario fixtures → commit → service/test handoff
+            └── stop service and close pools → release or preserve clone
 ```
 
-A developer should never need to repair a test database manually.
+A baseline is a validated database used only as a template. A lease is an exclusive handle to one owned database and its cleanup responsibility. A run groups leases and diagnostics under a unique identifier. The caller owns all servers and service processes. Hinagata owns only the databases it creates and positively records.
 
-If the database is corrupted, stale, or otherwise unusable, recreating it should be the normal recovery mechanism.
+Use three packages: `hinagata-core` for pure fixture planning, identifiers, errors, connection descriptions, and Settei declarations; `hinagata-postgres` for execution and database lifecycle; `hinagata-cli` for source loading, parsing, output, and command handoff. Expose Hinagata-owned endpoint values, not Hasql, Keiro, Kiroku, or libpq handles. No consumer must adopt Hinagata's driver or effect system.
 
----
+The PostgreSQL package uses `postgresql-libpq` behind a private exclusive-session adapter for SQL and streaming COPY on the same connection. The adapter owns connection lifetime, result draining, cancellation, and protocol recovery. Package bounds must follow a verified released compiler/dependency cohort, not versions copied from local guides.
 
-## 2. Name
+Provide bracketed library operations: acquire a session or lease, invoke a callback, and release after success, failure, or cancellation. Expected operational failures are typed values. Unexpected and asynchronous exceptions propagate after cleanup. Preserve the primary failure alongside cleanup diagnostics. Abrupt process death is handled through recorded ownership and explicit recovery.
 
-**Hinagata（雛形 / ひながた）** is a Japanese word meaning a **model, template, pattern, or prototype used as the basis for creating something else**.
+## Connection and configuration
 
-The name reflects the central abstraction of the project.
+Represent Unix socket directory and TCP host as distinct choices, with explicit port, user, database, optional secret credentials, and deadlines. A socket directory is the libpq `host` value. Socket failure must never silently fall back to TCP. Render correctly escaped libpq keyword connection strings and explicit child variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`), not a socket path embedded as a URL hostname. Secret-bearing values have redacted displays.
 
-Hinagata maintains known-good representations of application state from which disposable test environments can be instantiated repeatedly:
+Use Settei for settings. CLI precedence is built-ins, explicit YAML files in occurrence order, explicitly bound environment variables, then `--set KEY=VALUE` occurrences. Initially use the direct YAML adapter and `--config PATH`. The library takes resolved values and does not implicitly inspect files or the environment. Fixture manifests are strictly decoded source data, not an alternative settings system.
 
-```text
-              雛形
-         known-good form
-                │
-        ┌───────┼───────┐
-        ▼       ▼       ▼
-      Test A  Test B   Test C
-```
+Support `--describe-config`, `--describe-config-json`, `--explain-config`, `--explain-config-json`, and `--check-config`, without database mutation. Usage errors exit 2, source errors 3, resolution errors 4, and operational failures 1. Generic command handoff preserves child exit status and identifies the failure phase in diagnostics.
 
-A fixture is a *hinagata* for a particular domain state.
+## Fixture model
 
-The canonical database is a *hinagata* for test databases.
-
-A snapshot is a compiled *hinagata* that can be instantiated efficiently.
-
-The name therefore applies not only to fixture management but to the broader idea behind the project:
-
-> **Define a known-good form once and reproduce it reliably.**
-
-The CLI executable is:
-
-```bash
-hinagata
-```
-
----
-
-## 3. Goals
-
-Hinagata should:
-
-1. Make test databases disposable.
-2. Reproduce known database states reliably.
-3. Make recovery from a broken local database trivial.
-4. Separate database construction from database usage.
-5. Support reusable and composable fixtures.
-6. Detect fixtures broken by schema changes.
-7. Make creating an isolated database cheap enough to do routinely.
-8. Integrate cleanly with Hurl.
-9. Support parallel test execution using isolated databases.
-10. Provide a foundation for richer fixture capture and compilation later.
-
----
-
-## 4. Non-Goals
-
-The initial version of Hinagata is not:
-
-- a database migration framework;
-- an ORM;
-- a production database management tool;
-- a general-purpose test framework;
-- a replacement for Hurl;
-- a mock server;
-- a service orchestration framework;
-- a general-purpose data generation framework.
-
-Hinagata should initially delegate rather than duplicate existing tools wherever possible.
-
----
-
-## 5. Core Principle
-
-### Test Databases Are Disposable
-
-A test database must never contain authoritative state.
-
-The authoritative representation is:
-
-```text
-migrations
-+
-fixtures
-+
-configuration
-```
-
-A database is merely one materialization of those inputs.
-
-Therefore:
-
-```text
-Database broken?
-       │
-       ▼
-    Destroy
-       │
-       ▼
-    Rebuild
-```
-
-is preferable to:
-
-```text
-Database broken?
-       │
-       ▼
-Investigate state
-       │
-       ▼
-Repair manually
-```
-
-The most important invariant of Hinagata is:
-
-> Given the same migrations and fixture sources, Hinagata can reproduce an equivalent test environment.
-
----
-
-## 6. Core Concepts
-
-The initial version defines five primary concepts:
-
-```text
-Project
-Canonical Database
-Snapshot
-Fixture
-Run
-```
-
----
-
-## 7. Project Configuration
-
-A project defines how Hinagata manages its test environment.
-
-Example:
+A fixture is a named directory under a configured root, with optional `fixture.yaml` and ordered steps. A directory containing only `fixture.sql` defines one SQL step named after the directory. An explicit manifest looks like this:
 
 ```yaml
-# hinagata.yaml
-
-database:
-  host: localhost
-  port: 5432
-  user: postgres
-
-canonical:
-  database: my_service_test
-
-migrations:
-  command: cabal run migrations
-
-fixtures:
-  path: tests/fixtures
-
-tests:
-  path: tests/hurl
-```
-
-Hinagata should avoid assuming a particular migration framework.
-
-Instead, migration execution should initially be represented as an external command.
-
-This allows Hinagata to work with:
-
-- custom Haskell migration executables;
-- `sqlx`;
-- `flyway`;
-- `dbmate`;
-- `migrate`;
-- raw SQL;
-- project-specific migration systems.
-
----
-
-## 8. Canonical Database
-
-Each Hinagata project has a **canonical database**.
-
-For example:
-
-```text
-my_service_test
-```
-
-The canonical database represents the known-good baseline for test execution.
-
-It contains:
-
-```text
-empty PostgreSQL database
-        ↓
-migrations
-        ↓
-base fixtures
-        ↓
-canonical database
-```
-
-Tests must never execute directly against the canonical database.
-
-The canonical database exists only to:
-
-- verify database construction;
-- produce snapshots;
-- create ephemeral databases.
-
----
-
-## 9. Building the Canonical Database
-
-The command:
-
-```bash
-hinagata db build
-```
-
-performs:
-
-```text
-drop existing canonical database
-            ↓
-create database
-            ↓
-run migrations
-            ↓
-load base fixtures
-            ↓
-validate
-            ↓
-ready
-```
-
-Example output:
-
-```text
-Building my_service_test
-
-  database       created
-  migrations     applied
-  fixtures       loaded
-  validation     passed
-
-Ready in 1.8s
-```
-
----
-
-## 10. Reset
-
-The primary recovery command is:
-
-```bash
-hinagata db reset
-```
-
-Initially, this may simply be equivalent to:
-
-```bash
-hinagata db build
-```
-
-The distinction exists because `reset` describes developer intent:
-
-> I do not trust the current database. Give me a known-good one.
-
-Future implementations may optimize reset using snapshots.
-
----
-
-## 11. Snapshots
-
-Replaying migrations and loading fixtures may eventually become expensive.
-
-Hinagata therefore supports compiling the canonical database into a snapshot:
-
-```bash
-hinagata db snapshot
-```
-
-The initial implementation should use PostgreSQL's custom dump format:
-
-```bash
-pg_dump \
-  --format=custom \
-  my_service_test \
-  > .hinagata/snapshots/base.dump
-```
-
-Snapshots are **derived artifacts**.
-
-They are not authoritative fixture sources.
-
-Conceptually:
-
-```text
-migrations + fixtures
-         │
-         ▼
- canonical database
-         │
-         ▼
-      snapshot
-```
-
----
-
-## 12. Snapshot Restoration
-
-A canonical database can be reconstructed from the current snapshot:
-
-```bash
-hinagata db restore
-```
-
-Conceptually:
-
-```text
-base.dump
-    ↓
-create database
-    ↓
-pg_restore
-    ↓
-canonical database
-```
-
-This provides a fast path for recovering a known-good environment.
-
----
-
-## 13. Ephemeral Databases
-
-Tests should execute against ephemeral databases.
-
-An ephemeral database is derived from the canonical state and belongs to one test execution.
-
-Example:
-
-```text
-my_service_test
-      │
-      ├── hinagata_01JQABC
-      ├── hinagata_01JQDEF
-      └── hinagata_01JQXYZ
-```
-
-The command:
-
-```bash
-hinagata db clone
-```
-
-creates an ephemeral database.
-
-Where possible, the initial implementation should use PostgreSQL database templates:
-
-```sql
-CREATE DATABASE hinagata_01JQABC
-TEMPLATE my_service_test;
-```
-
-This makes creating isolated test environments inexpensive.
-
----
-
-## 14. Fixture Model
-
-A fixture describes database state layered on top of the canonical database.
-
-The initial implementation should deliberately keep fixtures simple.
-
-The initial supported fixture representation is:
-
-```text
-SQL
-```
-
-Example:
-
-```text
-tests/
-└── fixtures/
-    ├── base/
-    │   └── fixture.sql
-    └── scenarios/
-        ├── qualified-agent/
-        │   └── fixture.sql
-        └── multiple-subscriptions/
-            └── fixture.sql
-```
-
-This keeps the initial implementation small while preserving room for richer fixture representations later.
-
----
-
-## 15. Base Fixtures
-
-Base fixtures are loaded into the canonical database.
-
-They represent data required by most tests.
-
-Examples include:
-
-- application configuration;
-- chapters;
-- markets;
-- MLS configuration;
-- plans;
-- permissions;
-- stable reference data.
-
-They should avoid scenario-specific state.
-
-The distinction is:
-
-```text
-Base Fixture
-    ↓
-needed by most tests
-
-Scenario Fixture
-    ↓
-needed by a particular test
-```
-
----
-
-## 16. Scenario Fixtures
-
-Scenario fixtures describe additional state required by a test.
-
-Examples:
-
-```text
-qualified-agent
-multiple-subscriptions
-pending-registration
-cancelled-membership
-```
-
-They are applied only after an ephemeral database has been created.
-
-Example:
-
-```text
-canonical database
-       ↓
-clone
-       ↓
-ephemeral database
-       ↓
-multiple-subscriptions
-       ↓
-test database
-```
-
----
-
-## 17. Fixture Metadata
-
-A fixture may contain metadata:
-
-```yaml
-# fixture.yaml
-
-name: multiple-subscriptions
-
-description: >
-  An active member with multiple subscription records
-  in different lifecycle states.
-
+name: subscribed-members
+description: Stable members with subscriptions
 include:
-  - qualified-agent
+  - reference-data
+steps:
+  - sql: prepare.sql
+  - copy:
+      table: { schema: app, name: members }
+      columns: [id, email]
+      file: members.csv
+      format: csv
+      header: true
+  - sql: subscriptions.sql
 ```
 
-alongside:
+COPY initially supports UTF-8 PostgreSQL CSV with comma delimiter, standard quoting/null rules, and explicit header presence. Reject unknown options. Validate and quote schema, table, and column identifiers separately. Stream local files through `COPY ... FROM STDIN`; never ask the server to read a client file or execute a program. Binary COPY and custom formats are deferred.
 
-```text
-fixture.sql
-```
+Resolve requested roots in caller order and includes in declared order, with dependencies first and each fixture once per plan. Report the complete cycle path. Reject missing dependencies, duplicate names, unknown fields, invalid identifiers, and paths escaping the fixture root, including symlinks, before database mutation. `validate --all` tests each scenario in its own clone with its own closure.
 
-The initial implementation only needs to support:
+Compile into an immutable private local bundle containing ordered steps and content digests. Copy and hash sources in bounded chunks; SQL steps have a configurable size limit and CSV stays file-backed. Execution reads frozen bytes, so edits during a run cannot invalidate the fingerprint. Compilation is explicit and reusable. Persistent bundle reuse verifies integrity; path/mtime alone is insufficient. Bundles are disposable derived artifacts.
 
-- `name`;
-- `description`;
-- `include`.
+SQL is trusted project code, not a sandbox. Fixtures must use transaction-compatible SQL without psql commands, transaction control, or inline COPY data. Preflight uses a PostgreSQL-aware lexical scan handling strings, identifiers, nested comments, and dollar quotes to reject prohibited top-level statements; do not split naively on semicolons or rewrite SQL with regular expressions. PostgreSQL performs complete syntax/type/constraint validation.
 
----
+## Execution and bulk loads
 
-## 18. Fixture Composition
+Execute the full closure, including SQL and CSV steps, in one transaction on one exclusively borrowed connection. Enforce lock and statement deadlines, keep constraints/triggers enabled, and report commit-time failures. Stream CSV with bounded buffers and backpressure; never materialize all rows or issue an INSERT per row. Large data belongs in CSV steps rather than enormous SQL strings.
 
-Fixtures may depend on other fixtures.
+Drain every PostgreSQL result, including COPY completion. On malformed CSV, SQL failure, disconnect, deadline, or cancellation, roll back or discard a connection whose protocol state cannot be recovered. Never reuse a connection left in COPY mode. Rollback covers transactional writes; PostgreSQL sequence advancement and external effects are outside this guarantee. Direct loading requires exclusive caller control and deterministic fixture IDs for reproducibility.
 
-Example:
+Deduplication applies within one plan, not across calls. A repeated load executes again and may fail on uniqueness constraints. Use a new clone or deliberately idempotent fixture SQL to rerun.
 
-```yaml
-name: multiple-subscriptions
+## Baseline construction and reuse
 
-include:
-  - active-agent
-```
+A sealed baseline is the initial snapshot mechanism: it materializes migrations and a chosen fixture closure once, then clones that state without replaying or reloading it. Projects may prepare several baseline variants, including a large frequently reused scenario as the base closure, keyed by their input fingerprints. Cloning still copies database data and is not a constant-time filesystem snapshot. Portable `pg_dump` artifacts for restoring onto a fresh cluster are deferred; reuse initially lasts for the life of the existing cluster.
 
-Hinagata resolves the dependency graph:
+Create a fresh generation from `template0`, invoke the application migration hook, load base fixtures, verify, close all connections, disable baseline connections, and publish. Failed construction never publishes an incomplete baseline or destroys the last valid generation. Clone from a separate maintenance connection outside a transaction.
 
-```text
-active-agent
-     ↓
-multiple-subscriptions
-```
+The migration/verification hooks accept a target endpoint. They can invoke public Haskell APIs or an executable plus argv, working directory, explicit environment, and deadline. Never implicitly evaluate shell text. The application supplies one complete migration plan. Hinagata does not invent writes to private Keiro/Kiroku/PGMQ tables.
 
-Dependencies are applied before the requesting fixture.
+A baseline fingerprint covers format version, project identity, explicit migration revision, ordered base-bundle digests, non-secret schema-affecting configuration, PostgreSQL major version, and extension/locale requirements. Opaque command text is not a migration identity: include embedded migration/build inputs, or rebuild rather than persistently reuse. Secrets are not stored as fingerprint inputs.
 
-Each fixture must be applied at most once.
+Scope reuse to a cluster identity stored in a Hinagata-owned maintenance catalog. Verify recorded database identity; server restart retains catalog identity, cluster recreation invalidates it. Do not require superuser-only cluster inspection. Serialize construction per fingerprint using an advisory lock, record allocation intent before CREATE DATABASE, bind actual identity afterward, and publish atomically. Handle ambiguous crash windows by inspection rather than guessing from a prefix. Coordinate acquisition, baseline retirement, and cleanup under the same locking protocol.
 
-Circular dependencies are invalid.
+A template must have no connected sessions. Never terminate caller-owned sessions to clone their database. Database-level grants and settings do not copy with templates: reapply declared settings/grants and invoke an optional application-owned clone preparation hook before fixture loading/handoff. Global roles and extension installation privileges remain the service bootstrap's responsibility.
 
-For example:
+## Isolation and cleanup
 
-```text
-A → B → C → A
-```
+Commit fixture state before starting the service: another process cannot see an uncommitted setup transaction. Each concurrent scenario needs a separate clone and service instance or an application-defined isolation boundary. Changing Hinagata's environment cannot retarget a running service. Multiple services can use a named collection of leases; failed acquisition compensates earlier allocations. No cross-database transaction is promised.
 
-must fail before any database mutation occurs.
+Positive ownership combines a project-scoped maintenance record, database name/OID, ownership marker, and cluster identity. A prefix, localhost, or a socket alone never authorizes deletion. Borrowed and protected maintenance/template databases never qualify.
 
----
+Active leases hold a maintenance-session advisory lock. Cleanup must acquire that lock, recheck identity, and skip active/preserved leases. Preservation records retained state. Detached acquisition records a persistent explicit lease instead of becoming abandoned when the CLI exits. Cleanup previews by default and applies only with an explicit flag; preserved resources require explicit selection. Forceful dropping is limited to positively owned clones after consumers stop. Retain metadata and report PostgreSQL refusals.
 
-## 19. Loading Fixtures
+## CLI and hurl-workbench handoff
 
-A fixture can be loaded manually:
+Expose `fixture plan`, `fixture load`, `fixture validate`, `db prepare`, `db acquire`, `db release`, `db with`, `inspect`, and `clean`. Commands call library operations and provide versioned JSON where useful.
 
-```bash
-hinagata fixture load multiple-subscriptions
-```
+`db with --fixture NAME -- PROGRAM ARGS...` obtains a clone, loads fixtures, overlays explicit connection variables and `HINAGATA_RUN_ID`, invokes one generic command, waits for shutdown, then releases or preserves. A service-specific wrapper maps the endpoint into its Settei settings and invokes hurl-workbench. Hinagata owns this wrapper's process group to keep the lease valid through interruption; hurl-workbench owns service readiness, HTTP execution, and reports. Add no Hurl-specific flags or workspace hooks.
 
-Hinagata:
+Detached `db acquire` emits an opaque lease ID and non-secret endpoint fields. `db release ID` checks identity again. `inspect ID` supports retained/detached resources. Credentials travel only through explicit secret channels, never normal JSON or shell-evaluated output. A suite-level workbench service has one stable endpoint; isolated parallel scenarios use separate suite invocations and service instances.
 
-1. resolves dependencies;
-2. determines application order;
-3. executes fixture SQL;
-4. reports failures.
+## Haskell conventions and acceptance
 
-Example:
+Bootstrap the development environment with `mori://shinzui/seihou-modules/templates/nix-haskell-flake`. Preserve its managed canonical lock and generated files; place workspace-specific outputs/tools in `flake.module.nix`, with local environment/process overrides in their supported unmanaged files.
 
-```text
-Loading multiple-subscriptions
+Follow `mori://shinzui/haskell-jitsurei/docs/core-standards`, `mori://shinzui/haskell-jitsurei/docs/core-record-patterns`, and `mori://shinzui/haskell-jitsurei/docs/core-custom-prelude`: GHC >=9.12, GHC2024, baseline extensions, strict unprefixed fields, explicit deriving, postpositive qualified imports, and a small `Hinagata.Prelude`. Keep generic-lens label orphans out of the prelude/public definition modules and `PackageImports` local to the prelude. Follow `mori://shinzui/keiro-runtime-patterns/docs/config-settei-cli-standard` for settings.
 
-  active-agent              loaded
-  multiple-subscriptions    loaded
+Acceptance includes deterministic graphs, socket direct loading, SQL/COPY rollback and cancellation, clone isolation under concurrency, baseline invalidation, cleanup identity refusal, Settei precedence/redaction, and a runnable Keiro service example tested through hurl-workbench. Distinguish migration-ledger verification from owner-supplied live-schema verification.
 
-2 fixtures loaded in 84ms
-```
+Benchmark 100/1,000-row scenarios and 100,000/1,000,000-row CSV fixtures. Separate cold compilation/build, warm reuse, cloning, loading, cleanup, and end-to-end cost. Record median/p95, rows/second, allocation, maximum client residency, and machine/toolchain/PostgreSQL/storage details. Compare against equivalent single-session `psql` SQL/COPY and full database rebuilding on identical inputs.
 
----
+Proposed release gates: bulk COPY within 25% of `psql` elapsed time; no more than 64 MiB additional client residency for tenfold bulk input growth; warm small-scenario setup under 250 ms median/500 ms p95 on the documented reference machine. These are targets, not measurements. If infeasible, record evidence and explicitly revise the gate before declaring completion. Never silently disable durability globally to meet a target.
 
-## 20. Fixture Validation
-
-Fixtures must be continuously validated against the current schema.
-
-```bash
-hinagata fixture validate multiple-subscriptions
-```
-
-Validation creates an isolated database:
-
-```text
-canonical
-    ↓
-clone
-    ↓
-fixture dependencies
-    ↓
-fixture
-    ↓
-constraint validation
-    ↓
-destroy
-```
-
-The original canonical database remains untouched.
-
----
-
-## 21. Validate All Fixtures
-
-```bash
-hinagata fixture validate --all
-```
-
-Example output:
-
-```text
-Validating fixtures
-
-  active-agent               ✓
-  qualified-agent            ✓
-  multiple-subscriptions     ✓
-  cancelled-membership       ✗
-
-cancelled-membership
-
-  ERROR: null value in column "cancelled_by"
-  violates not-null constraint
-
-3 passed
-1 failed
-```
-
-This command should be suitable for CI.
-
----
-
-## 22. Schema Evolution
-
-Fixture validation should make schema evolution explicit.
-
-Suppose a migration adds:
-
-```sql
-ALTER TABLE subscription
-ADD COLUMN created_by UUID NOT NULL;
-```
-
-An incompatible fixture should fail immediately:
-
-```text
-✗ multiple-subscriptions
-
-subscription.created_by is NOT NULL
-
-Fixture:
-  scenarios/multiple-subscriptions
-
-Database:
-  hinagata_01JQABC
-```
-
-The desired mental model is:
-
-> A fixture that no longer loads is equivalent to source code that no longer compiles.
-
----
-
-## 23. Hurl Integration
-
-Hinagata should treat Hurl as an external test runner rather than embedding its behavior.
-
-A test scenario might look like:
-
-```text
-tests/
-└── hurl/
-    └── registration/
-        ├── test.yaml
-        ├── create.hurl
-        ├── profile.hurl
-        └── qualify.hurl
-```
-
-With:
-
-```yaml
-fixture: pending-registration
-
-files:
-  - create.hurl
-  - profile.hurl
-  - qualify.hurl
-```
-
-This keeps the fixture lifecycle independent from the HTTP testing implementation.
-
----
-
-## 24. Running Tests
-
-```bash
-hinagata run registration
-```
-
-performs:
-
-```text
-resolve test
-      ↓
-resolve fixture graph
-      ↓
-clone canonical database
-      ↓
-load fixtures
-      ↓
-prepare environment
-      ↓
-execute Hurl
-      ↓
-collect result
-      ↓
-drop database
-```
-
-Example output:
-
-```text
-registration
-
-  database        hinagata_01JQABC
-  fixture         pending-registration
-  setup           91ms
-
-  create.hurl     ✓
-  profile.hurl    ✓
-  qualify.hurl    ✓
-
-3 passed
-1.4s
-```
-
----
-
-## 25. Environment
-
-Hinagata should expose the ephemeral database to the test runner through environment variables.
-
-At minimum:
-
-```text
-HINAGATA_DATABASE
-HINAGATA_DATABASE_URL
-HINAGATA_RUN_ID
-```
-
-For example:
-
-```text
-HINAGATA_DATABASE=hinagata_01JQABC
-HINAGATA_DATABASE_URL=postgresql://localhost/hinagata_01JQABC
-HINAGATA_RUN_ID=01JQABC
-```
-
-The Hurl runner and application services can consume these values.
-
----
-
-## 26. Run Identity
-
-Every execution receives a unique run identifier.
-
-Example:
-
-```text
-01JQAX9XM9RK...
-```
-
-This identifier is used for:
-
-- database names;
-- temporary directories;
-- logs;
-- diagnostics.
-
-Example:
-
-```text
-.hinagata/
-└── runs/
-    └── 01JQAX9XM9RK/
-        ├── environment
-        ├── hurl.log
-        └── run.yaml
-```
-
----
-
-## 27. Failed Tests
-
-By default, successful test databases should be destroyed.
-
-For failures, Hinagata should support:
-
-```bash
-hinagata run registration --preserve-on-failure
-```
-
-Example:
-
-```text
-registration
-
-  create.hurl     ✓
-  profile.hurl    ✓
-  qualify.hurl    ✗
-
-FAILED
-
-Environment preserved.
-
-Run:
-  01JQABC
-
-Database:
-  hinagata_01JQABC
-
-Inspect:
-
-  hinagata shell 01JQABC
-```
-
-This makes the exact failing state available for investigation.
-
----
-
-## 28. Shell
-
-Hinagata should provide:
-
-```bash
-hinagata shell
-```
-
-to open `psql` against the current development test database.
-
-A preserved run can be inspected with:
-
-```bash
-hinagata shell 01JQABC
-```
-
-This executes approximately:
-
-```bash
-psql "$HINAGATA_DATABASE_URL"
-```
-
----
-
-## 29. Cleanup
-
-Interrupted processes may leave ephemeral databases behind.
-
-Hinagata should provide:
-
-```bash
-hinagata clean
-```
-
-This removes abandoned:
-
-- ephemeral databases;
-- run directories;
-- temporary files.
-
-The implementation must avoid deleting databases it cannot positively identify as Hinagata-managed.
-
----
-
-## 30. Parallel Execution
-
-The architecture should support parallel execution from the beginning even if sophisticated scheduling is deferred.
-
-Each test receives an independent database:
-
-```text
-canonical
-    │
-    ├── registration      → hinagata_A
-    ├── subscriptions     → hinagata_B
-    └── mls               → hinagata_C
-```
-
-Therefore test isolation is provided by PostgreSQL rather than coordination between tests.
-
-A future command may support:
-
-```bash
-hinagata run --all --parallel
-```
-
----
-
-## 31. Project Layout
-
-Recommended initial layout:
-
-```text
-hinagata.yaml
-
-tests/
-├── fixtures/
-│   ├── base/
-│   │   └── fixture.sql
-│   │
-│   └── scenarios/
-│       ├── active-agent/
-│       │   ├── fixture.yaml
-│       │   └── fixture.sql
-│       │
-│       ├── qualified-agent/
-│       │   ├── fixture.yaml
-│       │   └── fixture.sql
-│       │
-│       └── multiple-subscriptions/
-│           ├── fixture.yaml
-│           └── fixture.sql
-│
-└── hurl/
-    ├── registration/
-    │   ├── test.yaml
-    │   └── registration.hurl
-    │
-    └── subscriptions/
-        ├── test.yaml
-        └── subscriptions.hurl
-
-.hinagata/
-├── snapshots/
-└── runs/
-```
-
-`.hinagata/` should generally be ignored by Git.
-
-Fixture sources should be committed.
-
----
-
-## 32. Determinism
-
-Fixtures should be deterministic.
-
-Given:
-
-```text
-same migrations
-+
-same configuration
-+
-same fixtures
-```
-
-Hinagata should construct an equivalent database state.
-
-Fixtures should therefore avoid unnecessary dependence on:
-
-- wall-clock time;
-- random identifiers;
-- machine-specific values;
-- external services;
-- mutable production data.
-
-Where generated identifiers are necessary, deterministic test identifiers should be preferred.
-
----
-
-## 33. Safety
-
-Hinagata performs destructive database operations.
-
-It must therefore have strong safety boundaries.
-
-Hinagata should refuse destructive operations unless the target database can be positively identified as a Hinagata-managed test database.
-
-Production-like hostnames or explicitly protected databases should be rejected.
-
-Configuration should support:
-
-```yaml
-database:
-  allowed_hosts:
-    - localhost
-    - 127.0.0.1
-```
-
-A database should also be recognizable through a configured prefix:
-
-```yaml
-database:
-  ephemeral_prefix: hinagata_
-```
-
-Hinagata should prefer refusing an operation over risking deletion of an unknown database.
-
----
-
-## 34. Initial CLI
-
-The initial public CLI should remain intentionally small.
-
-```text
-hinagata
-│
-├── db
-│   ├── build
-│   ├── reset
-│   ├── snapshot
-│   ├── restore
-│   └── clone
-│
-├── fixture
-│   ├── load
-│   └── validate
-│
-├── run
-├── shell
-└── clean
-```
-
-Commands such as fixture capture, diff, update, event loading, and domain-level fixture compilation should be added only after the fundamental lifecycle is proven.
-
----
-
-## 35. Initial Implementation Scope
-
-The first implementation should support:
-
-### Configuration
-
-- `hinagata.yaml`;
-- PostgreSQL connection information;
-- canonical database
+The [MasterPlan](masterplans/1-build-hinagata-for-fast-postgresql-fixtures-and-isolated-microservice-tests.md) coordinates implementation. [Research](research/initial-design.md) records sources and dependency observations. No implementation exists yet.
