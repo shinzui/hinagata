@@ -17,6 +17,11 @@ provenance:
       at: 2026-09-27T00:16:30Z
       mode: "update"
       note: "Incorporate prior-art source review into contracts and acceptance."
+    - model: "gpt-6-astra"
+      harness: "codex-cli"
+      at: 2026-09-27T04:33:49Z
+      mode: "update"
+      note: "Audit applicable haskell-jitsurei standards and make missing acceptance requirements explicit."
 ---
 
 # Prove Keiro service integration and performance
@@ -55,7 +60,11 @@ Hard dependency: `docs/plans/4-expose-fixture-commands-and-hurl-workbench-handof
 
 All paths below are repository-relative and proposed unless explicitly described as existing. At planning time only `docs/initial-spec.md`, project metadata, and planning tools existed. The specification now describes the intended library. Dependency research is in `docs/research/initial-design.md`; discover dependency source with Mori before using APIs, then verify current releases with package registries and upstream tags before selecting bounds. Never search the filesystem root or `/nix/store`.
 
-Follow GHC >=9.12, GHC2024, strict unprefixed records, explicit deriving strategies, postpositive qualified imports, and the project prelude. Keep generic-lens orphan imports out of public type-definition modules and the prelude. These conventions come from `mori://shinzui/haskell-jitsurei/docs/core-standards`, `mori://shinzui/haskell-jitsurei/docs/core-record-patterns`, and `mori://shinzui/haskell-jitsurei/docs/core-custom-prelude`. Expected errors are typed; resource cleanup must run on asynchronous exceptions without swallowing them.
+Follow GHC >=9.12, GHC2024, strict unprefixed records, explicit deriving strategies, postpositive qualified imports, and the project prelude. Keep generic-lens orphan imports out of public type-definition modules and the prelude. These conventions come from `mori://shinzui/haskell-jitsurei/docs/core-standards`, `mori://shinzui/haskell-jitsurei/docs/core-record-patterns`, and `mori://shinzui/haskell-jitsurei/docs/core-custom-prelude`.
+
+Every library, executable, test, and benchmark component imports its package's `common common` baseline with GHC2024 and DeriveAnyClass/DuplicateRecordFields/OverloadedLabels/OverloadedStrings. Use generic-lens labels consistently for record access/updates; construction and constructor-directed patterns are valid. Import `Data.Generics.Labels ()` plainly only where required, and inspect transitive imports so public facades do not leak the orphan. Keep entity IDs first in command/event payloads where applicable. Operators stay unqualified; hide clashing prelude exports.
+
+Use MultilineStrings for suitable embedded multiline text per `mori://shinzui/haskell-jitsurei/docs/core-multiline-strings`, preserving external fixture bytes. The [standards audit](../research/haskell-standards-audit.md) records applicability and acceptance ownership. Expected errors are typed; resource cleanup must run on asynchronous exceptions without swallowing them.
 
 
 ## Plan of Work
@@ -67,6 +76,8 @@ Create an internal example package with a small Keiro service, application-owned
 Compose all required migration components in one complete plan with an application revision covering embedded SQL. Run ledger verification and owner-supplied live-schema verification separately. Base/scenario SQL and CSV may write application-owned reference data. Any event, outbox, or workflow setup uses the runtime's public command/store APIs in an application-owned hook or through the example HTTP flow; do not COPY invented runtime rows. Exercise a command followed by an HTTP read that proves the seeded reference state and runtime behavior work together. If projections are asynchronous, use a public consistency target/readiness predicate with a deadline, not a fixed sleep or fabricated sequence position.
 
 Use the caller's socket cluster and service Settei mapping. Demonstrate separate administration/setup/application roles, an allowed application operation and a denied privileged operation, and a generated-ID insert after explicit-ID fixtures. A scenario including its base reference fixture must succeed without reloading that fixture. Publish small runnable library examples for prepare-once/repeated-leases and test failures returned as values, in addition to the CLI example. Demonstrate isolation with two service instances on separate ports/leases. Also compose two named database leases and show failure of the second acquisition cleans the first. In this example, required globally installed roles/extensions are setup prerequisites, not hidden operations in fixture SQL.
+
+The real service's suites follow `mori://shinzui/haskell-jitsurei/docs/api-hurl-integration-testing`: resource-family files, explicit independent default reads, opt-in write flows, fixture prerequisites, every-request status and body media-type/semantic assertions, and relevant invalid-input/not-found/permission cases. A write is proved through a subsequent public read. Retry only the eventually consistent observation with a bound; no cross-file capture dependencies or global retries. Hurl/hurlfmt belong in reproducible development/CI tools. Keep in-process handler tests and any generated OpenAPI checks separate from the live packaged-service proof. Entity IDs come first in any example command/event payloads. Workbench supplies startup/readiness, reports, and shutdown; Hinagata adds no HTTP runner.
 
 ### Milestone 2: Repeatable latency, throughput, and memory evidence
 
@@ -84,7 +95,7 @@ When a target misses, profile the specific phase, improve it under the existing 
 
 ### Milestone 3: Reproducible adoption
 
-Add `just example-keiro`, `just bench-fixtures`, and `just release-check`. Extend the source distribution checks to build/test from unpacked archives in a temporary directory; no sibling checkout may be required. Document socket/direct-load, warm baseline, named leases, fixture validation, preservation, migration revision invalidation, and workbench suite scope. Include API Haddocks and a compatibility matrix for the actually tested compiler/PostgreSQL/OS cohort. Target PostgreSQL 18 first, consistent with the inspected Keiro schema baseline; additional versions are supported only when tested.
+Add `just example-keiro`, `just bench-fixtures`, and `just release-check`. Extend the source distribution checks to build/test from unpacked archives in a temporary directory; no sibling checkout may be required. Run the conventions gate over every package/component, verify parser-derived completions and informational commands without configuration/database access, and verify version output for local, Nix, and no-Git archive builds. Record actual revision availability rather than fabricating a SHA. Document socket/direct-load, warm baseline, named leases, fixture validation, preservation, migration revision invalidation, and workbench suite scope. Include API Haddocks and a compatibility matrix for the actually tested compiler/PostgreSQL/OS cohort. Target PostgreSQL 18 first, consistent with the inspected Keiro schema baseline; additional versions are supported only when tested.
 
 Run the Keiro example with a changed migration revision and changed base fixture to demonstrate invalidation. Test cancellation and readiness failure across the full nested process/lease scope. Distill cross-plan lessons into ADRs, reconcile registry status, and close the MasterPlan only when all behavior and release gates have evidence.
 

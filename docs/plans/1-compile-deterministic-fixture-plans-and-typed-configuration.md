@@ -22,6 +22,11 @@ provenance:
       at: 2026-09-27T00:16:29Z
       mode: "update"
       note: "Incorporate prior-art source review into contracts and acceptance."
+    - model: "gpt-6-astra"
+      harness: "codex-cli"
+      at: 2026-09-27T04:33:49Z
+      mode: "update"
+      note: "Audit applicable haskell-jitsurei standards and make missing acceptance requirements explicit."
 ---
 
 # Compile deterministic fixture plans and typed configuration
@@ -62,7 +67,11 @@ There are no hard dependencies. Own `hinagata-core/hinagata-core.cabal`, `hinaga
 
 All paths below are repository-relative and proposed unless explicitly described as existing. At planning time only `docs/initial-spec.md`, project metadata, and planning tools existed. The specification now describes the intended library. Dependency research is in `docs/research/initial-design.md`; discover dependency source with Mori before using APIs, then verify current releases with package registries and upstream tags before selecting bounds. Never search the filesystem root or `/nix/store`.
 
-Follow GHC >=9.12, GHC2024, strict unprefixed records, explicit deriving strategies, postpositive qualified imports, and the project prelude. Keep generic-lens orphan imports out of public type-definition modules and the prelude. These conventions come from `mori://shinzui/haskell-jitsurei/docs/core-standards`, `mori://shinzui/haskell-jitsurei/docs/core-record-patterns`, and `mori://shinzui/haskell-jitsurei/docs/core-custom-prelude`. Expected errors are typed; resource cleanup must run on asynchronous exceptions without swallowing them.
+Follow GHC >=9.12, GHC2024, strict unprefixed records, explicit deriving strategies, postpositive qualified imports, and the project prelude. Keep generic-lens orphan imports out of public type-definition modules and the prelude. These conventions come from `mori://shinzui/haskell-jitsurei/docs/core-standards`, `mori://shinzui/haskell-jitsurei/docs/core-record-patterns`, and `mori://shinzui/haskell-jitsurei/docs/core-custom-prelude`.
+
+Every library, executable, test, and benchmark component imports its package's `common common` baseline with GHC2024 and DeriveAnyClass/DuplicateRecordFields/OverloadedLabels/OverloadedStrings. Use generic-lens labels consistently for record access/updates; construction and constructor-directed patterns are valid. Import `Data.Generics.Labels ()` plainly only where required, and inspect transitive imports so public facades do not leak the orphan. Keep entity IDs first in command/event payloads where applicable. Operators stay unqualified; hide clashing prelude exports.
+
+Use MultilineStrings for suitable embedded multiline text per `mori://shinzui/haskell-jitsurei/docs/core-multiline-strings`, preserving external fixture bytes. The [standards audit](../research/haskell-standards-audit.md) records applicability and acceptance ownership. Expected errors are typed; resource cleanup must run on asynchronous exceptions without swallowing them.
 
 
 ## Plan of Work
@@ -71,7 +80,7 @@ Follow GHC >=9.12, GHC2024, strict unprefixed records, explicit deriving strateg
 
 First inspect the installed Seihou template and its authoritative module descriptor, then preview and apply `nix-haskell-flake` using the command below. Mori metadata and the README version heading lag the local descriptor, so verify the installed/current module through Seihou rather than pinning that stale heading. Use the managed toolchain and exact lock; do not hand-author a replacement flake or change managed pins. Disable the built-in single-root-package output because this is a multi-package workspace. Add workspace outputs, checks, and extra tools through `flake.module.nix`; enable PostgreSQL tooling for the test harness without making the production library bootstrap a server. Stage Nix inputs/modules before evaluating a git-backed flake so Nix sees the canonical lock. Keep local exports in `.envrc.local` and optional local processes in `process-compose.override.yaml`. Never hand-edit generated `nix/haskell.nix` for project customizations.
 
-Create the core library and its tests with a common Cabal stanza using GHC2024 and the baseline DeriveAnyClass, DuplicateRecordFields, OverloadedLabels, and OverloadedStrings extensions. Use a small `Hinagata.Prelude`, with PackageImports only in that module. Inspect released metadata for Settei, YAML decoding, hashing, lens/generic-lens, and test dependencies; choose a coherent GHC >=9.12 toolchain and pin the application/test solver reproducibly without overconstraining the library. Research found Settei 0.2.0.0 and a newer Hasql API than the local corpus; neither observation is a substitute for a solver run. No Hasql dependency is needed in core.
+Create the core library and its tests with a common Cabal stanza using GHC2024 and the baseline DeriveAnyClass, DuplicateRecordFields, OverloadedLabels, and OverloadedStrings extensions. Expose a small `Hinagata.Prelude` from core, with package-qualified common Text/Generic/Aeson/time re-exports and Control.Lens, and PackageImports enabled only by that module's pragma. Use it across the workspace; keep domain definitions and generic-lens orphans out. Centralize shared Aeson options rather than allowing accidental per-type wire-format drift; use explicit validated/secret-safe codecs for opaque identifiers and credential-bearing values, not blanket Generic serialization. Inspect released metadata for Settei, YAML decoding, hashing, lens/generic-lens, and test dependencies; choose a coherent GHC >=9.12 toolchain and pin the application/test solver reproducibly without overconstraining the library. Research found Settei 0.2.0.0 and a newer Hasql API than the local corpus; neither observation is a substitute for a solver run. No Hasql dependency is needed in core.
 
 Define validated opaque `FixtureName`, `DatabaseName`, `ProjectId`, `RunId`, `SqlIdentifier`, `Port`, and positive worker/chunk/deadline values. Endpoint construction distinguishes socket directories from TCP hosts. Quote libpq keyword values correctly and return parse errors for malformed strings; never turn invalid input into empty/default settings. A credential wrapper must not derive a revealing Show instance. Test socket paths containing spaces, apostrophes, and backslashes, Unicode byte-length limits for identifiers, empty/invalid ports, and secret display.
 
@@ -91,7 +100,7 @@ Implement the SQL policy scanner needed to reject top-level transaction control 
 
 Define `hinagataConfig :: Settei.Config HinagataConfig` with explicit endpoint, project identity, fixture/bundle paths, maintenance database/schema, explicit administration/setup/application access, deadlines, setup-worker/active-lease/pending-request limits, chunk size, and SQL size limit. No default database authorizes mutation. Declare the concurrency limits as manager-local and keep the three access purposes explicit; never default an application endpoint from administrative credentials. Operational defaults are visible Settei sources/rules. Provide validated explicit environment bindings; no wildcard environment discovery. Retain library callers' ability to construct resolved values directly. Source file IO and optparse wiring remain CLI work.
 
-Create `just check`, `just fmt-check`, and focused core-test commands; make the Nix gate validate the package and tests. Publish module documentation and source-distribution checks. All command additions must execute real gates rather than placeholders.
+Create `just check-conventions` and include it in `just check`: verify every Cabal component imports the baseline, postpositive qualified imports, and file-local PackageImports. Document source review of strict record fields, explicit deriving, optic usage (including `at`/`ix` semantics), entity-ID order, and transitive generic-lens orphan exposure; do not claim a simple text scan proves the import graph safe. Extend the gate whenever later packages/components are added. Create `just check`, `just fmt-check`, and focused core-test commands; make the Nix gate validate the package and tests. Publish module documentation and source-distribution checks. All command additions must execute real gates rather than placeholders.
 
 
 ## Concrete Steps

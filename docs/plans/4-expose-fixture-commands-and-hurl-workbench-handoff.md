@@ -17,6 +17,11 @@ provenance:
       at: 2026-09-27T00:16:30Z
       mode: "update"
       note: "Incorporate prior-art source review into contracts and acceptance."
+    - model: "gpt-6-astra"
+      harness: "codex-cli"
+      at: 2026-09-27T04:33:49Z
+      mode: "update"
+      note: "Audit applicable haskell-jitsurei standards and make missing acceptance requirements explicit."
 ---
 
 # Expose fixture commands and hurl-workbench handoff
@@ -55,7 +60,11 @@ Hard dependency: `docs/plans/3-manage-reusable-baselines-and-isolated-database-l
 
 All paths below are repository-relative and proposed unless explicitly described as existing. At planning time only `docs/initial-spec.md`, project metadata, and planning tools existed. The specification now describes the intended library. Dependency research is in `docs/research/initial-design.md`; discover dependency source with Mori before using APIs, then verify current releases with package registries and upstream tags before selecting bounds. Never search the filesystem root or `/nix/store`.
 
-Follow GHC >=9.12, GHC2024, strict unprefixed records, explicit deriving strategies, postpositive qualified imports, and the project prelude. Keep generic-lens orphan imports out of public type-definition modules and the prelude. These conventions come from `mori://shinzui/haskell-jitsurei/docs/core-standards`, `mori://shinzui/haskell-jitsurei/docs/core-record-patterns`, and `mori://shinzui/haskell-jitsurei/docs/core-custom-prelude`. Expected errors are typed; resource cleanup must run on asynchronous exceptions without swallowing them.
+Follow GHC >=9.12, GHC2024, strict unprefixed records, explicit deriving strategies, postpositive qualified imports, and the project prelude. Keep generic-lens orphan imports out of public type-definition modules and the prelude. These conventions come from `mori://shinzui/haskell-jitsurei/docs/core-standards`, `mori://shinzui/haskell-jitsurei/docs/core-record-patterns`, and `mori://shinzui/haskell-jitsurei/docs/core-custom-prelude`.
+
+Every library, executable, test, and benchmark component imports its package's `common common` baseline with GHC2024 and DeriveAnyClass/DuplicateRecordFields/OverloadedLabels/OverloadedStrings. Use generic-lens labels consistently for record access/updates; construction and constructor-directed patterns are valid. Import `Data.Generics.Labels ()` plainly only where required, and inspect transitive imports so public facades do not leak the orphan. Keep entity IDs first in command/event payloads where applicable. Operators stay unqualified; hide clashing prelude exports.
+
+Use MultilineStrings for suitable embedded multiline text per `mori://shinzui/haskell-jitsurei/docs/core-multiline-strings`, preserving external fixture bytes. The [standards audit](../research/haskell-standards-audit.md) records applicability and acceptance ownership. Expected errors are typed; resource cleanup must run on asynchronous exceptions without swallowing them.
 
 
 ## Plan of Work
@@ -65,6 +74,8 @@ Follow GHC >=9.12, GHC2024, strict unprefixed records, explicit deriving strateg
 Create optparse commands `fixture plan NAME...`, `fixture load NAME...`, and `fixture validate NAME...|--all`. Direct load requires an explicit target and is documented as a write to a caller-controlled test database. Validation uses isolated clones and tests each selected scenario separately with bounded workers and declaration-order results. Plan does not connect to PostgreSQL. Return versioned JSON containing identifiers, phase, stable error code, fixture/step context, and safe target metadata, with human diagnostics on stderr when JSON is selected.
 
 Compose Settei defaults, explicitly repeated YAML config files, explicit environment bindings, and repeated CLI overrides in that order. Expose schema diagnostics before reading files, and explanation/check diagnostics after resolution but before action. Declare credentials secret at the settings boundary and preserve report redaction. CLI migration/verification hooks become executable+argv, cwd, explicit environment overlay, revision, and deadline; a migration command path alone cannot authorize persistent reuse.
+
+Group connection, fixture, lifecycle, and output options following `mori://shinzui/haskell-jitsurei/docs/cli-option-groups`. Add `completions bash|zsh|fish` derived from the actual parser and `--version` showing package version plus available build revision, following `mori://shinzui/haskell-jitsurei/docs/cli-shell-completions` and `mori://shinzui/haskell-jitsurei/docs/cli-version-git-sha`. Verify current dependency APIs before adopting examples. Help/version/completion must dispatch before operational configuration or PostgreSQL access. Test nested-command completion, shell argument quoting, normal help, and absent-Git version fallback. Wire reproducible revision injection through unmanaged `flake.module.nix`; do not edit generated Seihou files. Centralize JSON options in the core prelude and keep CLI DTO encoders explicit where redaction/versioned fields require it.
 
 ### Milestone 2: Lease commands and process handoff
 
@@ -78,7 +89,7 @@ Preserve exact child exit status when the child fails; report accompanying clean
 
 Build `examples/workbench/` with a small database-backed fixture service, fixture sources, a Hinagata YAML configuration, a service wrapper, and an ordinary hurl-workbench manifest/Hurl file. The wrapper maps lease environment to the service's Settei settings. Define the service command/readiness in the existing workbench schema. Pin a verified released tool or documented immutable revision; do not reference a developer's absolute checkout in checked-in files.
 
-Demonstrate the service opens the clone and an HTTP assertion sees committed seeded state. Run two isolated suites with distinct ports and leases. A workbench matrix sharing one service is not per-case database isolation; document separate suite invocations for that guarantee. Update README/CLI help with direct socket loading, cleanup, detached resources, and the sample commands. Keep the example's server test-only rather than adding service orchestration to the library.
+Apply `mori://shinzui/haskell-jitsurei/docs/api-hurl-integration-testing` to this example: organize files by resource family; assert status for every request and media type/stable semantics for every body-bearing response; include a relevant negative case. Explicitly list independent default files, keep writes/special configurations opt-in with their prerequisites, and document fixture identities/cardinality and repeatability. Hurl/hurlfmt are reproducible external test tools, not Cabal dependencies. Add `hurlfmt --check`; workbench continues to own readiness, execution, and process cleanup. Demonstrate the service opens the clone and an HTTP assertion sees committed seeded state. Run two isolated suites with distinct ports and leases. A workbench matrix sharing one service is not per-case database isolation; document separate suite invocations for that guarantee. Update README/CLI help with direct socket loading, cleanup, detached resources, and the sample commands. Keep the example's server test-only rather than adding service orchestration to the library.
 
 
 ## Concrete Steps

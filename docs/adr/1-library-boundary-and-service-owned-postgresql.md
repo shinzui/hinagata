@@ -18,6 +18,8 @@ Development tooling is bootstrapped by `mori://shinzui/seihou-modules/templates/
 
 Administration, setup, and application endpoints have explicit roles. Application handoff never implicitly uses administrative credentials. Suite-scoped resource limits and result classification belong to the library; adapters may map test-framework outcomes without introducing a framework dependency. Service bootstrap retains global-role ownership.
 
+The [standards applicability audit](../research/haskell-standards-audit.md) defines the cross-package Haskell baseline and selected CLI patterns. Informational CLI paths are offline; Hurl standards apply to example services through workbench. Public module boundaries also prevent transitive generic-lens orphan exposure to consumers.
+
 ## Consequences
 
 Existing PostgreSQL is reused without startup cost. Services receive clone settings before startup. No Hurl parser, invented workbench hook, or private runtime-table mutation is introduced. Portable dump snapshots, provisioning, and general orchestration are deferred. Cluster-local baseline snapshots are included under [ADR 3](3-sealed-baselines-and-positive-database-ownership.md).

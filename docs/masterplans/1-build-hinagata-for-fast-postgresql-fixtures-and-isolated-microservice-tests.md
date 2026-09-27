@@ -21,6 +21,11 @@ provenance:
       at: 2026-09-27T00:16:30Z
       mode: "update"
       note: "Incorporate prior-art source review into contracts and acceptance."
+    - model: "gpt-6-astra"
+      harness: "codex-cli"
+      at: 2026-09-27T04:33:49Z
+      mode: "update"
+      note: "Audit applicable haskell-jitsurei standards and make missing acceptance requirements explicit."
 ---
 
 # Build Hinagata for fast PostgreSQL fixtures and isolated microservice tests
@@ -89,6 +94,8 @@ The first plan bootstraps the environment through `mori://shinzui/seihou-modules
 The durable boundaries are recorded in the three local ADRs: service/library ownership, private native streaming sessions, and sealed baselines with positive deletion authority. Changes to these interfaces require ADR updates in the same implementation change.
 
 
+The [Haskell standards audit](../research/haskell-standards-audit.md) owns the applicability map. EP-1 establishes complete component baseline coverage, prelude/record conventions, and `just check-conventions`; all children extend that gate. EP-4 owns selected CLI help/completion/version patterns and example Hurl contract checks; EP-5 verifies release distributions and real-service acceptance. Hurl remains an external example/CI tool, and Settei supersedes legacy configuration patterns.
+
 ## Progress
 
 Planning complete; 0 of 5 child plans implemented. The first child is ready to begin. The remaining children await their stated implementation prerequisites, not missing user input. All integration/performance/release gates are assigned to the fifth child, with focused correctness proofs required earlier. No benchmark result or package build is claimed by this planning change.
@@ -100,6 +107,8 @@ The [prior-art review](../research/prior-art.md) supports prepared templates and
 
 
 ## Decision Log
+
+2026-09-26: Audit haskell-jitsurei beyond the three initial core citations. Make inherited Cabal settings, optic/prelude rules, serialization policy, multiline literals, selected CLI patterns, and example Hurl assertions explicit. Distinguish universal core standards from optional patterns; no new subsystem or child plan is needed.
 
 2026-09-26: Incorporate the source review through the existing five plans: reusable prepared handles, exact base/scenario composition, bounded cancellable admission, explainable reuse, realistic application roles, and failure-result classification. EP-1 owns pure identities/configuration; EP-3 owns lifecycle/report semantics; EP-4 presents them; EP-5 verifies consumer behavior and performance. Keep spare clones as an evidence-triggered experiment, with no new daemon or public pool in initial scope.
 
@@ -122,3 +131,5 @@ The [prior-art review](../research/prior-art.md) supports prepared templates and
 
 
 Revision note (2026-09-26): Prior-art research tightens shared contracts and acceptance across the five existing children. Their dependency order and Not Started status are unchanged; no upstream timing is treated as measured Hinagata performance.
+
+Revision note (2026-09-26): Standards applicability audit closes planning omissions and assigns conventions, CLI tooling, and HTTP-example checks to existing children. Implementation compliance remains unverified until those gates run.
