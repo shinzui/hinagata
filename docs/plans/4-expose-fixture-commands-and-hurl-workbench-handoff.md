@@ -11,6 +11,12 @@ provenance:
     model: "gpt-6-astra"
     harness: "codex-cli"
     at: 2026-09-26T23:47:59Z
+  revisions:
+    - model: "gpt-6-astra"
+      harness: "codex-cli"
+      at: 2026-09-27T00:16:30Z
+      mode: "update"
+      note: "Incorporate prior-art source review into contracts and acceptance."
 ---
 
 # Expose fixture commands and hurl-workbench handoff
@@ -62,9 +68,9 @@ Compose Settei defaults, explicitly repeated YAML config files, explicit environ
 
 ### Milestone 2: Lease commands and process handoff
 
-Add `db prepare`, `db acquire`, `db release ID`, `db with --fixture NAME -- PROGRAM ARGS...`, `inspect ID`, and `clean`. `clean` previews; `--apply` revalidates before removal, and retained resources require selection. `db acquire --json` creates a Detached lease and emits safe fields/ID; it does not expose credentials. Every command delegates to the library without implementing SQL or ownership logic.
+Add `db prepare`, `db acquire`, `db release ID`, `db with --fixture NAME -- PROGRAM ARGS...`, `inspect ID`, and `clean`. `clean` previews; `--apply` revalidates before removal, and retained resources require selection. `db acquire --json` creates a Detached lease and emits safe fields/ID; it does not expose credentials. Every command delegates to the library without implementing SQL or ownership logic. Preparation/inspection JSON includes fingerprint component categories, reuse/build reason, lifecycle state, and phase timings from library reports. Do not emit secrets or raw fixture data. Test first build, warm reuse, fixture/hook/role invalidation, timeout/saturation, and stable error codes. `fixture plan` remains offline and cannot claim that a database cache entry is reusable.
 
-For `db with`, acquire/load before spawning one generic child and overlay only the chosen target variables plus HINAGATA_RUN_ID/HINAGATA_LEASE_ID. Include a correctly escaped secret-safe-by-default `HINAGATA_DATABASE` name; optional connection material is delivered through explicit process environment/secret channels rather than logs or argv. Do not mutate the parent process environment. Start the wrapper in its own POSIX process group, forward interruption, terminate descendants with a bounded TERM→KILL escalation, and reap before releasing the lease. A nested workbench process owns its service group; graceful signal handling must get time to finish that cleanup. If descendants cannot be proven stopped, retain the lease and report cleanup failure instead of claiming a clean release. Make process failure, spawn failure, cancellation, and database cleanup failure distinct outcomes.
+For `db with`, use a scoped library manager and classify child outcomes explicitly. Select only application access for child connection variables; test that administration/setup credentials cannot leak into the overlay or diagnostic reports. Acquire/load before spawning one generic child and overlay only the chosen target variables plus HINAGATA_RUN_ID/HINAGATA_LEASE_ID. Include a correctly escaped secret-safe-by-default `HINAGATA_DATABASE` name; optional connection material is delivered through explicit process environment/secret channels rather than logs or argv. Do not mutate the parent process environment. Start the wrapper in its own POSIX process group, forward interruption, terminate descendants with a bounded TERM→KILL escalation, and reap before releasing the lease. A nested workbench process owns its service group; graceful signal handling must get time to finish that cleanup. If descendants cannot be proven stopped, retain the lease and report cleanup failure instead of claiming a clean release. Make process failure, spawn failure, cancellation, and database cleanup failure distinct outcomes.
 
 Preserve exact child exit status when the child fails; report accompanying cleanup failures separately. A successful child followed by cleanup failure exits 1. Settei exit codes remain usage 2, source 3, resolution 4. Support `--preserve-on-failure` with an inspectable ID for child failures. No Hurl-specific syntax or command is added.
 

@@ -16,6 +16,11 @@ provenance:
       at: 2026-09-27T00:02:36Z
       mode: "update"
       note: "Incorporate requested Seihou bootstrap and clarify reusable template snapshots."
+    - model: "gpt-6-astra"
+      harness: "codex-cli"
+      at: 2026-09-27T00:16:30Z
+      mode: "update"
+      note: "Incorporate prior-art source review into contracts and acceptance."
 ---
 
 # Build Hinagata for fast PostgreSQL fixtures and isolated microservice tests
@@ -73,7 +78,9 @@ The first plan owns `Hinagata.Connection`, `Hinagata.Fixture.Types`, `Hinagata.C
 
 The second plan owns `Hinagata.Postgres.Session`, `Load`, backend errors, and the private libpq protocol/lifetime implementation. The third extends that adapter for catalog and administrative operations; it does not create another connection stack. One fixture transaction owns one exclusive connection; COPY and SQL share ordering and failure semantics. The reusable test PostgreSQL harness is owned by the second plan and extended by subsequent integration tests.
 
-The third plan owns baseline fingerprints, `BaselineSpec`/`BaselineRef`, migration/verification/clone hooks, `LeaseInfo`, all catalog DDL/state transitions, and cleanup authority. A hook takes an endpoint and must close its connections before return. The fourth adapts CLI command specs into those hooks. The fifth supplies real application migration/verification hooks, including the complete composed runtime migration plan. Neither downstream plan writes maintenance records directly.
+The first plan also owns per-fixture identities and pure base/scenario composition. The lifecycle layer alone authorizes skipping the verified base prefix on a fresh clone.
+
+The third plan owns the suite-scoped manager, bounded admission, callback-result classification, explainable preparation reports, baseline fingerprints, `BaselineSpec`/`BaselineRef`, migration/verification/clone hooks, `LeaseInfo`, all catalog DDL/state transitions, and cleanup authority. A hook takes an endpoint and must close its connections before return. The fourth adapts CLI command specs into those hooks and emits their reports; it passes application access to child processes. Administration/setup/application access descriptions and their Settei declarations originate in the first plan. The fifth proves role behavior and accounts for manager plus application connections. The fifth supplies real application migration/verification hooks, including the complete composed runtime migration plan. Neither downstream plan writes maintenance records directly.
 
 The fourth plan owns command grammar, JSON formatVersion 1, Settei source assembly, environment handoff, child exit mapping, and generic process-group cleanup. Library errors retain their original phase/cause. It hands connection fields to a wrapper before service startup. Workbench owns its own nested service lifecycle. If process termination cannot be established, preserve the lease with a cleanup error instead of claiming safe release.
 
@@ -89,8 +96,12 @@ Planning complete; 0 of 5 child plans implemented. The first child is ready to b
 
 ## Surprises & Discoveries
 
+The [prior-art review](../research/prior-art.md) supports prepared templates and per-test clones. It exposed an underspecified base/scenario overlap: shared fixtures must be compared by captured identity and excluded only from a verified baseline prefix. A result returned as a value can also represent test failure, requiring explicit classification for preservation.
+
 
 ## Decision Log
+
+2026-09-26: Incorporate the source review through the existing five plans: reusable prepared handles, exact base/scenario composition, bounded cancellable admission, explainable reuse, realistic application roles, and failure-result classification. EP-1 owns pure identities/configuration; EP-3 owns lifecycle/report semantics; EP-4 presents them; EP-5 verifies consumer behavior and performance. Keep spare clones as an evidence-triggered experiment, with no new daemon or public pool in initial scope.
 
 2026-09-26: Use the `mori://shinzui/seihou-modules/templates/nix-haskell-flake` bootstrap, as requested, and keep project changes in its supported unmanaged seams.
 
@@ -108,3 +119,6 @@ Planning complete; 0 of 5 child plans implemented. The first child is ready to b
 
 
 ## Outcomes & Retrospective
+
+
+Revision note (2026-09-26): Prior-art research tightens shared contracts and acceptance across the five existing children. Their dependency order and Not Started status are unchanged; no upstream timing is treated as measured Hinagata performance.

@@ -11,6 +11,12 @@ provenance:
     model: "gpt-6-astra"
     harness: "codex-cli"
     at: 2026-09-26T23:47:59Z
+  revisions:
+    - model: "gpt-6-astra"
+      harness: "codex-cli"
+      at: 2026-09-27T00:16:30Z
+      mode: "update"
+      note: "Incorporate prior-art source review into contracts and acceptance."
 ---
 
 # Prove Keiro service integration and performance
@@ -60,7 +66,7 @@ Create an internal example package with a small Keiro service, application-owned
 
 Compose all required migration components in one complete plan with an application revision covering embedded SQL. Run ledger verification and owner-supplied live-schema verification separately. Base/scenario SQL and CSV may write application-owned reference data. Any event, outbox, or workflow setup uses the runtime's public command/store APIs in an application-owned hook or through the example HTTP flow; do not COPY invented runtime rows. Exercise a command followed by an HTTP read that proves the seeded reference state and runtime behavior work together. If projections are asynchronous, use a public consistency target/readiness predicate with a deadline, not a fixed sleep or fabricated sequence position.
 
-Use the caller's socket cluster and service Settei mapping. Demonstrate isolation with two service instances on separate ports/leases. Also compose two named database leases and show failure of the second acquisition cleans the first. In this example, required globally installed roles/extensions are setup prerequisites, not hidden operations in fixture SQL.
+Use the caller's socket cluster and service Settei mapping. Demonstrate separate administration/setup/application roles, an allowed application operation and a denied privileged operation, and a generated-ID insert after explicit-ID fixtures. A scenario including its base reference fixture must succeed without reloading that fixture. Publish small runnable library examples for prepare-once/repeated-leases and test failures returned as values, in addition to the CLI example. Demonstrate isolation with two service instances on separate ports/leases. Also compose two named database leases and show failure of the second acquisition cleans the first. In this example, required globally installed roles/extensions are setup prerequisites, not hidden operations in fixture SQL.
 
 ### Milestone 2: Repeatable latency, throughput, and memory evidence
 
@@ -69,6 +75,10 @@ Create deterministic data generators for 100/1,000-row scenario fixtures and 100
 Measure cold bundle compilation, cold baseline construction, warm reuse, clone allocation, fixture transaction, release, CLI overhead, and end-to-end service/Hurl time separately using a monotonic clock. Measure retained library sessions independently of fresh CLI invocations. Run at least 30 warm small-scenario samples and 5 repetitions per bulk case after warm-up; report median/p95 with sample counts, and do not present five-sample p95 as a stable tail estimate. Record GHC/RTS flags, PostgreSQL/client versions, OS/CPU/storage, schema/data sizes, concurrency, and whether filesystem caches are warm. Use RTS allocation/residency statistics plus process RSS, explaining that PostgreSQL server memory is separate.
 
 Release targets from the spec are bulk COPY elapsed time <=1.25× equivalent `psql`, incremental client residency <=64 MiB for tenfold input growth, and warm small setup median <250 ms/p95 <500 ms on the documented reference machine. Compare template cloning with rebuild on the same small and large baselines; report speedup without assuming a fixed factor. Exercise concurrency 1/4/8 with the configured worker cap and report throughput versus tail latency. Keep microbenchmark noise out of ordinary correctness CI; run release performance gates on a documented reference environment.
+
+Measure queue/lock waits and maximum connection counts, including guard sessions and application pools, under saturated demand. Compare repeated acquisition through one prepared manager with fresh CLI calls. Instrument source reads/migration/COPY calls to prove unchanged base inputs are not rehashed or reloaded per lease. Record the fixture's ANALYZE policy and separate transfer time from analysis and subsequent service-query latency.
+
+If clone creation dominates measured setup, run a bounded spare-clone experiment using disposable owned databases. Compare on-demand allocation and prepared spares for acquisition p95, total preparation/replenishment cost, disk space, and maximum connections at the same concurrency. Record an adopt/defer conclusion; no public pooling API or background daemon is required for completion. Any adoption first updates the spec and lifecycle plan with explicit ownership/cancellation/resource semantics. Never recycle a used clone without recreating it.
 
 When a target misses, profile the specific phase, improve it under the existing ownership/transaction contract, and rerun only affected measurements. Do not disable fsync, constraints, triggers, or isolation to claim speed. Any changed budget/strategy requires an explicit evidence-backed spec/ADR/plan revision before completion. A COPY buffer size or clone strategy is a measured tuning choice, not an excuse for multiple public execution models.
 

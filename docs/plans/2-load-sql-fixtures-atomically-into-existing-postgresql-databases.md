@@ -11,6 +11,12 @@ provenance:
     model: "gpt-6-astra"
     harness: "codex-cli"
     at: 2026-09-26T23:47:59Z
+  revisions:
+    - model: "gpt-6-astra"
+      harness: "codex-cli"
+      at: 2026-09-27T00:16:29Z
+      mode: "update"
+      note: "Incorporate prior-art source review into contracts and acceptance."
 ---
 
 # Load SQL fixtures atomically into existing PostgreSQL databases
@@ -74,6 +80,8 @@ Use libpq's nonblocking query/COPY operations with a single protocol owner and b
 
 Add the test fixture runner `scripts/test-postgres.sh` and `just test-postgres`, with private temporary directories, TCP disabled, safe trap cleanup, and a caller-supplied existing socket mode. Tests cover a socket directory containing spaces, server disconnect, cancellation during COPY, two simultaneous operations on one session, reuse after rollback, and refusal after closure. Collect a first direct-load benchmark, reused by the final integration plan, so regression investigation begins before the CLI exists.
 
+
+Fixture examples must cover a deterministic explicit-ID load followed by an application insert using a generated ID. Authors supply any necessary schema-qualified sequence adjustment as ordinary fixture SQL; do not infer it in the loader. Demonstrate an explicitly requested ANALYZE step after bulk COPY, accounting for its elapsed time separately. Confirm statement ordering and retain the documented nontransactional sequence caveat. These examples adopt the [prior-art review](../research/prior-art.md) without adding a reset or schema-rewriting subsystem.
 
 ## Concrete Steps
 

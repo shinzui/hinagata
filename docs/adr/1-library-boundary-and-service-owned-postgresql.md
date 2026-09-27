@@ -16,6 +16,8 @@ Configuration uses Settei; library callers can pass resolved values. Public type
 
 Development tooling is bootstrapped by `mori://shinzui/seihou-modules/templates/nix-haskell-flake`, with its managed lock/modules preserved and project customizations in `flake.module.nix`. This is a development dependency; production library calls do not bootstrap PostgreSQL.
 
+Administration, setup, and application endpoints have explicit roles. Application handoff never implicitly uses administrative credentials. Suite-scoped resource limits and result classification belong to the library; adapters may map test-framework outcomes without introducing a framework dependency. Service bootstrap retains global-role ownership.
+
 ## Consequences
 
-Existing PostgreSQL is reused without startup cost. Services receive clone settings before startup. No Hurl parser, invented workbench hook, or private runtime-table mutation is introduced. Snapshots, provisioning, and general orchestration are deferred.
+Existing PostgreSQL is reused without startup cost. Services receive clone settings before startup. No Hurl parser, invented workbench hook, or private runtime-table mutation is introduced. Portable dump snapshots, provisioning, and general orchestration are deferred. Cluster-local baseline snapshots are included under [ADR 3](3-sealed-baselines-and-positive-database-ownership.md).

@@ -30,9 +30,15 @@ The PostgreSQL package uses `postgresql-libpq` behind a private exclusive-sessio
 
 Provide bracketed library operations: acquire a session or lease, invoke a callback, and release after success, failure, or cancellation. Expected operational failures are typed values. Unexpected and asynchronous exceptions propagate after cleanup. Preserve the primary failure alongside cleanup diagnostics. Abrupt process death is handled through recorded ownership and explicit recovery.
 
+Retain compiled plans and opaque baseline references across a suite. A bracketed, suite-scoped manager bounds concurrent setup, active leases, and pending acquisition requests without requiring a daemon. Waiting is cancellable and consumes the same acquisition deadline as lock waits and setup. Limits are local to that manager; callers sharing a cluster budget aggregate concurrency and application connection pools. Report queue saturation and timeout phases explicitly.
+
+A lease callback may return a test failure as a value. Provide an explicit result classifier for success/failure so preserve-on-failure does not depend solely on exceptions or a particular test framework. Cancellation remains a distinct outcome; cleanup cannot replace the original result or exception.
+
 ## Connection and configuration
 
 Represent Unix socket directory and TCP host as distinct choices, with explicit port, user, database, optional secret credentials, and deadlines. A socket directory is the libpq `host` value. Socket failure must never silently fall back to TCP. Render correctly escaped libpq keyword connection strings and explicit child variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`), not a socket path embedded as a URL hostname. Secret-bearing values have redacted displays.
+
+Separate administration, setup, and application access descriptions. The administration target manages the maintenance catalog and database lifecycle; setup credentials run migrations/fixtures; the application endpoint is handed to consumers. Roles already exist through service bootstrap. Never silently hand administrative credentials to the application. A caller may explicitly choose the same role for several purposes; ordinary examples use application permissions representative of the service.
 
 Use Settei for settings. CLI precedence is built-ins, explicit YAML files in occurrence order, explicitly bound environment variables, then `--set KEY=VALUE` occurrences. Initially use the direct YAML adapter and `--config PATH`. The library takes resolved values and does not implicitly inspect files or the environment. Fixture manifests are strictly decoded source data, not an alternative settings system.
 
@@ -72,17 +78,23 @@ Execute the full closure, including SQL and CSV steps, in one transaction on one
 
 Drain every PostgreSQL result, including COPY completion. On malformed CSV, SQL failure, disconnect, deadline, or cancellation, roll back or discard a connection whose protocol state cannot be recovered. Never reuse a connection left in COPY mode. Rollback covers transactional writes; PostgreSQL sequence advancement and external effects are outside this guarantee. Direct loading requires exclusive caller control and deterministic fixture IDs for reproducibility.
 
+When explicit fixture IDs affect later generated IDs, fixture authors supply schema-aware sequence SQL and verify a subsequent application insert. Hinagata does not infer or rewrite sequence ownership. Bulk examples declare their ANALYZE policy as explicit fixture SQL before sealing/handoff and report its time separately from transfer; direct loading never silently analyzes unrelated tables.
+
 Deduplication applies within one plan, not across calls. A repeated load executes again and may fail on uniqueness constraints. Use a new clone or deliberately idempotent fixture SQL to rerun.
 
 ## Baseline construction and reuse
 
 A sealed baseline is the initial snapshot mechanism: it materializes migrations and a chosen fixture closure once, then clones that state without replaying or reloading it. Projects may prepare several baseline variants, including a large frequently reused scenario as the base closure, keyed by their input fingerprints. Cloning still copies database data and is not a constant-time filesystem snapshot. Portable `pg_dump` artifacts for restoring onto a fresh cluster are deferred; reuse initially lasts for the life of the existing cluster.
 
+For a known baseline, resolve one combined graph with its base roots first and scenario roots second. The frozen base closure is a prefix of that order. Execute only the remainder on a fresh clone; shared fixture names must match the baseline's captured definition and content identity, including includes and COPY options. Reject conflicts before allocating. No baseline-aware skipping applies to direct loads or arbitrary previously used databases. A prepared baseline reference amortizes hashing, but acquisition still revalidates catalog/database identity and sealed state.
+
 Create a fresh generation from `template0`, invoke the application migration hook, load base fixtures, verify, close all connections, disable baseline connections, and publish. Failed construction never publishes an incomplete baseline or destroys the last valid generation. Clone from a separate maintenance connection outside a transaction.
 
 The migration/verification hooks accept a target endpoint. They can invoke public Haskell APIs or an executable plus argv, working directory, explicit environment, and deadline. Never implicitly evaluate shell text. The application supplies one complete migration plan. Hinagata does not invent writes to private Keiro/Kiroku/PGMQ tables.
 
-A baseline fingerprint covers format version, project identity, explicit migration revision, ordered base-bundle digests, non-secret schema-affecting configuration, PostgreSQL major version, and extension/locale requirements. Opaque command text is not a migration identity: include embedded migration/build inputs, or rebuild rather than persistently reuse. Secrets are not stored as fingerprint inputs.
+A baseline fingerprint covers format version, project identity, explicit migration revision, ordered base-bundle digests, non-secret schema-affecting configuration, PostgreSQL major version, and extension/locale requirements. Opaque command text is not a migration identity: include embedded migration/build inputs, or rebuild rather than persistently reuse. Include non-secret owner/setup/application role identities, declared grants/settings, and revisions for state-affecting hooks. Secrets and password-derived digests are not fingerprint inputs. An unversioned state-affecting hook also prevents persistent reuse.
+
+Keep a versioned fingerprint manifest and report reuse/build reasons and changed input categories against a selected previous generation. Distinguish first construction, changed inputs, unknown revision, and invalid database identity. Expose phase timings without SQL/CSV payloads. Concurrent waiters observe Ready or a failed generation; cancellation of a waiter does not cancel another caller's builder, and failed builds permit an explicit later retry.
 
 Scope reuse to a cluster identity stored in a Hinagata-owned maintenance catalog. Verify recorded database identity; server restart retains catalog identity, cluster recreation invalidates it. Do not require superuser-only cluster inspection. Serialize construction per fingerprint using an advisory lock, record allocation intent before CREATE DATABASE, bind actual identity afterward, and publish atomically. Handle ambiguous crash windows by inspection rather than guessing from a prefix. Coordinate acquisition, baseline retirement, and cleanup under the same locking protocol.
 
@@ -112,8 +124,8 @@ Follow `mori://shinzui/haskell-jitsurei/docs/core-standards`, `mori://shinzui/ha
 
 Acceptance includes deterministic graphs, socket direct loading, SQL/COPY rollback and cancellation, clone isolation under concurrency, baseline invalidation, cleanup identity refusal, Settei precedence/redaction, and a runnable Keiro service example tested through hurl-workbench. Distinguish migration-ledger verification from owner-supplied live-schema verification.
 
-Benchmark 100/1,000-row scenarios and 100,000/1,000,000-row CSV fixtures. Separate cold compilation/build, warm reuse, cloning, loading, cleanup, and end-to-end cost. Record median/p95, rows/second, allocation, maximum client residency, and machine/toolchain/PostgreSQL/storage details. Compare against equivalent single-session `psql` SQL/COPY and full database rebuilding on identical inputs.
+Benchmark 100/1,000-row scenarios and 100,000/1,000,000-row CSV fixtures. Separate cold compilation/build, warm reuse, cloning, loading, cleanup, and end-to-end cost. Record median/p95, rows/second, allocation, maximum client residency, and machine/toolchain/PostgreSQL/storage details. Compare against equivalent single-session `psql` SQL/COPY and full database rebuilding on identical inputs. Measure queue/lock waiting and the total connection budget, including lease guards and application pools. If cloning dominates, evaluate a bounded spare-clone experiment with full preparation/storage costs before proposing a pool; initial acquisition creates fresh clones on demand.
 
 Proposed release gates: bulk COPY within 25% of `psql` elapsed time; no more than 64 MiB additional client residency for tenfold bulk input growth; warm small-scenario setup under 250 ms median/500 ms p95 on the documented reference machine. These are targets, not measurements. If infeasible, record evidence and explicitly revise the gate before declaring completion. Never silently disable durability globally to meet a target.
 
-The [MasterPlan](masterplans/1-build-hinagata-for-fast-postgresql-fixtures-and-isolated-microservice-tests.md) coordinates implementation. [Research](research/initial-design.md) records sources and dependency observations. No implementation exists yet.
+The [MasterPlan](masterplans/1-build-hinagata-for-fast-postgresql-fixtures-and-isolated-microservice-tests.md) coordinates implementation. [Initial research](research/initial-design.md) records dependency observations; the [prior-art review](research/prior-art.md) records source evidence and adopted/deferred ideas. No implementation exists yet.

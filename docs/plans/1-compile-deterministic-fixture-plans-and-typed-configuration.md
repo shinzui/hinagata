@@ -17,6 +17,11 @@ provenance:
       at: 2026-09-27T00:02:36Z
       mode: "update"
       note: "Require nix-haskell-flake bootstrap and preserve managed environment ownership."
+    - model: "gpt-6-astra"
+      harness: "codex-cli"
+      at: 2026-09-27T00:16:29Z
+      mode: "update"
+      note: "Incorporate prior-art source review into contracts and acceptance."
 ---
 
 # Compile deterministic fixture plans and typed configuration
@@ -78,11 +83,13 @@ Decode the manifest format in `docs/initial-spec.md` with strict unknown-field c
 
 Create private bundle directories by atomic temporary-directory publication. Copy/hash CSV in fixed-size chunks; read bounded SQL steps once. Hash a versioned canonical encoding of ordered names, includes, step kinds/options, lengths, and content digests, not filesystem mtimes or unspecified Map/Show output. Reject source changes detected during capture and do not publish partial bundles. Execution uses captured data even if original sources subsequently change. Persistent cached bundles must be integrity-checked before reuse; library calls can retain a validated in-process plan to avoid repeated hashing. An incomplete/modified cache is rebuildable.
 
+Preserve per-fixture canonical identities and the resolved graph in the bundle manifest. Add a pure composition operation that resolves base roots before scenario roots and returns the base prefix plus remaining steps. Shared names require identical captured definitions/content/dependencies. Refuse mismatches before producing an executable remainder; tests cover shared dependencies, conflicting bytes/options/includes, unrelated base fixtures, and stable order. This operation alone confers no database reuse authority; the lifecycle layer must verify the corresponding baseline. Direct loads still execute their entire plan on every call.
+
 Implement the SQL policy scanner needed to reject top-level transaction control (including BEGIN/START TRANSACTION, COMMIT/END, ROLLBACK/ABORT, SAVEPOINT/RELEASE, and PREPARE TRANSACTION), COPY statements, and psql commands. Handle nested comments, standard/escape strings, quoted identifiers, and dollar-quoted bodies. It is a policy lexer, not full SQL validation; do not reject a dollar-quoted function body merely because it contains those words. Keep SQL bytes intact for PostgreSQL. Document trusted stored functions/external effects and limits of this check.
 
 ### Milestone 3: Typed configuration declaration
 
-Define `hinagataConfig :: Settei.Config HinagataConfig` with explicit endpoint, project identity, fixture/bundle paths, maintenance database/schema, deadlines, worker count, chunk size, and SQL size limit. No default database authorizes mutation. Operational defaults are visible Settei sources/rules. Provide validated explicit environment bindings; no wildcard environment discovery. Retain library callers' ability to construct resolved values directly. Source file IO and optparse wiring remain CLI work.
+Define `hinagataConfig :: Settei.Config HinagataConfig` with explicit endpoint, project identity, fixture/bundle paths, maintenance database/schema, explicit administration/setup/application access, deadlines, setup-worker/active-lease/pending-request limits, chunk size, and SQL size limit. No default database authorizes mutation. Declare the concurrency limits as manager-local and keep the three access purposes explicit; never default an application endpoint from administrative credentials. Operational defaults are visible Settei sources/rules. Provide validated explicit environment bindings; no wildcard environment discovery. Retain library callers' ability to construct resolved values directly. Source file IO and optparse wiring remain CLI work.
 
 Create `just check`, `just fmt-check`, and focused core-test commands; make the Nix gate validate the package and tests. Publish module documentation and source-distribution checks. All command additions must execute real gates rather than placeholders.
 
