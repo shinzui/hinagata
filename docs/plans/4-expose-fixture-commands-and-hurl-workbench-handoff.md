@@ -22,6 +22,17 @@ provenance:
       at: 2026-09-27T04:33:49Z
       mode: "update"
       note: "Audit applicable haskell-jitsurei standards and make missing acceptance requirements explicit."
+    - model: "claude-fable-5-1"
+      harness: "claude-code"
+      at: 2026-10-01T00:30:12Z
+      mode: "update"
+      note: "Fix child env overlay to PG* plus run/lease IDs, PGPASSFILE password channel, explicit child stdin"
+  reviews:
+    - model: "claude-fable-5-1"
+      harness: "claude-code"
+      at: 2026-10-01T00:27:54Z
+      verdict: "changes-requested"
+      note: "Env overlay conflicts with spec (HINAGATA_DATABASE); define password channel and child stdin for the process group"
 ---
 
 # Expose fixture commands and hurl-workbench handoff
@@ -47,6 +58,8 @@ Developers can inspect fixture plans, load an existing socket database, validate
 ## Decision Log
 
 2026-09-26: Use a generic executable-plus-argv lease wrapper, not a new Hurl runner or workbench fixture schema. Use Settei's direct YAML adapter and standard diagnostic/exit conventions; expose no shell-evaluated environment output.
+
+2026-09-30: Fix the child environment overlay to exactly `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, `HINAGATA_RUN_ID`, and `HINAGATA_LEASE_ID`, dropping the earlier ambiguous `HINAGATA_DATABASE` variable so the spec, MasterPlan, and example wrapper agree. A password, when one exists, travels only through a private `PGPASSFILE`. The child gets an explicit stdin because a background process group reading the terminal is stopped by SIGTTIN.
 
 
 ## Outcomes & Retrospective
@@ -81,7 +94,7 @@ Group connection, fixture, lifecycle, and output options following `mori://shinz
 
 Add `db prepare`, `db acquire`, `db release ID`, `db with --fixture NAME -- PROGRAM ARGS...`, `inspect ID`, and `clean`. `clean` previews; `--apply` revalidates before removal, and retained resources require selection. `db acquire --json` creates a Detached lease and emits safe fields/ID; it does not expose credentials. Every command delegates to the library without implementing SQL or ownership logic. Preparation/inspection JSON includes fingerprint component categories, reuse/build reason, lifecycle state, and phase timings from library reports. Do not emit secrets or raw fixture data. Test first build, warm reuse, fixture/hook/role invalidation, timeout/saturation, and stable error codes. `fixture plan` remains offline and cannot claim that a database cache entry is reusable.
 
-For `db with`, use a scoped library manager and classify child outcomes explicitly. Select only application access for child connection variables; test that administration/setup credentials cannot leak into the overlay or diagnostic reports. Acquire/load before spawning one generic child and overlay only the chosen target variables plus HINAGATA_RUN_ID/HINAGATA_LEASE_ID. Include a correctly escaped secret-safe-by-default `HINAGATA_DATABASE` name; optional connection material is delivered through explicit process environment/secret channels rather than logs or argv. Do not mutate the parent process environment. Start the wrapper in its own POSIX process group, forward interruption, terminate descendants with a bounded TERM→KILL escalation, and reap before releasing the lease. A nested workbench process owns its service group; graceful signal handling must get time to finish that cleanup. If descendants cannot be proven stopped, retain the lease and report cleanup failure instead of claiming a clean release. Make process failure, spawn failure, cancellation, and database cleanup failure distinct outcomes.
+For `db with`, use a scoped library manager and classify child outcomes explicitly. Select only application access for child connection variables; test that administration/setup credentials cannot leak into the overlay or diagnostic reports. Acquire/load before spawning one generic child and overlay exactly `PGHOST`, `PGPORT`, `PGUSER`, and `PGDATABASE` from the application endpoint plus `HINAGATA_RUN_ID` and `HINAGATA_LEASE_ID`; define no other Hinagata variable. No variable ever carries a password: when the application role needs one, write it to a private mode-0600 password file created for this child, point `PGPASSFILE` at it, and remove the file after the child is reaped; with Unix-socket peer authentication no password material exists at all. Do not mutate the parent process environment. Start the wrapper in its own POSIX process group and give it an explicit stdin (`/dev/null`) rather than the terminal, because a background process group that reads the terminal is stopped by SIGTTIN. Forward SIGINT and SIGTERM received by the CLI to that group, terminate descendants with a bounded TERM→KILL escalation, and reap before releasing the lease. A nested workbench process owns its service group; graceful signal handling must get time to finish that cleanup. If descendants cannot be proven stopped, retain the lease and report cleanup failure instead of claiming a clean release. Make process failure, spawn failure, cancellation, and database cleanup failure distinct outcomes.
 
 Preserve exact child exit status when the child fails; report accompanying cleanup failures separately. A successful child followed by cleanup failure exits 1. Settei exit codes remain usage 2, source 3, resolution 4. Support `--preserve-on-failure` with an inspectable ID for child failures. No Hurl-specific syntax or command is added.
 
@@ -120,6 +133,6 @@ Never shell-evaluate emitted JSON or pass secret connection strings in argv. Rep
 
 ## Interfaces and Dependencies
 
-The CLI calls core compilation/configuration and PostgreSQL load/lease APIs. `Cli.Process` owns only the generic child lifecycle, never HTTP readiness or Hurl interpretation. `Cli.Output` owns JSON formatVersion 1 and exit translation; database error semantics remain in the library. Environment transport is an explicit map over validated endpoint fields, with service-specific key mapping in the example. `Cli.Config` owns Settei file/env/argv assembly. Add CLI gates and outputs to existing workspace/Nix files in coordination with their original owners.
+The CLI calls core compilation/configuration and PostgreSQL load/lease APIs. `Cli.Process` owns only the generic child lifecycle, never HTTP readiness or Hurl interpretation. `Cli.Output` owns JSON formatVersion 1 and exit translation; database error semantics remain in the library. Environment transport is the fixed overlay of `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, `HINAGATA_RUN_ID`, and `HINAGATA_LEASE_ID` over validated endpoint fields, with service-specific key mapping in the example wrapper. `Cli.Config` owns Settei file/env/argv assembly. Add CLI gates and outputs to existing workspace/Nix files in coordination with their original owners.
 
 Before completion, distill durable discoveries into the cited local ADRs. Commit on the current branch with a Conventional Commit subject and `MasterPlan: docs/masterplans/1-build-hinagata-for-fast-postgresql-fixtures-and-isolated-microservice-tests.md`, `ExecPlan: docs/plans/4-expose-fixture-commands-and-hurl-workbench-handoff.md`, and `Intention: intention_01m3g1rc9re2qa1cy17q25qfq8` trailers. Record implementation provenance through the installed script using the executing model's verified runtime identity.

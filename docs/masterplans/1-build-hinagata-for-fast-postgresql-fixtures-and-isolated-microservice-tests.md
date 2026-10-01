@@ -26,6 +26,17 @@ provenance:
       at: 2026-09-27T04:33:49Z
       mode: "update"
       note: "Audit applicable haskell-jitsurei standards and make missing acceptance requirements explicit."
+    - model: "claude-fable-5-1"
+      harness: "claude-code"
+      at: 2026-10-01T00:30:12Z
+      mode: "update"
+      note: "Apply architecture-review contract refinements: lock modes, generation preparation, orphan classification, env overlay"
+  reviews:
+    - model: "claude-fable-5-1"
+      harness: "claude-code"
+      at: 2026-10-01T00:27:53Z
+      verdict: "changes-requested"
+      note: "Decomposition and boundaries sound; fix shared-mode clone locking, generation grant preparation, orphan-lease classification, and env overlay before implementing"
 ---
 
 # Build Hinagata for fast PostgreSQL fixtures and isolated microservice tests
@@ -85,11 +96,11 @@ The second plan owns `Hinagata.Postgres.Session`, `Load`, backend errors, and th
 
 The first plan also owns per-fixture identities and pure base/scenario composition. The lifecycle layer alone authorizes skipping the verified base prefix on a fresh clone.
 
-The third plan owns the suite-scoped manager, bounded admission, callback-result classification, explainable preparation reports, baseline fingerprints, `BaselineSpec`/`BaselineRef`, migration/verification/clone hooks, `LeaseInfo`, all catalog DDL/state transitions, and cleanup authority. A hook takes an endpoint and must close its connections before return. The fourth adapts CLI command specs into those hooks and emits their reports; it passes application access to child processes. Administration/setup/application access descriptions and their Settei declarations originate in the first plan. The fifth proves role behavior and accounts for manager plus application connections. The fifth supplies real application migration/verification hooks, including the complete composed runtime migration plan. Neither downstream plan writes maintenance records directly.
+The third plan owns the suite-scoped manager, bounded admission, callback-result classification, explainable preparation reports, baseline fingerprints, `BaselineSpec`/`BaselineRef`, migration/verification/clone hooks, `LeaseInfo`, all catalog DDL/state transitions, and cleanup authority. A hook takes an endpoint and must close its connections before return. The fourth adapts CLI command specs into those hooks and emits their reports; it passes application access to child processes. Administration/setup/application access descriptions and their Settei declarations originate in the first plan. The fifth proves role behavior and accounts for manager plus application connections. The fifth supplies real application migration/verification hooks, including the complete composed runtime migration plan. Neither downstream plan writes maintenance records directly. The locking protocol is fixed here because the fifth plan measures it: clone allocation takes a baseline generation's advisory lock in shared mode, while build, retirement, and cleanup take it exclusively, so concurrent clones of one template overlap as PostgreSQL permits. The administration role owns every Hinagata-created database, and the third plan applies declared grants and settings to a fresh generation before the migration hook as well as to each clone. Cleanup treats a held session lock as the only proof that a lease is live and classifies a record whose lock is free as orphaned.
 
-The fourth plan owns command grammar, JSON formatVersion 1, Settei source assembly, environment handoff, child exit mapping, and generic process-group cleanup. Library errors retain their original phase/cause. It hands connection fields to a wrapper before service startup. Workbench owns its own nested service lifecycle. If process termination cannot be established, preserve the lease with a cleanup error instead of claiming safe release.
+The fourth plan owns command grammar, JSON formatVersion 1, Settei source assembly, environment handoff, child exit mapping, and generic process-group cleanup. The child environment overlay is exactly `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, `HINAGATA_RUN_ID`, and `HINAGATA_LEASE_ID`; a password travels only through a private `PGPASSFILE`. Library errors retain their original phase/cause. It hands connection fields to a wrapper before service startup. Workbench owns its own nested service lifecycle. If process termination cannot be established, preserve the lease with a cleanup error instead of claiming safe release.
 
-The first plan bootstraps the environment through `mori://shinzui/seihou-modules/templates/nix-haskell-flake`. Seihou owns the generated flake, canonical lock, Nix modules, and formatter configuration; workspace customizations belong in unmanaged `flake.module.nix`. The first plan owns initial `cabal.project`, justfile, and package inventory conventions. Each package-producing plan extends these same files for its component; the fifth owns final release checks and compatibility/performance documentation. Update Mori package inventory as packages become real. The fifth owns generated benchmark cases and reference-machine budgets; native load stage reporting remains owned by the second plan, lifecycle timings by the third. Every shared file change must preserve earlier gates.
+The first plan bootstraps the environment through `mori://shinzui/seihou-modules/templates/nix-haskell-flake`. Seihou owns the generated flake, canonical lock, Nix modules, and formatter configuration; workspace customizations belong in unmanaged `flake.module.nix`. The first plan owns initial `cabal.project`, justfile, and package inventory conventions. Each package-producing plan extends these same files for its component; the fifth owns final release checks and compatibility/performance documentation. Update Mori package inventory as packages become real. The fifth owns generated benchmark cases and reference-machine budgets; native load stage reporting remains owned by the second plan, lifecycle timings by the third. The second plan's first load benchmark is a `hinagata-postgres` benchmark component that the fifth plan's `bench/` driver aggregates. The clone strategy is a first-plan configuration value defaulting to `WAL_LOG`, applied by the third plan and measured by the fifth. Every shared file change must preserve earlier gates.
 
 The durable boundaries are recorded in the three local ADRs: service/library ownership, private native streaming sessions, and sealed baselines with positive deletion authority. Changes to these interfaces require ADR updates in the same implementation change.
 
@@ -98,15 +109,21 @@ The [Haskell standards audit](../research/haskell-standards-audit.md) owns the a
 
 ## Progress
 
-Planning complete; 0 of 5 child plans implemented. The first child is ready to begin. The remaining children await their stated implementation prerequisites, not missing user input. All integration/performance/release gates are assigned to the fifth child, with focused correctness proofs required earlier. No benchmark result or package build is claimed by this planning change.
+Planning complete and architecture-reviewed on 2026-09-30, with the review's shared-contract refinements applied; 0 of 5 child plans implemented. The first child is ready to begin. The remaining children await their stated implementation prerequisites, not missing user input. All integration/performance/release gates are assigned to the fifth child, with focused correctness proofs required earlier. No benchmark result or package build is claimed by this planning change.
 
 
 ## Surprises & Discoveries
 
 The [prior-art review](../research/prior-art.md) supports prepared templates and per-test clones. It exposed an underspecified base/scenario overlap: shared fixtures must be compared by captured identity and excluded only from a verified baseline prefix. A result returned as a value can also represent test failure, requiring explicit classification for preservation.
 
+The 2026-09-30 architecture review verified two PostgreSQL facts that shape the lifecycle contract. CREATE DATABASE takes only a share lock on its template (`src/backend/commands/dbcommands.c`: "ShareLock allows two CREATE DATABASEs to work from the same template concurrently"), so an exclusive Hinagata allocation lock would have been the concurrency bottleneck the fifth plan measures. PostgreSQL 15 removed CREATE on `public` for roles other than the database owner, so a setup role distinct from the owning administration role cannot migrate a fresh generation unless declared grants are applied first.
+
 
 ## Decision Log
+
+2026-09-30: Architecture review by claude-fable-5-1 confirmed the five-child decomposition, ownership boundaries, and linear hard dependencies; no child is split, merged, or reordered. Three shared-contract refinements are applied across the spec, ADR 3, and the children: shared-mode allocation locking so Hinagata never serializes concurrent clones, fresh-generation preparation of declared grants and settings before the migration hook, and orphaned-lease classification by a free session lock. Smaller reconciliations: the child environment overlay variables, the home of the second plan's benchmark, the clone strategy as a measured setting, and the already existing README.
+
+2026-09-30: Keep whole-child hard dependencies even though the fourth plan's offline fixture CLI needs only the first two children. Rationale: one implementer works the chain sequentially, and a milestone-level dependency would be introduced explicitly per MASTERPLAN.md if parallel contributors become available, not by silently weakening the registry.
 
 2026-09-26: Audit haskell-jitsurei beyond the three initial core citations. Make inherited Cabal settings, optic/prelude rules, serialization policy, multiline literals, selected CLI patterns, and example Hurl assertions explicit. Distinguish universal core standards from optional patterns; no new subsystem or child plan is needed.
 
@@ -133,3 +150,5 @@ The [prior-art review](../research/prior-art.md) supports prepared templates and
 Revision note (2026-09-26): Prior-art research tightens shared contracts and acceptance across the five existing children. Their dependency order and Not Started status are unchanged; no upstream timing is treated as measured Hinagata performance.
 
 Revision note (2026-09-26): Standards applicability audit closes planning omissions and assigns conventions, CLI tooling, and HTTP-example checks to existing children. Implementation compliance remains unverified until those gates run.
+
+Revision note (2026-09-30): Architecture review applied shared-contract refinements (lock modes, generation preparation, orphan classification, environment overlay, benchmark home, clone strategy) to the spec, ADR 3, and children 1 through 5. Decomposition, dependency order, and Not Started status are unchanged.

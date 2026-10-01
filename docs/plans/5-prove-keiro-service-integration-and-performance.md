@@ -22,6 +22,17 @@ provenance:
       at: 2026-09-27T04:33:49Z
       mode: "update"
       note: "Audit applicable haskell-jitsurei standards and make missing acceptance requirements explicit."
+    - model: "claude-fable-5-1"
+      harness: "claude-code"
+      at: 2026-10-01T00:30:12Z
+      mode: "update"
+      note: "Add clone strategy comparison and concurrent-allocation overlap evidence"
+  reviews:
+    - model: "claude-fable-5-1"
+      harness: "claude-code"
+      at: 2026-10-01T00:27:54Z
+      verdict: "comments"
+      note: "Sound; add clone strategy comparison and prove concurrent allocations overlap"
 ---
 
 # Prove Keiro service integration and performance
@@ -47,6 +58,8 @@ A service author can copy a complete Keiro integration example and measure Hinag
 ## Decision Log
 
 2026-09-26: Prove the consumer boundary with a runnable local example, not a hard Keiro dependency in core. Measure setup phases separately so bulk loading, migration reuse, and service startup cannot hide one another's costs. Both small scenarios and large datasets are release requirements.
+
+2026-09-30: Add two measurements the architecture review made necessary: compare the `WAL_LOG` and `FILE_COPY` clone strategies on the million-row baseline, and prove from phase timings that concurrent clone allocations overlap instead of queueing on Hinagata's shared-mode baseline lock.
 
 
 ## Outcomes & Retrospective
@@ -85,7 +98,7 @@ Create deterministic data generators for 100/1,000-row scenario fixtures and 100
 
 Measure cold bundle compilation, cold baseline construction, warm reuse, clone allocation, fixture transaction, release, CLI overhead, and end-to-end service/Hurl time separately using a monotonic clock. Measure retained library sessions independently of fresh CLI invocations. Run at least 30 warm small-scenario samples and 5 repetitions per bulk case after warm-up; report median/p95 with sample counts, and do not present five-sample p95 as a stable tail estimate. Record GHC/RTS flags, PostgreSQL/client versions, OS/CPU/storage, schema/data sizes, concurrency, and whether filesystem caches are warm. Use RTS allocation/residency statistics plus process RSS, explaining that PostgreSQL server memory is separate.
 
-Release targets from the spec are bulk COPY elapsed time <=1.25× equivalent `psql`, incremental client residency <=64 MiB for tenfold input growth, and warm small setup median <250 ms/p95 <500 ms on the documented reference machine. Compare template cloning with rebuild on the same small and large baselines; report speedup without assuming a fixed factor. Exercise concurrency 1/4/8 with the configured worker cap and report throughput versus tail latency. Keep microbenchmark noise out of ordinary correctness CI; run release performance gates on a documented reference environment.
+Release targets from the spec are bulk COPY elapsed time <=1.25× equivalent `psql`, incremental client residency <=64 MiB for tenfold input growth, and warm small setup median <250 ms/p95 <500 ms on the documented reference machine. Compare template cloning with rebuild on the same small and large baselines; report speedup without assuming a fixed factor. For the million-row baseline also compare the `WAL_LOG` and `FILE_COPY` clone strategies, recording the checkpoint side effects of `FILE_COPY`, and keep `WAL_LOG` as the default unless the evidence justifies changing the setting. Exercise concurrency 1/4/8 with the configured worker cap and report throughput versus tail latency; show from the lifecycle phase timings that clone allocations overlap under concurrency rather than queueing on Hinagata's baseline lock. Keep microbenchmark noise out of ordinary correctness CI; run release performance gates on a documented reference environment.
 
 Measure queue/lock waits and maximum connection counts, including guard sessions and application pools, under saturated demand. Compare repeated acquisition through one prepared manager with fresh CLI calls. Instrument source reads/migration/COPY calls to prove unchanged base inputs are not rehashed or reloaded per lease. Record the fixture's ANALYZE policy and separate transfer time from analysis and subsequent service-query latency.
 

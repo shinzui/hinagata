@@ -22,6 +22,17 @@ provenance:
       at: 2026-09-27T04:33:49Z
       mode: "update"
       note: "Audit applicable haskell-jitsurei standards and make missing acceptance requirements explicit."
+    - model: "claude-fable-5-1"
+      harness: "claude-code"
+      at: 2026-10-01T00:30:12Z
+      mode: "update"
+      note: "House the first load benchmark in a hinagata-postgres benchmark component"
+  reviews:
+    - model: "claude-fable-5-1"
+      harness: "claude-code"
+      at: 2026-10-01T00:27:54Z
+      verdict: "comments"
+      note: "Sound; give the first load benchmark a home that EP-5 aggregates"
 ---
 
 # Load SQL fixtures atomically into existing PostgreSQL databases
@@ -47,6 +58,8 @@ A caller can load a compiled fixture plan into its existing migrated PostgreSQL 
 ## Decision Log
 
 2026-09-26: Use a private `postgresql-libpq` adapter rather than expose a Hasql generation in the API. Treat SQL/CSV as one ordered transactional plan. Use one connection per active load; never spawn a client per fixture or parallelize dependent steps inside a transaction.
+
+2026-09-30: House the first direct-load benchmark as a Cabal benchmark component of `hinagata-postgres` so the final plan's `bench/` driver aggregates it instead of redefining it.
 
 
 ## Outcomes & Retrospective
@@ -87,7 +100,7 @@ Test bad quoting/type/constraint errors late in a large file, a missing/corrupte
 
 Use libpq's nonblocking query/COPY operations with a single protocol owner and bounded IO deadlines. Ensure Haskell cancellation can interrupt a blocked network operation. On interruption, abort COPY if possible, drain, and roll back; if recovery is uncertain, close and permanently invalidate the session. Cleanup is bounded and asynchronous exceptions are rethrown. Session reuse must not execute a new command until prior results are exhausted.
 
-Add the test fixture runner `scripts/test-postgres.sh` and `just test-postgres`, with private temporary directories, TCP disabled, safe trap cleanup, and a caller-supplied existing socket mode. Tests cover a socket directory containing spaces, server disconnect, cancellation during COPY, two simultaneous operations on one session, reuse after rollback, and refusal after closure. Collect a first direct-load benchmark, reused by the final integration plan, so regression investigation begins before the CLI exists.
+Add the test fixture runner `scripts/test-postgres.sh` and `just test-postgres`, with private temporary directories, TCP disabled, safe trap cleanup, and a caller-supplied existing socket mode. Tests cover a socket directory containing spaces, server disconnect, cancellation during COPY, two simultaneous operations on one session, reuse after rollback, and refusal after closure. Collect a first direct-load benchmark as a Cabal benchmark component under `hinagata-postgres/bench/`, which the final integration plan's `bench/` driver reuses, so regression investigation begins before the CLI exists.
 
 
 Fixture examples must cover a deterministic explicit-ID load followed by an application insert using a generated ID. Authors supply any necessary schema-qualified sequence adjustment as ordinary fixture SQL; do not infer it in the loader. Demonstrate an explicitly requested ANALYZE step after bulk COPY, accounting for its elapsed time separately. Confirm statement ordering and retain the documented nontransactional sequence caveat. These examples adopt the [prior-art review](../research/prior-art.md) without adding a reset or schema-rewriting subsystem.

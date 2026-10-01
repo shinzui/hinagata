@@ -67,7 +67,7 @@ steps:
 
 `fixture plan | load | validate`, `db prepare | acquire | release | with`, `inspect`, and `clean`.
 
-`db with --fixture NAME -- PROGRAM ARGS...` leases a clone, loads fixtures, and runs a command with explicit `PGHOST`/`PGPORT`/`PGUSER`/`PGDATABASE` and `HINAGATA_RUN_ID` variables. When the command exits, it releases or keeps the clone. HTTP test suites run through hurl-workbench (`mori://shinzui/hurl-workbench`), which handles service startup, Hurl execution, and reports. Hinagata only provides the database lease around that workflow.
+`db with --fixture NAME -- PROGRAM ARGS...` leases a clone, loads fixtures, and runs a command with explicit `PGHOST`/`PGPORT`/`PGUSER`/`PGDATABASE`, `HINAGATA_RUN_ID`, and `HINAGATA_LEASE_ID` variables. When the command exits, it releases or keeps the clone. HTTP test suites run through hurl-workbench (`mori://shinzui/hurl-workbench`), which handles service startup, Hurl execution, and reports. Hinagata only provides the database lease around that workflow.
 
 Configuration uses Settei (`mori://shinzui/settei`). Settings are applied in this order: built-in defaults, YAML files, bound environment variables, then `--set` overrides. Secrets are redacted wherever they are displayed.
 

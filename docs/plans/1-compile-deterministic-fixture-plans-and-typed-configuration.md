@@ -27,6 +27,17 @@ provenance:
       at: 2026-09-27T04:33:49Z
       mode: "update"
       note: "Audit applicable haskell-jitsurei standards and make missing acceptance requirements explicit."
+    - model: "claude-fable-5-1"
+      harness: "claude-code"
+      at: 2026-10-01T00:30:12Z
+      mode: "update"
+      note: "Add clone strategy and declared grants/settings to the Settei declaration; README is extended not created"
+  reviews:
+    - model: "claude-fable-5-1"
+      harness: "claude-code"
+      at: 2026-10-01T00:27:53Z
+      verdict: "comments"
+      note: "Template variables and doc handles verified; README now exists; add clone strategy and declared grants to the Settei declaration"
 ---
 
 # Compile deterministic fixture plans and typed configuration
@@ -55,13 +66,15 @@ A Haskell caller can compile fixture sources into a deterministic, reusable plan
 
 2026-09-26: Keep pure descriptions and Settei declarations in `hinagata-core`; native database IO belongs to a separate package. Freeze fixture bytes into reusable bundles so freshness and execution agree. Include ordered CSV COPY descriptions from the start because large bulk loads are a first-release requirement.
 
+2026-09-30: Declare the clone strategy and the declared database-level grants/settings in the shared Settei configuration so the lifecycle layer consumes validated values rather than parsing its own. `README.md` already exists in the working tree and is extended, not created.
+
 
 ## Outcomes & Retrospective
 
 
 ## Context and Orientation
 
-There are no hard dependencies. Own `hinagata-core/hinagata-core.cabal`, `hinagata-core/src/Hinagata/{Prelude,Types,Error,Connection,Config}.hs`, `hinagata-core/src/Hinagata/Fixture/{Types,Graph,Manifest,Bundle,SqlPolicy}.hs`, and `hinagata-core/test/Main.hs`. Bootstrap the dev environment with `mori://shinzui/seihou-modules/templates/nix-haskell-flake`; retain its managed flake/lock/formatter ownership. Create `cabal.project`, `justfile`, a license, and `README.md`, and put workspace-specific Nix outputs/tools in the unmanaged `flake.module.nix`. Adopt the repository's identity without changing branches.
+There are no hard dependencies. Own `hinagata-core/hinagata-core.cabal`, `hinagata-core/src/Hinagata/{Prelude,Types,Error,Connection,Config}.hs`, `hinagata-core/src/Hinagata/Fixture/{Types,Graph,Manifest,Bundle,SqlPolicy}.hs`, and `hinagata-core/test/Main.hs`. Bootstrap the dev environment with `mori://shinzui/seihou-modules/templates/nix-haskell-flake`; retain its managed flake/lock/formatter ownership. Create `cabal.project`, `justfile`, and a license; extend the existing `README.md` with build and usage instructions as they become real rather than replacing it; and put workspace-specific Nix outputs/tools in the unmanaged `flake.module.nix`. Adopt the repository's identity without changing branches.
 
 [ADR 1](../adr/1-library-boundary-and-service-owned-postgresql.md) separates library and consumer ownership; [ADR 2](../adr/2-stream-fixtures-through-private-postgresql-sessions.md) requires immutable plans and streaming-friendly descriptions. `mori://shinzui/settei/okf/adrs/concepts/ADR-2` supplies inspectable configuration semantics; do not invent a monadic settings language. A fixture closure is the requested fixture plus every transitive include, applied once in dependency order. A bundle is a private local copy of the source bytes plus their hashes, so the later load executes exactly what was planned.
 
@@ -98,7 +111,7 @@ Implement the SQL policy scanner needed to reject top-level transaction control 
 
 ### Milestone 3: Typed configuration declaration
 
-Define `hinagataConfig :: Settei.Config HinagataConfig` with explicit endpoint, project identity, fixture/bundle paths, maintenance database/schema, explicit administration/setup/application access, deadlines, setup-worker/active-lease/pending-request limits, chunk size, and SQL size limit. No default database authorizes mutation. Declare the concurrency limits as manager-local and keep the three access purposes explicit; never default an application endpoint from administrative credentials. Operational defaults are visible Settei sources/rules. Provide validated explicit environment bindings; no wildcard environment discovery. Retain library callers' ability to construct resolved values directly. Source file IO and optparse wiring remain CLI work.
+Define `hinagataConfig :: Settei.Config HinagataConfig` with explicit endpoint, project identity, fixture/bundle paths, maintenance database/schema, explicit administration/setup/application access, declared database-level grants and settings for the setup and application roles, the clone strategy (`WAL_LOG` by default, `FILE_COPY` as an explicit measured choice), deadlines, setup-worker/active-lease/pending-request limits, chunk size, and SQL size limit. No default database authorizes mutation. Declare the concurrency limits as manager-local and keep the three access purposes explicit; never default an application endpoint from administrative credentials. Operational defaults are visible Settei sources/rules. Provide validated explicit environment bindings; no wildcard environment discovery. Retain library callers' ability to construct resolved values directly. Source file IO and optparse wiring remain CLI work.
 
 Create `just check-conventions` and include it in `just check`: verify every Cabal component imports the baseline, postpositive qualified imports, and file-local PackageImports. Document source review of strict record fields, explicit deriving, optic usage (including `at`/`ix` semantics), entity-ID order, and transitive generic-lens orphan exposure; do not claim a simple text scan proves the import graph safe. Extend the gate whenever later packages/components are added. Create `just check`, `just fmt-check`, and focused core-test commands; make the Nix gate validate the package and tests. Publish module documentation and source-distribution checks. All command additions must execute real gates rather than placeholders.
 

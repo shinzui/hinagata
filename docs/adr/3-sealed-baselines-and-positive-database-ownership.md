@@ -4,17 +4,19 @@ Status: Accepted
 
 Date: 2026-09-26
 
+Amended: 2026-09-30 (lock modes, generation preparation, orphan classification)
+
 ## Context
 
 Reuse must not silently test stale migrations or share scenario state. CREATE/DROP DATABASE are nontransactional, and copying a template requires no connected sessions.
 
 ## Decision
 
-Build immutable generations on the existing cluster; migrate, load, verify, disconnect, seal, then publish. Fingerprints cover real migration identity, frozen base sources, configuration, and server requirements. Reuse requires matching cluster/catalog/database identity. A maintenance catalog records allocation intent, identity, baseline/run association, and active/detached/preserved state. Advisory locks coordinate build, acquisition, retirement, and cleanup.
+Build immutable generations on the existing cluster; migrate, load, verify, disconnect, seal, then publish. Fingerprints cover real migration identity, frozen base sources, configuration, and server requirements. Reuse requires matching cluster/catalog/database identity. A maintenance catalog records allocation intent, identity, baseline/run association, and active/detached/preserved state. Advisory locks coordinate build, acquisition, retirement, and cleanup: a generation's lock is taken in shared mode by clone allocation and exclusively by build, retirement, and cleanup, matching PostgreSQL's own share lock on a template so concurrent clones are never serialized by Hinagata. The administration role owns every database Hinagata creates and applies declared grants and settings to a fresh generation before the application migration hook, as well as to every clone, because database-level grants do not copy with templates and PostgreSQL 15 and later give non-owners no CREATE on `public`.
 
 Store a non-secret fingerprint manifest, including state-affecting role/configuration and hook revisions, with explainable reuse/build outcomes. Reusable handles avoid rereading fixture bytes but do not bypass database identity checks. Baseline/scenario composition resolves base roots first and skips only that verified prefix on a fresh clone; conflicting shared definitions are errors. Concurrent construction has deadline-bound cancellable waiting and observable failed generations.
 
-Only positively identified owned databases may be removed. Borrowed/protected targets never qualify. Cleanup skips active/preserved leases, previews before applying, and refuses ambiguous crash windows. Use ordinary PostgreSQL durability.
+Only positively identified owned databases may be removed. Borrowed/protected targets never qualify. A held session lock is the only proof that a lease is live; cleanup skips live and preserved leases, reports a record whose lock is free as orphaned, removes orphans only on explicit apply, previews before applying, and refuses ambiguous crash windows. Use ordinary PostgreSQL durability.
 
 ## Consequences
 
