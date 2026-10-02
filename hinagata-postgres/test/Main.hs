@@ -3,6 +3,7 @@ module Main (main) where
 import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, bracket, try)
+import Control.Monad (forM_)
 import Data.ByteString.Char8 qualified as ByteString
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.List (find, nub)
@@ -29,6 +30,7 @@ import System.Directory (createDirectoryIfMissing, doesFileExist, renameFile)
 import System.Environment (getArgs, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..), exitFailure)
 import System.FilePath ((</>))
+import System.IO (IOMode (ReadWriteMode, WriteMode), withBinaryFile)
 import System.IO.Temp (withSystemTempDirectory)
 import System.Posix.Signals (sigKILL, signalProcess)
 import System.Process (ProcessHandle, getPid, getProcessExitCode, proc, waitForProcess, withCreateProcess)
@@ -545,7 +547,58 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   processCrashTests lifecycleConfig baselineSpec connection fixtureRoot bundleRoot
   cleanupLifecycleTests lifecycleConfig catalog firstRef scenarioPlan connection database
   retentionLifecycleTests lifecycleConfig firstRef scenarioPlan connection catalog
+  bulkRequested <- (== Just "1") <$> lookupEnv "HINAGATA_TEST_BULK_BASELINE"
+  when bulkRequested (bulkBaselineTests lifecycleConfig fixtureRoot bundleRoot)
   generationLifecycleTests lifecycleConfig baselineSpec firstRef scenarioPlan fixtureRoot bundleRoot connection migrationCalls messageSetting target catalogSchema
+
+bulkBaselineTests :: HinagataConfig -> FilePath -> FilePath -> IO ()
+bulkBaselineTests configuration fixtureRoot bundleRoot = do
+  let directory = fixtureRoot </> "bulk-prepared"
+      csv = directory </> "rows.csv"
+      bundleConfig = BundleConfig fixtureRoot bundleRoot (positive 1048576) (positive 65536)
+      rows = 1000000 :: Int
+  createDirectoryIfMissing True directory
+  ByteString.writeFile (directory </> "fixture.yaml") "name: bulk-prepared\nsteps:\n  - sql: schema.sql\n  - copy:\n      table: {schema: public, name: bulk_prepared_items}\n      columns: [id, payload]\n      file: rows.csv\n      format: csv\n      header: false\n"
+  ByteString.writeFile (directory </> "schema.sql") "CREATE TABLE bulk_prepared_items (id integer PRIMARY KEY, payload text NOT NULL); GRANT SELECT ON bulk_prepared_items TO hinagata_app;"
+  withBinaryFile csv WriteMode $ \handle ->
+    forM_ [1, 1001 .. rows] $ \first ->
+      ByteString.hPut handle (ByteString.pack (concatMap (\number -> show number ++ ",payload\n") [first .. min rows (first + 999)]))
+  base <- bundleOrFail =<< compileFixtures bundleConfig [fixtureName "bulk-prepared"]
+  migrations <- newIORef (0 :: Int)
+  let migrate _ = modifyIORef' migrations (+ 1) >> pure (Right ())
+      verify setupTarget =
+        bracket
+          (PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString setupTarget))))
+          PQ.finish
+          ( \session -> do
+              count <- queryInt session "SELECT count(*) FROM bulk_prepared_items"
+              pure (if count == rows then Right () else Left "bulk baseline row count differs from input")
+          )
+      specification = BaselineSpec configuration base (Just "bulk-migration-v1") (Just "bulk-verify-v1") ["plpgsql"] (Just "C") migrate verify Nothing Nothing
+  (baseline, firstReport) <- orFail =<< ensureBaseline specification
+  (reused, reuseReport) <- orFail =<< ensureBaseline specification
+  migrationCount <- readIORef migrations
+  assert "million-row baseline loads once and then reuses its sealed generation" (kind firstReport == Built && kind reuseReport == Reused && baselineDatabase baseline == baselineDatabase reused && migrationCount == 1)
+  let countClone reference plan = withDatabase configuration reference plan $ \LeaseInfo {applicationTarget} ->
+        bracket
+          (PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString applicationTarget))))
+          PQ.finish
+          (\session -> queryInt session "SELECT count(*) FROM bulk_prepared_items")
+  firstClone <- countClone baseline base
+  secondClone <- countClone baseline base
+  assert "repeated clones retain one million rows without replaying duplicate-key COPY" (firstClone == Right rows && secondClone == Right rows)
+  withBinaryFile csv ReadWriteMode $ \handle -> ByteString.hPut handle "1,changed\n"
+  changedPlan <- bundleOrFail =<< compileFixtures bundleConfig [fixtureName "bulk-prepared"]
+  (changed, changedReport) <- orFail =<< ensureBaseline specification {basePlan = changedPlan, compareAgainst = Just baseline}
+  changedMigrations <- readIORef migrations
+  assert "changed bulk CSV bytes select a distinct generation" (kind changedReport == Built && baselineDatabase changed /= baselineDatabase baseline && fmap changedComponents (comparison changedReport) == Just [BaseFixtures] && changedMigrations == 2)
+  changedValue <- withDatabase configuration changed changedPlan $ \LeaseInfo {applicationTarget} ->
+    bracket
+      (PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString applicationTarget))))
+      PQ.finish
+      (\session -> queryText session "SELECT payload FROM bulk_prepared_items WHERE id = 1")
+  assert "changed bulk generation includes the modified source byte" (changedValue == Right "changed")
+  putStrLn "million-row prepared baseline, reuse, repeated clones, and source-byte invalidation passed"
 
 connectionCeilingTest :: HinagataConfig -> BaselineRef -> FixturePlan -> PQ.Connection -> IO ()
 connectionCeilingTest configuration baseline scenario connection = withManager configuration $ \manager -> do

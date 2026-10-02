@@ -12,6 +12,9 @@ test-postgres:
 test-postgres-tcp:
     bash scripts/test-postgres.sh --tcp
 
+test-postgres-bulk:
+    bash scripts/test-postgres.sh --bulk-baseline
+
 bench-postgres:
     bash scripts/test-postgres.sh --bench
 

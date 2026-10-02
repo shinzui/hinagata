@@ -4,7 +4,7 @@ set -euo pipefail
 mode="${1:-test}"
 run_case() {
   case "$mode" in
-    test|--tcp) cabal test hinagata-postgres-test --test-show-details=direct ;;
+    test|--tcp|--bulk-baseline) cabal test hinagata-postgres-test --test-show-details=direct ;;
     --bench)
       cabal bench hinagata-postgres-direct-load --benchmark-options='100000 +RTS -s'
       cabal bench hinagata-postgres-direct-load --benchmark-options='1000000 +RTS -s'
@@ -14,8 +14,8 @@ run_case() {
 }
 
 if [[ -n "${HINAGATA_TEST_PGHOST:-}" ]]; then
-  if [[ "$mode" == --bench ]]; then
-    echo "benchmark requires the disposable PostgreSQL cluster" >&2
+  if [[ "$mode" == --bench || "$mode" == --bulk-baseline ]]; then
+    echo "bulk or benchmark mode requires the disposable PostgreSQL cluster" >&2
     exit 2
   fi
   export HINAGATA_TEST_PGPORT="${HINAGATA_TEST_PGPORT:-5432}"
@@ -42,6 +42,9 @@ listen_addresses=""
 if [[ "$mode" == --tcp ]]; then
   listen_addresses=127.0.0.1
   export HINAGATA_TEST_TCP=1
+fi
+if [[ "$mode" == --bulk-baseline ]]; then
+  export HINAGATA_TEST_BULK_BASELINE=1
 fi
 pg_ctl -D "$root/data" -l "$root/postgres.log" -o "-k '$socket' -p $port -c listen_addresses='$listen_addresses' -c max_prepared_transactions=10" -w start >/dev/null
 createdb -h "$socket" -p "$port" hinagata_test

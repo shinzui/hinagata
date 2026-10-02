@@ -105,6 +105,8 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 2026-10-02 warm-concurrency progress: Eight simultaneous direct lease callers now reach their callbacks with eight distinct writable databases while the observer holds a compatible shared generation lock. All eight release cleanly. This proves Hinagata does not require an exclusive generation lock for warm allocation; a measured overlap of the PostgreSQL CREATE DATABASE statements themselves remains open.
 
+2026-10-02 bulk-baseline progress: `nix develop -c just test-postgres-bulk` runs a disposable socket-cluster acceptance case in addition to the normal integration suite. It streams a million-row CSV into one sealed baseline, verifies a second ensure call reuses that generation without rerunning migration, and acquires two clones with the full row count. The source fixture has a primary key, so replaying COPY into either clone would fail. Changing the first CSV payload selects a distinct generation with a BaseFixtures explanation, runs migration once more, and exposes the changed value in a new clone. The dedicated run, normal TCP suite, and `just check` pass.
+
 
 ## Surprises & Discoveries
 
@@ -188,6 +190,7 @@ Run from the Hinagata repository root. The commands below are acceptance interfa
 ```bash
 nix develop -c cabal build hinagata-postgres
 nix develop -c just test-postgres
+nix develop -c just test-postgres-bulk
 nix develop -c just check
 ```
 
