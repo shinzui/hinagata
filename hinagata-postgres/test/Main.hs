@@ -370,6 +370,8 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   assert "one deadline stops slow scenario setup before callback and releases its clone" (case timedSetup of Left LeaseError {cause = "acquisition deadline expired"} -> not ranTimedCallback && releasedAfterTimeout == releasedBeforeTimeout + 1; _ -> False)
   slowConsumer <- withDatabase (lifecycleConfig {acquisitionDeadlineMs = positive 1500}) firstRef scenarioPlan (\_ -> threadDelay 1700000 >> pure True)
   assert "acquisition deadline stops at callback handoff" (slowConsumer == Right True)
+  timedLease <- withDatabaseClassified lifecycleConfig firstRef slowScenario ReleaseAlways (const False) (\_ -> pure (42 :: Int))
+  assert "lease timing separates scenario load from clone and release" (case timedLease of Right LeaseOutcome {callbackValue = 42, timings = LeaseTimings {queueWaitMs = 0, cloneMs, scenarioLoadMs, completionMs}} -> cloneMs > 0 && scenarioLoadMs >= 1500 && completionMs > 0; _ -> False)
   cloneHookCalls <- newIORef (0 :: Int)
   let prepareCloneHook setupTarget = do
         modifyIORef' cloneHookCalls (+ 1)
@@ -449,6 +451,18 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
     firstResult <- timeout 10000000 (takeMVar firstFinished)
     thirdResult <- timeout 10000000 (takeMVar thirdFinished)
     assert "manager releases capacity after callback and queue cancellation" (case (firstResult, thirdResult) of (Just (Right (Right _)), Just (Right (Right _))) -> True; _ -> False)
+    timingHeld <- newEmptyMVar
+    timingRelease <- newEmptyMVar
+    timingHolderDone <- newEmptyMVar
+    timingWaiterDone <- newEmptyMVar
+    _ <- forkIO (withManagedDatabase manager firstRef scenarioPlan (\_ -> putMVar timingHeld () >> takeMVar timingRelease) >>= putMVar timingHolderDone)
+    _ <- takeMVar timingHeld
+    _ <- forkIO (withManagedDatabaseClassified manager firstRef scenarioPlan ReleaseAlways (const False) (\_ -> pure ()) >>= putMVar timingWaiterDone)
+    threadDelay 200000
+    putMVar timingRelease ()
+    timingHolder <- timeout 10000000 (takeMVar timingHolderDone)
+    timingWaiter <- timeout 10000000 (takeMVar timingWaiterDone)
+    assert "managed timing records active-queue wait" (case (timingHolder, timingWaiter) of (Just (Right ()), Just (Right LeaseOutcome {timings = LeaseTimings {queueWaitMs}})) -> queueWaitMs >= 150; _ -> False)
   let deadlineConfig = tightConfig {acquisitionDeadlineMs = positive 1000}
   withManager deadlineConfig $ \manager -> do
     held <- newEmptyMVar

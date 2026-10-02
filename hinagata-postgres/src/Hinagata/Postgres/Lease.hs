@@ -4,6 +4,7 @@ module Hinagata.Postgres.Lease
     LeaseError (..),
     RetentionPolicy (..),
     LeaseDisposition (..),
+    LeaseTimings (..),
     LeaseOutcome (..),
     withDatabase,
     withDatabaseClassified,
@@ -13,6 +14,7 @@ where
 
 import Control.Exception (IOException, SomeAsyncException, SomeException, evaluate, fromException, mask, throwIO, try)
 import Data.Bifunctor (first)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Encoding
 import Data.Word (Word64)
@@ -58,13 +60,26 @@ data RetentionPolicy = ReleaseAlways | PreserveFailures | DetachAlways
 data LeaseDisposition = LeaseReleased | LeasePreserved | LeaseDetached | LeaseCleanupFailed
   deriving stock (Eq, Show)
 
+-- | Monotonic stage durations for a completed clone scope. Queue time is
+-- populated by the manager; the direct lease path reports zero for it.
+data LeaseTimings = LeaseTimings
+  { queueWaitMs :: !Int,
+    catalogMs :: !Int,
+    generationLockMs :: !Int,
+    cloneMs :: !Int,
+    scenarioLoadMs :: !Int,
+    completionMs :: !Int
+  }
+  deriving stock (Eq, Show)
+
 -- | Keep the callback value unchanged while reporting release or retention
 -- separately. Setup failures still return 'Left' before a callback runs.
 data LeaseOutcome a = LeaseOutcome
   { callbackValue :: !a,
     leaseInfo :: !LeaseInfo,
     leaseDisposition :: !LeaseDisposition,
-    cleanupDiagnostic :: !(Maybe LeaseError)
+    cleanupDiagnostic :: !(Maybe LeaseError),
+    timings :: !LeaseTimings
   }
   deriving stock (Eq, Show)
 
@@ -94,6 +109,7 @@ withDatabase configuration baseline scenario callback = do
 withDatabaseClassified :: HinagataConfig -> BaselineRef -> FixturePlan -> RetentionPolicy -> (a -> Bool) -> (LeaseInfo -> IO a) -> IO (Either LeaseError (LeaseOutcome a))
 withDatabaseClassified configuration baseline scenario policy classifyResult callback = do
   expiry <- acquisitionExpiry configuration
+  timingRef <- newIORef emptyTimings
   case composePlans (baselinePlan baseline) scenario of
     Left _ -> pure (Left (failure "scenario conflicts with the frozen baseline"))
     Right composed -> do
@@ -102,15 +118,16 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
         Left _ -> pure (Left (failure "scenario bundle could not be verified"))
         Right Nothing -> pure (Left acquisitionTimeout)
         Right (Just False) -> pure (Left (failure "scenario bundle changed"))
-        Right (Just True) -> start expiry composed
+        Right (Just True) -> start timingRef expiry composed
   where
     options = defaultSessionOptions {operationDeadlineMs = positiveValue (acquisitionDeadlineMs configuration)}
     maintenance = first accessFailure (Access.adminTarget configuration (maintenanceDatabase configuration))
 
-    start expiry composed = case maintenance of
+    start timingRef expiry composed = case maintenance of
       Left problem -> pure (Left problem)
       Right target -> do
-        timedCatalog <- withinDeadline expiry (ensureCatalog target (maintenanceSchema configuration) options)
+        (timedCatalog, catalogDuration) <- measure (withinDeadline expiry (ensureCatalog target (maintenanceSchema configuration) options))
+        modifyIORef' timingRef (\record -> record {catalogMs = catalogDuration})
         let catalog = maybe (Left (CatalogError "acquisition deadline expired" Nothing Nothing)) id timedCatalog
         case catalog of
           Left CatalogError {cause, sqlState} -> pure (Left (LeaseError cause sqlState Nothing))
@@ -123,12 +140,12 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
                   Just milliseconds -> do
                     let sessionOptions = options {connectDeadlineMs = min (connectDeadlineMs options) milliseconds}
                     opened <- withSession target sessionOptions $ \session -> mask $ \restore -> do
-                      acquired <- restore (withinDeadline expiry (allocate configuration baseline session target options identity))
+                      acquired <- restore (withinDeadline expiry (allocate timingRef configuration baseline session target options identity))
                       case acquired of
                         Nothing -> pure (Left acquisitionTimeout)
                         Just (Left problem) -> pure (Left problem)
                         Just (Right clone) -> do
-                          prepared <- try @SomeException (restore (withinDeadline expiry (prepareClone session clone composed)))
+                          prepared <- try @SomeException (restore (withinDeadline expiry (prepareClone timingRef session clone composed)))
                           case prepared of
                             Left exception -> do
                               _ <- try @SomeException (release configuration session target options identity clone)
@@ -154,8 +171,10 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
                                   _ <- try @SomeException (completeFailure (isJust (fromException @SomeAsyncException exception)) session target identity clone)
                                   throwIO exception
                                 Right (value, failed) -> do
-                                  finished <- try @SomeException (completeValue session target identity clone failed)
-                                  pure (Right (outcomeFor info value finished))
+                                  (finished, duration) <- measure (try @SomeException (completeValue session target identity clone failed))
+                                  modifyIORef' timingRef (\record -> record {completionMs = duration})
+                                  recorded <- readIORef timingRef
+                                  pure (Right (outcomeFor recorded info value finished))
                     pure $ case opened of
                       Left problem -> Left (sessionFailure problem)
                       Right result -> result
@@ -172,12 +191,12 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
       | policy == PreserveFailures && failed = fmap (\result -> (LeasePreserved, result)) (markState configuration session clone "Preserved")
       | otherwise = fmap (\result -> (LeaseReleased, result)) (release configuration session target options identity clone)
 
-    outcomeFor info value = \case
-      Left _ -> LeaseOutcome value info LeaseCleanupFailed (Just (failure "lease completion raised an exception"))
-      Right (_, Left problem) -> LeaseOutcome value info LeaseCleanupFailed (Just problem)
-      Right (disposition, Right ()) -> LeaseOutcome value info disposition Nothing
+    outcomeFor recorded info value = \case
+      Left _ -> LeaseOutcome value info LeaseCleanupFailed (Just (failure "lease completion raised an exception")) recorded
+      Right (_, Left problem) -> LeaseOutcome value info LeaseCleanupFailed (Just problem) recorded
+      Right (disposition, Right ()) -> LeaseOutcome value info disposition Nothing recorded
 
-    prepareClone session clone composed = do
+    prepareClone timingRef session clone composed = do
       let OwnedDatabase {name = database} = owned clone
       prepared <- runExclusive session $ \connection sessionOptions -> do
         deadline <- deadlineAfter (operationDeadlineMs sessionOptions)
@@ -196,7 +215,8 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
             case preparedHook of
               Left problem -> pure (Left problem)
               Right () -> do
-                loaded <- withSession setupTarget options (\setupSession -> loadComposedRemainder setupSession scenario composed)
+                (loaded, duration) <- measure (withSession setupTarget options (\setupSession -> loadComposedRemainder setupSession scenario composed))
+                modifyIORef' timingRef (\record -> record {scenarioLoadMs = duration})
                 case loaded of
                   Left problem -> pure (Left (sessionFailure problem))
                   Right (Left _) -> pure (Left (failure "scenario fixture load failed"))
@@ -218,12 +238,13 @@ acquireDetached configuration baseline scenario = do
     Right LeaseOutcome {cleanupDiagnostic = Just problem} -> Left problem
     Right LeaseOutcome {leaseInfo} -> Right leaseInfo
 
-allocate :: HinagataConfig -> BaselineRef -> Session -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> IO (Either LeaseError Clone)
-allocate configuration baseline session maintenance options identity = do
+allocate :: IORef LeaseTimings -> HinagataConfig -> BaselineRef -> Session -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> IO (Either LeaseError Clone)
+allocate timingRef configuration baseline session maintenance options identity = do
   acquired <- runExclusive session $ \connection sessionOptions -> do
     deadline <- deadlineAfter (operationDeadlineMs sessionOptions)
     let lockKey = generationLockKey baseline
-    locked <- queryParamRows connection deadline Sql "SELECT pg_advisory_lock_shared(1212761905, hashtext($1))" [Just (Encoding.encodeUtf8 lockKey)] 1
+    (locked, duration) <- measure (queryParamRows connection deadline Sql "SELECT pg_advisory_lock_shared(1212761905, hashtext($1))" [Just (Encoding.encodeUtf8 lockKey)] 1)
+    modifyIORef' timingRef (\record -> record {generationLockMs = duration})
     case locked of
       Left problem -> pure (Keep (Left (nativeFailure problem)))
       Right _ -> do
@@ -245,7 +266,15 @@ allocate configuration baseline session maintenance options identity = do
     Right () -> do
       evidence <- verifyOwnedDatabase maintenance options identity (ownership baseline)
       case evidence of
-        Right OwnershipMatches -> flatten <$> runExclusive session (\connection sessionOptions -> Keep <$> createClone configuration baseline connection sessionOptions identity)
+        Right OwnershipMatches ->
+          flatten
+            <$> runExclusive
+              session
+              ( \connection sessionOptions -> do
+                  (created, duration) <- measure (createClone configuration baseline connection sessionOptions identity)
+                  modifyIORef' timingRef (\record -> record {cloneMs = duration})
+                  pure (Keep created)
+              )
         Right _ -> pure (Left (failure "baseline lost positive ownership"))
         Left CatalogError {cause, sqlState} -> pure (Left (LeaseError cause sqlState Nothing))
 
@@ -412,6 +441,16 @@ leaseLockKey lease = "lease:" <> lease
 
 acquisitionTimeout :: LeaseError
 acquisitionTimeout = failure "acquisition deadline expired"
+
+emptyTimings :: LeaseTimings
+emptyTimings = LeaseTimings 0 0 0 0 0 0
+
+measure :: IO a -> IO (a, Int)
+measure action = do
+  started <- getMonotonicTimeNSec
+  result <- action
+  finished <- getMonotonicTimeNSec
+  pure (result, fromIntegral ((finished - started) `div` 1000000))
 
 acquisitionExpiry :: HinagataConfig -> IO Word64
 acquisitionExpiry configuration = do

@@ -13,7 +13,7 @@ where
 import Control.Concurrent.MVar
 import Control.Exception (bracket, finally, mask, onException)
 import Data.Foldable (traverse_)
-import Data.IORef (atomicModifyIORef', newIORef)
+import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef)
 import Data.List (sortOn)
 import Data.List.NonEmpty qualified as NonEmpty
 import Data.Text qualified as Text
@@ -22,7 +22,7 @@ import GHC.Clock (getMonotonicTimeNSec)
 import Hinagata.Config
 import Hinagata.Fixture.Bundle (FixturePlan)
 import Hinagata.Postgres.Baseline (BaselineRef)
-import Hinagata.Postgres.Lease (LeaseError (..), LeaseInfo, LeaseOutcome (..), RetentionPolicy (..), withDatabase, withDatabaseClassified)
+import Hinagata.Postgres.Lease (LeaseError (..), LeaseInfo, LeaseOutcome (..), LeaseTimings (..), RetentionPolicy (..), withDatabase, withDatabaseClassified)
 import Hinagata.Prelude
 import Hinagata.Types (mkPositive, positiveValue)
 import System.Timeout (timeout)
@@ -85,8 +85,14 @@ withManagedDatabase manager baseline scenario callback = do
 withManagedDatabaseClassified :: Manager -> BaselineRef -> FixturePlan -> RetentionPolicy -> (a -> Bool) -> (LeaseInfo -> IO a) -> IO (Either LeaseError (LeaseOutcome a))
 withManagedDatabaseClassified manager baseline scenario policy classifyResult callback = do
   expiry <- acquisitionExpiry manager
-  withPermitUntil (activeGate manager) 1 expiry $
-    withSetupUsing manager expiry (\configuration handoff -> withDatabaseClassified configuration baseline scenario policy classifyResult handoff) callback
+  started <- getMonotonicTimeNSec
+  queueRef <- newIORef 0
+  completed <- withPermitUntil (activeGate manager) 1 expiry $ do
+    activeAdmitted <- getMonotonicTimeNSec
+    modifyIORef' queueRef (+ millisecondsBetween started activeAdmitted)
+    withSetupUsing manager expiry (Just queueRef) (\configuration handoff -> withDatabaseClassified configuration baseline scenario policy classifyResult handoff) callback
+  waited <- readIORef queueRef
+  pure $ fmap (\outcome@LeaseOutcome {timings} -> outcome {timings = timings {queueWaitMs = waited}}) completed
 
 -- | Acquire a detached clone through manager admission, freeing active
 -- capacity once its retained identity has been recorded.
@@ -121,11 +127,14 @@ withDatabases manager requests callback = do
 
 withSetupUntil :: Manager -> Word64 -> BaselineRef -> FixturePlan -> (LeaseInfo -> IO a) -> IO (Either LeaseError a)
 withSetupUntil manager expiry baseline scenario =
-  withSetupUsing manager expiry (\configuration handoff -> withDatabase configuration baseline scenario handoff)
+  withSetupUsing manager expiry Nothing (\configuration handoff -> withDatabase configuration baseline scenario handoff)
 
-withSetupUsing :: Manager -> Word64 -> (HinagataConfig -> (LeaseInfo -> IO a) -> IO (Either LeaseError b)) -> (LeaseInfo -> IO a) -> IO (Either LeaseError b)
-withSetupUsing Manager {configuration, setupGate} expiry runner callback = mask $ \restore -> do
+withSetupUsing :: Manager -> Word64 -> Maybe (IORef Int) -> (HinagataConfig -> (LeaseInfo -> IO a) -> IO (Either LeaseError b)) -> (LeaseInfo -> IO a) -> IO (Either LeaseError b)
+withSetupUsing Manager {configuration, setupGate} expiry waitingRef runner callback = mask $ \restore -> do
+  waitingSince <- getMonotonicTimeNSec
   admitted <- acquireUntil setupGate 1 expiry
+  admittedAt <- getMonotonicTimeNSec
+  traverse_ (\reference -> modifyIORef' reference (+ millisecondsBetween waitingSince admittedAt)) waitingRef
   case admitted of
     Left problem -> pure (Left problem)
     Right () -> do
@@ -157,6 +166,9 @@ remainingMs :: Word64 -> IO (Maybe Int)
 remainingMs expiry = do
   now <- getMonotonicTimeNSec
   pure $ if now >= expiry then Nothing else Just (fromIntegral ((expiry - now) `div` 1000000) `max` 1)
+
+millisecondsBetween :: Word64 -> Word64 -> Int
+millisecondsBetween start finish = fromIntegral ((finish - start) `div` 1000000)
 
 acquireUntil :: Gate -> Int -> Word64 -> IO (Either LeaseError ())
 acquireUntil gate amount expiry = do

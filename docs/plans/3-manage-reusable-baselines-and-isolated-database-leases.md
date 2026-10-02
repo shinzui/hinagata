@@ -91,6 +91,8 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 2026-10-02 lost-session evidence: A disposable-cluster test terminates the maintenance backend holding a handed-off lease lock. Callback completion reports failure instead of claiming release; the allocation remains inspectable as an orphan and requires explicit ownership-checked apply. This covers detection at completion, not immediate interruption of a still-running callback. Process-kill tests at allocation boundaries and loss detection during callback execution remain open.
 
+2026-10-02 lifecycle timing progress: `LeaseOutcome` now includes `LeaseTimings` with separate monotonic durations for manager queue admission, catalog setup, generation-lock wait, clone creation/binding, scenario connection/load, and lease completion. Direct leases report zero queue time; the manager sums active and setup gate waits. Integration tests use a two-second scenario and a deliberately queued managed request to verify the stage attribution. `PreparationReport` already pairs build/reuse kind with its elapsed duration. Timing for failures before handoff and named collections is still open.
+
 
 ## Surprises & Discoveries
 
