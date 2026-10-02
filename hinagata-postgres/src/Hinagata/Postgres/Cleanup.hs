@@ -6,8 +6,10 @@ module Hinagata.Postgres.Cleanup
     CleanupResult (..),
     CleanupError (..),
     planCleanup,
+    inspectLease,
     applyCleanup,
     releaseLease,
+    preserveLease,
   )
 where
 
@@ -47,7 +49,7 @@ data CleanupSelection = OrphansOnly | IncludeRetained
   deriving stock (Eq, Show)
 
 -- | Per-ID apply outcome. A refusal leaves the database and catalog visible.
-data CleanupResult = Released !Text | AlreadyReleased !Text | Skipped !Text !CleanupDisposition | Refused !Text !Text
+data CleanupResult = Released !Text | AlreadyReleased !Text | Preserved !Text | Skipped !Text !CleanupDisposition | Refused !Text !Text
   deriving stock (Eq, Show)
 
 -- | Non-secret preview or apply failure.
@@ -79,6 +81,21 @@ planCleanup configuration = withCatalog configuration $ \maintenance options ide
       pure (Keep candidates)
   pure (flatten opened)
 
+-- | Inspect one lease, including an already released record, without changing
+-- catalog or database state. A held callback lock is reported as Live.
+inspectLease :: HinagataConfig -> Text -> IO (Either CleanupError (Maybe CleanupCandidate))
+inspectLease configuration identifier = withCatalog configuration $ \maintenance options identity -> do
+  opened <- withSession maintenance options $ \session ->
+    runExclusive session $ \connection sessionOptions -> do
+      deadline <- deadlineAfter (operationDeadlineMs sessionOptions)
+      snapshot <- lookupLeaseSnapshot connection configuration deadline identifier
+      result <- case snapshot of
+        Left problem -> pure (Left problem)
+        Right Nothing -> pure (Right Nothing)
+        Right (Just found) -> fmap Just <$> classify connection maintenance options identity deadline found
+      pure (Keep result)
+  pure (flatten opened)
+
 -- | Revalidate each explicitly selected allocation under its generation and
 -- lease locks. A live lock, protected target, or mismatched identity refuses
 -- deletion. Missing matching clones are idempotently marked Released.
@@ -89,7 +106,30 @@ applyCleanup configuration selection identifiers = withCatalog configuration $ \
 -- | Explicitly release one retained lease by its public lease ID. The ID is
 -- resolved in the project catalog, then apply repeats every ownership check.
 releaseLease :: HinagataConfig -> Text -> IO (Either CleanupError CleanupResult)
-releaseLease configuration identifier = withCatalog configuration $ \maintenance options _ -> do
+releaseLease configuration identifier = do
+  resolved <- resolveLease configuration identifier
+  case resolved of
+    Left problem -> pure (Left problem)
+    Right Nothing -> pure (Right (Refused identifier "lease ID was not found in this project"))
+    Right (Just allocationId) -> do
+      released <- applyCleanup configuration IncludeRetained [allocationId]
+      pure $ case released of
+        Left problem -> Left problem
+        Right [result] -> Right result
+        Right _ -> Left (failure "lease release returned an invalid result")
+
+-- | Explicitly preserve an ended or orphaned lease. Live callbacks, unbound
+-- identities, missing databases, and foreign ownership evidence are refused.
+preserveLease :: HinagataConfig -> Text -> IO (Either CleanupError CleanupResult)
+preserveLease configuration identifier = do
+  resolved <- resolveLease configuration identifier
+  case resolved of
+    Left problem -> pure (Left problem)
+    Right Nothing -> pure (Right (Refused identifier "lease ID was not found in this project"))
+    Right (Just allocationId) -> withCatalog configuration $ \maintenance options identity -> preserveOne configuration maintenance options identity allocationId
+
+resolveLease :: HinagataConfig -> Text -> IO (Either CleanupError (Maybe Text))
+resolveLease configuration identifier = withCatalog configuration $ \maintenance options _ -> do
   opened <- withSession maintenance options $ \session ->
     runExclusive session $ \connection sessionOptions -> do
       deadline <- deadlineAfter (operationDeadlineMs sessionOptions)
@@ -106,15 +146,7 @@ releaseLease configuration identifier = withCatalog configuration $ \maintenance
                 Right _ -> Left (failure "lease identity is ambiguous")
             )
         )
-  case flatten opened of
-    Left problem -> pure (Left problem)
-    Right Nothing -> pure (Right (Refused identifier "lease ID was not found in this project"))
-    Right (Just allocationId) -> do
-      released <- applyCleanup configuration IncludeRetained [allocationId]
-      pure $ case released of
-        Left problem -> Left problem
-        Right [result] -> Right result
-        Right _ -> Left (failure "lease release returned an invalid result")
+  pure (flatten opened)
 
 withCatalog :: HinagataConfig -> (ConnectionTarget -> SessionOptions -> Own.CatalogIdentity -> IO (Either CleanupError a)) -> IO (Either CleanupError a)
 withCatalog configuration action =
@@ -157,15 +189,15 @@ classify connection maintenance options identity deadline snapshot = do
       case held of
         Left problem -> pure (Left problem)
         Right True -> pure (Right Live)
-        Right False
-          | allocationState snapshot `elem` ["Detached", "Preserved"] -> pure (Right Retained)
-          | otherwise -> do
-              evidence <- Own.verifyOwnedDatabase maintenance options identity (Own.OwnedDatabase (databaseName snapshot) number (ownershipToken snapshot))
-              pure $ case evidence of
-                Left problem -> Left (catalogFailure problem)
-                Right Own.OwnershipMatches -> Right Orphaned
-                Right Own.OwnershipMissing -> Right Missing
-                Right Own.OwnershipMismatch -> Right Foreign
+        Right False -> do
+          evidence <- Own.verifyOwnedDatabase maintenance options identity (Own.OwnedDatabase (databaseName snapshot) number (ownershipToken snapshot))
+          pure $ case evidence of
+            Left problem -> Left (catalogFailure problem)
+            Right Own.OwnershipMatches
+              | allocationState snapshot `elem` ["Detached", "Preserved"] -> Right Retained
+              | otherwise -> Right Orphaned
+            Right Own.OwnershipMissing -> Right Missing
+            Right Own.OwnershipMismatch -> Right Foreign
   pure $ CleanupCandidate (allocation snapshot) (recordedLease snapshot) (databaseName snapshot) (allocationState snapshot) <$> disposition
 
 isLeaseHeld :: PQ.Connection -> Deadline -> Text -> IO (Either CleanupError Bool)
@@ -206,6 +238,59 @@ applyOne configuration selection maintenance options identity identifier = do
                   | otherwise -> pure (Right (Refused identifier "allocation generation changed while acquiring its lock"))
       pure (Keep result)
   pure (flatten opened)
+
+preserveOne :: HinagataConfig -> ConnectionTarget -> SessionOptions -> Own.CatalogIdentity -> Text -> IO (Either CleanupError CleanupResult)
+preserveOne configuration maintenance options identity identifier = do
+  opened <- withSession maintenance options $ \session ->
+    runExclusive session $ \connection sessionOptions -> do
+      deadline <- deadlineAfter (operationDeadlineMs sessionOptions)
+      initial <- lookupSnapshot connection configuration deadline identifier
+      result <- case initial of
+        Left problem -> pure (Left problem)
+        Right Nothing -> pure (Right (Refused identifier "allocation was not found in this project"))
+        Right (Just firstSnapshot) -> do
+          locked <- queryParamRows connection deadline Sql "SELECT pg_advisory_lock(1212761905, hashtext($1))" [Just (Encoding.encodeUtf8 (generationLockKey (generation firstSnapshot)))] 1
+          case locked of
+            Left problem -> pure (Left (nativeFailure problem))
+            Right _ -> do
+              refreshed <- lookupSnapshot connection configuration deadline identifier
+              case refreshed of
+                Left problem -> pure (Left problem)
+                Right Nothing -> pure (Right (Refused identifier "allocation disappeared while acquiring its lock"))
+                Right (Just snapshot)
+                  | generation snapshot == generation firstSnapshot -> preserveLocked connection maintenance options identity configuration deadline snapshot
+                  | otherwise -> pure (Right (Refused identifier "allocation generation changed while acquiring its lock"))
+      pure (Keep result)
+  pure (flatten opened)
+
+preserveLocked :: PQ.Connection -> ConnectionTarget -> SessionOptions -> Own.CatalogIdentity -> HinagataConfig -> Deadline -> Snapshot -> IO (Either CleanupError CleanupResult)
+preserveLocked connection maintenance options identity configuration deadline snapshot
+  | allocationState snapshot == "Released" = pure (Right (AlreadyReleased (allocation snapshot)))
+  | databaseName snapshot == maintenanceDatabase configuration || databaseNameText (databaseName snapshot) `elem` ["template0", "template1"] = pure (Right (Refused (allocation snapshot) "protected database target"))
+  | otherwise = do
+      template <- generationDatabase connection configuration deadline (generation snapshot)
+      case template of
+        Left problem -> pure (Left problem)
+        Right Nothing -> pure (Right (Refused (allocation snapshot) "generation record is missing"))
+        Right (Just baselineName) | baselineName == databaseName snapshot -> pure (Right (Refused (allocation snapshot) "allocation names its baseline template"))
+        Right (Just _) -> do
+          free <- case recordedLease snapshot of
+            Nothing -> pure (Right False)
+            Just lease -> tryHoldLease connection deadline lease
+          case free of
+            Left problem -> pure (Left problem)
+            Right False -> pure (Right (Skipped (allocation snapshot) Live))
+            Right True -> case databaseOid snapshot of
+              Nothing -> pure (Right (Refused (allocation snapshot) "allocation has no bound database OID"))
+              Just number -> do
+                evidence <- Own.verifyOwnedDatabase maintenance options identity (Own.OwnedDatabase (databaseName snapshot) number (ownershipToken snapshot))
+                case evidence of
+                  Left problem -> pure (Left (catalogFailure problem))
+                  Right Own.OwnershipMismatch -> pure (Right (Refused (allocation snapshot) "database ownership evidence differs"))
+                  Right Own.OwnershipMissing -> pure (Right (Refused (allocation snapshot) "database is missing"))
+                  Right Own.OwnershipMatches -> do
+                    updated <- if allocationState snapshot == "Preserved" then pure (Right ()) else changeState connection configuration deadline snapshot "Preserved"
+                    pure (Preserved (allocation snapshot) <$ updated)
 
 applyLocked :: PQ.Connection -> ConnectionTarget -> SessionOptions -> Own.CatalogIdentity -> HinagataConfig -> CleanupSelection -> Deadline -> Snapshot -> IO (Either CleanupError CleanupResult)
 applyLocked connection maintenance options identity configuration selection deadline snapshot
@@ -292,6 +377,18 @@ lookupSnapshot connection configuration deadline identifier = do
     Right [] -> Right Nothing
     Right [row] -> Just <$> decodeSnapshot row
     Right _ -> Left (failure "allocation identity is ambiguous")
+
+lookupLeaseSnapshot :: PQ.Connection -> HinagataConfig -> Deadline -> Text -> IO (Either CleanupError (Maybe Snapshot))
+lookupLeaseSnapshot connection configuration deadline identifier = do
+  let schema = quoteSqlIdentifier (maintenanceSchema configuration)
+      statement = Encoding.encodeUtf8 ("SELECT a.id, a.generation_id, a.database_name::text, a.database_oid::text, a.ownership_token::text, a.state, l.id FROM " <> schema <> ".\"allocations\" a JOIN " <> schema <> ".\"leases\" l ON l.allocation_id = a.id WHERE l.id = $1 AND a.project_id = $2")
+      args = map (Just . Encoding.encodeUtf8) [identifier, projectIdText (project configuration)]
+  rows <- queryParamRows connection deadline Sql statement args 1
+  pure $ case rows of
+    Left problem -> Left (nativeFailure problem)
+    Right [] -> Right Nothing
+    Right [row] -> Just <$> decodeSnapshot row
+    Right _ -> Left (failure "lease identity is ambiguous")
 
 decodeSnapshot :: [Maybe ByteString] -> Either CleanupError Snapshot
 decodeSnapshot [Just identifier, Just generation, Just database, maybeOid, Just token, Just state, maybeLease] = do

@@ -79,6 +79,8 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 2026-10-02 generation recovery progress: Once the project/fingerprint builder lock is acquired, the next caller marks any interrupted Building records for that fingerprint Failed before ready lookup or retry. A disposable-cluster test stops a builder during its migration hook, cancels one waiting caller, lets another waiting caller's deadline expire, then verifies that a surviving waiter publishes one Ready generation and the interrupted generation remains inspectable as Failed. This completes the first progress milestone; allocation-boundary and catalog-upgrade recovery proof remain in the third.
 
+2026-10-02 lease inspection progress: `inspectLease` looks up a public lease ID and classifies live, retained, missing, foreign, and released records without changing them. `preserveLease` uses the same generation lock, live lease try-lock, protected-target checks, and name/OID/owner/marker verification as cleanup before atomically marking an ended clone Preserved. Integration tests cover live refusal, detached preservation, foreign-marker refusal, idempotent preservation, and inspection after release. Allocation-boundary process kills and catalog-format upgrades remain open in the third milestone.
+
 
 ## Surprises & Discoveries
 

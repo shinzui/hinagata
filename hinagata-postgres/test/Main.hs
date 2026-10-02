@@ -445,6 +445,10 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
       liveCandidates = [candidate | candidate@CleanupCandidate {leaseId = Just identifier} <- livePreview, identifier == liveLease]
   assert "held lease session lock appears live in cleanup preview" (case liveCandidates of [CleanupCandidate {disposition = Live}] -> True; _ -> False)
   liveAllocation <- case liveCandidates of [candidate] -> pure (allocationId candidate); _ -> fail "live allocation is absent"
+  liveInspection <- inspectLease lifecycleConfig liveLease
+  assert "direct lease inspection reports a live callback" (case liveInspection of Right (Just CleanupCandidate {disposition = Live}) -> True; _ -> False)
+  livePreserve <- preserveLease lifecycleConfig liveLease
+  assert "explicit preservation skips a live callback" (livePreserve == Right (Skipped liveAllocation Live))
   liveApply <- applyCleanup lifecycleConfig IncludeRetained [liveAllocation]
   assert "explicit apply skips a live callback" (liveApply == Right [Skipped liveAllocation Live])
   putMVar releaseLive ()
@@ -513,8 +517,27 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   let LeaseInfo {leaseId = detachedId} = detachedInfo
   detachedPreview <- orFail =<< planCleanup lifecycleConfig
   assert "detached acquisition is retained without an active callback slot" (case [disposition candidate | candidate@CleanupCandidate {leaseId = Just identifier} <- detachedPreview, identifier == detachedId] of [Retained] -> True; _ -> False)
+  detachedInspection <- inspectLease lifecycleConfig detachedId
+  assert "direct inspection reports a detached lease" (case detachedInspection of Right (Just CleanupCandidate {state = "Detached", disposition = Retained}) -> True; _ -> False)
+  let detachedDatabase = databaseNameText (connectionDatabase (applicationTarget detachedInfo))
+  detachedToken <- queryText connection (Encoding.encodeUtf8 ("SELECT a.ownership_token::text FROM hinagata_test.allocations a JOIN hinagata_test.leases l ON l.allocation_id = a.id WHERE l.id = '" <> detachedId <> "'"))
+  execCheck connection (Encoding.encodeUtf8 ("COMMENT ON DATABASE \"" <> detachedDatabase <> "\" IS 'foreign'"))
+  foreignInspection <- inspectLease lifecycleConfig detachedId
+  assert "inspection exposes changed ownership evidence on a retained clone" (case foreignInspection of Right (Just CleanupCandidate {disposition = Foreign}) -> True; _ -> False)
+  foreignPreserve <- preserveLease lifecycleConfig detachedId
+  assert "explicit preservation refuses changed ownership evidence" (case foreignPreserve of Right (Refused _ _) -> True; _ -> False)
+  let detachedMarker = "hinagata:v1:" <> clusterUuid catalog <> ":" <> Encoding.decodeUtf8 detachedToken
+  execCheck connection (Encoding.encodeUtf8 ("COMMENT ON DATABASE \"" <> detachedDatabase <> "\" IS '" <> detachedMarker <> "'"))
+  detachedPreserve <- preserveLease lifecycleConfig detachedId
+  assert "detached lease can be explicitly preserved" (case detachedPreserve of Right (Preserved _) -> True; _ -> False)
+  detachedRePreserve <- preserveLease lifecycleConfig detachedId
+  assert "explicit lease preservation is idempotent" (case detachedRePreserve of Right (Preserved _) -> True; _ -> False)
+  preservedInspection <- inspectLease lifecycleConfig detachedId
+  assert "explicit preservation updates the lease state" (case preservedInspection of Right (Just CleanupCandidate {state = "Preserved", disposition = Retained}) -> True; _ -> False)
   detachedRelease <- releaseLease lifecycleConfig detachedId
   assert "detached lease releases by explicit ID" (case detachedRelease of Right (Released _) -> True; _ -> False)
+  releasedInspection <- inspectLease lifecycleConfig detachedId
+  assert "released lease remains inspectable by ID" (case releasedInspection of Right (Just CleanupCandidate {state = "Released", disposition = Missing}) -> True; _ -> False)
   detachedReRelease <- releaseLease lifecycleConfig detachedId
   assert "detached release by lease ID is idempotent" (case detachedReRelease of Right (AlreadyReleased _) -> True; _ -> False)
   thrownInfo <- newEmptyMVar
