@@ -386,6 +386,27 @@ def spare_clone_cases(workspace, cli):
     }
 
 
+def render_summary(result):
+    lines = []
+    for rows, case in result["small"]["cases"].items():
+        lines.append(f"{rows} rows warm scope: median={case['setup']['median']:.1f} ms p95={case['setup']['p95_nearest_rank']:.1f} ms n={case['setup']['count']}")
+    for rows, case in result["bulk"].items():
+        ratio = result["gates"]["copy_ratios"][rows]
+        lines.append(f"{rows} rows COPY: Hinagata={case['hinagata']['copy']['median']:.1f} ms psql={case['psql']['copy']['median']:.1f} ms ratio={ratio:.2f} n={case['hinagata']['copy']['count']}")
+    if result["lifecycle"]:
+        lifecycle = result["lifecycle"]
+        lines.append(f"1m clone WAL_LOG={lifecycle['clone']['WAL_LOG']['phase']['median']:.1f} ms FILE_COPY={lifecycle['clone']['FILE_COPY']['phase']['median']:.1f} ms; rebuild={lifecycle['full_rebuild']['scope']['median']:.1f} ms")
+    if result["concurrency"]:
+        for count, case in result["concurrency"].items():
+            lines.append(f"concurrency {count}: throughput={case['throughput']['median']:.2f} leases/s tail={case['request_tail']['median']:.1f} ms max_active_create={case['max_observed_create']}")
+    if result["spare_clones"]:
+        spare = result["spare_clones"]
+        lines.append(f"four-spare experiment: on-demand p95={spare['on_demand']['ready']['p95_nearest_rank']:.1f} ms prepared-handoff p95={spare['prepared_spares']['handoff_p95_nearest_rank_ms']:.1f} ms disk={spare['prepared_spares']['disk_bytes']} bytes")
+    gates = result["gates"]
+    lines.append(f"gates: small_setup={gates['small_setup']} copy_ratio={gates['copy_ratio']} incremental_client_rss={gates['incremental_client_rss']} valid_sample_counts={gates['valid_sample_counts']}")
+    return "\n".join(lines) + "\n"
+
+
 def main():
     if SMALL_REPS < 1 or BULK_REPS < 1:
         raise SystemExit("repetition counts must be positive")
@@ -426,21 +447,10 @@ def main():
     memory_gate = memory_delta is not None and memory_delta <= 64 * 1024 * 1024
     result["gates"] = {"small_setup": small_gate, "copy_ratio": copy_gate, "copy_ratios": copy_ratios, "incremental_client_rss_bytes": memory_delta, "incremental_client_rss": memory_gate, "valid_sample_counts": SMALL_REPS >= 30 and BULK_REPS >= 5}
     (ARTIFACT / "results.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    summary_text = render_summary(result)
+    (ARTIFACT / "summary.txt").write_text(summary_text)
     print(f"Benchmark results: {ARTIFACT / 'results.json'}")
-    for rows, case in result["small"]["cases"].items():
-        print(f"{rows} rows warm scope: median={case['setup']['median']:.1f} ms p95={case['setup']['p95_nearest_rank']:.1f} ms n={case['setup']['count']}")
-    for rows, case in result["bulk"].items():
-        ratio = copy_ratios[rows]
-        print(f"{rows} rows COPY: Hinagata={case['hinagata']['copy']['median']:.1f} ms psql={case['psql']['copy']['median']:.1f} ms ratio={ratio:.2f} n={BULK_REPS}")
-    if result["lifecycle"]:
-        lifecycle = result["lifecycle"]
-        print(f"1m clone WAL_LOG={lifecycle['clone']['WAL_LOG']['phase']['median']:.1f} ms FILE_COPY={lifecycle['clone']['FILE_COPY']['phase']['median']:.1f} ms; rebuild={lifecycle['full_rebuild']['scope']['median']:.1f} ms")
-    if result["concurrency"]:
-        for count, case in result["concurrency"].items():
-            print(f"concurrency {count}: throughput={case['throughput']['median']:.2f} leases/s tail={case['request_tail']['median']:.1f} ms max_active_create={case['max_observed_create']}")
-    if result["spare_clones"]:
-        spare = result["spare_clones"]
-        print(f"four-spare experiment: on-demand p95={spare['on_demand']['ready']['p95_nearest_rank']:.1f} ms prepared-handoff p95={spare['prepared_spares']['handoff_p95_nearest_rank_ms']:.1f} ms disk={spare['prepared_spares']['disk_bytes']} bytes")
+    print(summary_text, end="")
     if result["gates"]["valid_sample_counts"] and not all((small_gate, copy_gate, memory_gate)):
         raise RuntimeError(f"reference-machine performance gate missed: {result['gates']}")
 

@@ -9,6 +9,7 @@ in  Schema.Workspace::{
     , fragments =
       [ Schema.Fragment::{ name = "health", path = "hurl/health.hurl" }
       , Schema.Fragment::{ name = "references", path = "hurl/references.hurl" }
+      , Schema.Fragment::{ name = "references-alternate", path = "hurl/references-alternate.hurl" }
       , Schema.Fragment::{ name = "counter-write", path = "hurl/counter-write.hurl" }
       , Schema.Fragment::{ name = "generated-id", path = "hurl/generated-id.hurl" }
       , Schema.Fragment::{ name = "hold", path = "hurl/hold.hurl" }
@@ -16,6 +17,7 @@ in  Schema.Workspace::{
     , workflows =
       [ Schema.Workflow::{ name = "health", fragments = [ "health" ], parameters = [ "base_url" ] }
       , Schema.Workflow::{ name = "references", fragments = [ "references" ], parameters = [ "base_url" ] }
+      , Schema.Workflow::{ name = "references-alternate", fragments = [ "references-alternate" ], parameters = [ "base_url" ] }
       , Schema.Workflow::{ name = "counter-write", fragments = [ "counter-write" ], parameters = [ "base_url" ] }
       , Schema.Workflow::{ name = "generated-id", fragments = [ "generated-id" ], parameters = [ "base_url" ] }
       , Schema.Workflow::{ name = "hold", fragments = [ "hold" ], parameters = [ "base_url" ] }
@@ -23,6 +25,7 @@ in  Schema.Workspace::{
     , recipes =
       [ Schema.Recipe::{ name = "health", workflow = "health", safety = Schema.Safety.ReadOnly }
       , Schema.Recipe::{ name = "references", workflow = "references", safety = Schema.Safety.ReadOnly }
+      , Schema.Recipe::{ name = "references-alternate", workflow = "references-alternate", safety = Schema.Safety.ReadOnly }
       , Schema.Recipe::{ name = "counter-write", workflow = "counter-write", safety = Schema.Safety.Mutating }
       , Schema.Recipe::{ name = "generated-id", workflow = "generated-id", safety = Schema.Safety.Mutating }
       , Schema.Recipe::{ name = "hold", workflow = "hold", safety = Schema.Safety.ReadOnly }
@@ -41,6 +44,12 @@ in  Schema.Workspace::{
       [ Schema.Suite::{
         , name = "default"
         , runs = [ Schema.RunReference.Recipe "health", Schema.RunReference.Recipe "references" ]
+        , service = Some "keiro-service"
+        , failFast = True
+        }
+      , Schema.Suite::{
+        , name = "alternate"
+        , runs = [ Schema.RunReference.Recipe "health", Schema.RunReference.Recipe "references-alternate" ]
         , service = Some "keiro-service"
         , failFast = True
         }

@@ -26,7 +26,7 @@ Amended: 2026-10-02 (interrupt callbacks when their lease-owning session dies)
 
 Amended: 2026-10-02 (process-death evidence across allocation and publication boundaries)
 
-Amended: 2026-10-02 (bounded ownership heartbeat survives callback cancellation)
+Amended: 2026-10-02 (ownership heartbeat completes cooperatively before release)
 
 Amended: 2026-10-02 (verify only the scenario suffix on repeated leases)
 
@@ -47,7 +47,7 @@ PostgreSQL's [`DROP DATABASE` reference](https://www.postgresql.org/docs/18/sql-
 
 A caller-supplied classifier identifies failure values without changing them. The policy may preserve those values or thrown callback failures; detached acquisition records a retained clone after setup. Both are released by explicit lease ID, with the same lock and positive-ownership checks as orphan cleanup. Cleanup diagnostics accompany returned values separately, while a thrown callback keeps its original exception.
 
-While a callback runs, Hinagata probes its existing maintenance session for liveness. Losing that session cancels the callback and returns a lease error after the callback has unwound; the clone stays cataloged as an orphan for explicit ownership-checked recovery. A timed heartbeat adds no database connection and does not turn elapsed time into cleanup authority. When a callback completes, cancellation of its watcher must not interrupt an in-flight heartbeat query and retire the maintenance session before ownership-checked release. The bounded probe finishes under asynchronous-exception masking, then the watcher exits.
+While a callback runs, Hinagata probes its existing maintenance session for liveness. Losing that session cancels the callback and returns a lease error after the callback has unwound; the clone stays cataloged as an orphan for explicit ownership-checked recovery. A timed heartbeat adds no database connection and does not turn elapsed time into cleanup authority. When a callback completes or is cancelled, it signals the watcher to stop and waits for any bounded in-flight heartbeat query before ownership-checked release. Cancelling that query directly can retire the shared session even under ordinary asynchronous-exception masking, because socket waits remain interruptible.
 
 An optional trusted clone preparation hook uses setup access after clone grants and settings and before scenario fixtures. It runs for every new clone, including clones of a reused baseline. The hook is kept on the in-memory baseline handle and does not affect the sealed template fingerprint; a hook failure prevents callback handoff and triggers ownership-checked release.
 

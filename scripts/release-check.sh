@@ -11,6 +11,14 @@ for archive in "$workspace"/tarballs/*.tar.gz; do
   tar -xzf "$archive" -C "$workspace/unpacked"
 done
 
+keiro_source=("$workspace"/unpacked/hinagata-keiro-example-*)
+test "${#keiro_source[@]}" -eq 1
+test -f "${keiro_source[0]}/hurl-workbench.dhall"
+test -f "${keiro_source[0]}/fixtures/reference-seed/fixture.sql"
+test -f "${keiro_source[0]}/fixtures/service-scenario/fixture.yaml"
+test -f "${keiro_source[0]}/fixtures/service-scenario-alternate/fixture.yaml"
+hurlfmt --check "${keiro_source[0]}"/hurl/*.hurl
+
 cat > "$workspace/unpacked/cabal.project" <<'PROJECT'
 packages: ./*/*.cabal
 tests: True

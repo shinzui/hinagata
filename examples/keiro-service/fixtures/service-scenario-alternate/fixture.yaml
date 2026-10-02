@@ -1,0 +1,5 @@
+name: service-scenario-alternate
+description: Include the verified baseline and seed a distinct third reference row.
+include: [reference-seed]
+steps:
+  - sql: scenario.sql

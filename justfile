@@ -21,7 +21,7 @@ example-workbench:
 
 example-keiro:
     cabal build hinagata-cli hinagata-keiro-example
-    hurlfmt --check examples/keiro-service/hurl/health.hurl examples/keiro-service/hurl/references.hurl examples/keiro-service/hurl/counter-write.hurl examples/keiro-service/hurl/generated-id.hurl examples/keiro-service/hurl/hold.hurl
+    hurlfmt --check examples/keiro-service/hurl/health.hurl examples/keiro-service/hurl/references.hurl examples/keiro-service/hurl/references-alternate.hurl examples/keiro-service/hurl/counter-write.hurl examples/keiro-service/hurl/generated-id.hurl examples/keiro-service/hurl/hold.hurl
     bash scripts/test-postgres.sh --keiro-example
 
 test-postgres:

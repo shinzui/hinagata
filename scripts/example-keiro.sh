@@ -84,12 +84,12 @@ test "$first_port" != "$second_port"
 
 workbench_ref='github:shinzui/hurl-workbench/a29d26ad5e90aa762de88be18f06fddf67b6d02f#default'
 run_suite() {
-  local label="$1" suite="$2" port="$3" mutating="$4"
+  local label="$1" suite="$2" port="$3" mutating="$4" fixture="${5:-service-scenario}"
   local -a mutation_flag=()
   if test "$mutating" = yes; then mutation_flag=(--allow-mutating); fi
   local started elapsed
   started="$(python3 -c 'import time; print(time.monotonic_ns())')"
-  "$binary" --config "$example/hinagata.yaml" db with --fixture service-scenario --json -- \
+  "$binary" --config "$example/hinagata.yaml" db with --fixture "$fixture" --json -- \
     nix shell "$workbench_ref" -c hurl-workbench \
       --workspace "$example/hurl-workbench.dhall" \
       test suite "$suite" "${mutation_flag[@]}" \
@@ -117,8 +117,36 @@ print(result["leaseId"])
 PY
 }
 
-first_lease="$(run_suite first default "$first_port" no)"
-second_lease="$(run_suite second default "$second_port" no)"
+export EXAMPLE_SERVICE_START_BARRIER="$workspace/service-start-barrier"
+run_suite first default "$first_port" no > "$workspace/first-lease" &
+first_suite_pid=$!
+run_suite second alternate "$second_port" no service-scenario-alternate > "$workspace/second-lease" &
+second_suite_pid=$!
+overlap_observed=no
+for attempt in $(seq 1 200); do
+  live_services=0
+  for pid_file in "$workspace"/pids/*; do
+    if test -f "$pid_file" && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+      live_services=$((live_services + 1))
+    fi
+  done
+  if test "$live_services" -eq 2; then
+    overlap_observed=yes
+    break
+  fi
+  sleep 0.05
+done
+touch "$EXAMPLE_SERVICE_START_BARRIER"
+unset EXAMPLE_SERVICE_START_BARRIER
+first_suite_status=0
+second_suite_status=0
+wait "$first_suite_pid" || first_suite_status=$?
+wait "$second_suite_pid" || second_suite_status=$?
+test "$overlap_observed" = yes
+test "$first_suite_status" -eq 0
+test "$second_suite_status" -eq 0
+first_lease="$(cat "$workspace/first-lease")"
+second_lease="$(cat "$workspace/second-lease")"
 test "$first_lease" != "$second_lease"
 run_suite command counter-write "$first_port" yes > "$workspace/command-lease"
 run_suite generated generated-id "$second_port" yes > "$workspace/generated-lease"

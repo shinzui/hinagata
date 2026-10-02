@@ -62,7 +62,7 @@ A service author can copy a complete Keiro integration example and measure Hinag
 
 2026-10-02 benchmark progress: `just release-check` passes with all five unpacked packages and their Haddocks. A disposable-cluster `just bench-fixtures` driver writes ignored per-sample JSON and validates 30 warm 100/1,000-row scenarios, five 100k/1m COPY runs against one-session `psql`, GHC/process residency, and five million-row clone/rebuild samples. On the documented M1 Max reference run, warm medians are 207.6/201.4 ms, 1m COPY is 919 ms versus `psql` 869 ms (1.06×), and the 100k-to-1m client RSS increment is 16 KiB; all three numeric gates pass. `FILE_COPY` clones are faster locally but retain the checkpoint tradeoff and `WAL_LOG` default. Concurrent throughput, service timing, and spare-clone evidence remain open.
 
-2026-10-02 completion: The final full reference run is recorded in [performance evidence](../performance.md) and its ignored `bench/results/20261002T154229Z/results.json` artifact. Thirty warm small scenarios per size measured 232/230 ms median and 286/257 ms nearest-rank p95, below the 250/500 ms limits. Five 100k/1m COPY samples per method measured 0.90×/1.09× one-session `psql`; client RSS stayed flat across tenfold input growth. One prepared manager showed four overlapping `CREATE DATABASE` operations at concurrency four and eight under the four-worker cap. The four-spare experiment reduced handoff latency but moved clone work and 299 MB of storage ahead of demand. The service proof includes two distinct leases/ports, public command and read, generated IDs, role denial, readiness failure, and cancellation cleanup. All five source archives build, test, and generate Haddocks in isolation.
+2026-10-02 completion: The latest full reference run after the ownership-watcher correction is recorded in [performance evidence](../performance.md) and its ignored `bench/results/20261002T161017Z/results.json` artifact. Thirty warm small scenarios per size measured 185/194 ms median and 196/244 ms nearest-rank p95, below the 250/500 ms limits. Five 100k/1m COPY samples per method measured 0.94×/1.00× one-session `psql`; client RSS stayed flat across tenfold input growth. One prepared manager showed four overlapping `CREATE DATABASE` operations at concurrency four and eight under the four-worker cap. The four-spare experiment reduced handoff latency but moved clone work and about 299 MB of storage ahead of demand. The service proof includes concurrent distinct seeded leases/ports, public command and read, generated IDs, role denial, readiness failure, and cancellation cleanup. All five source archives build, test, and generate Haddocks in isolation.
 
 
 ## Surprises & Discoveries
@@ -71,6 +71,8 @@ A service author can copy a complete Keiro integration example and measure Hinag
 
 2026-10-02: The first measured 1m COPY was 1.68× `psql` and client RSS grew with input size. Nonblocking libpq had queued successful `PQputCopyData` calls until COPY end; flushing each 64 KiB chunk reduced the median ratio to about 1.06× and held RSS flat. The first million-row clone probe also rehashed the same base bundle twice per lease. Verifying only the scenario suffix before clone creation, while checking streamed bytes again during use, reduced the no-op remainder's scenario-load phase from about 76 ms to 1–2 ms.
 
+2026-10-02 completion audit: Two read suites now run concurrently against separate service ports and leases, with `gamma` versus `delta` as their third seeded row. A startup barrier proves both service wrappers are live together before either starts HTTP assertions. That stronger proof exposed `SessionClosed` despite the earlier heartbeat mask: an interruptible socket wait still received watcher cancellation. The ownership watcher now stops cooperatively and finishes any bounded query before release; the concurrent service proof passes. The PostgreSQL integration fixture already has an explicit COPY-then-`ANALYZE` step, and its report separates `copyMs` from `sqlMs`; the release benchmark deliberately omits analysis and says so.
+
 
 ## Decision Log
 
@@ -78,9 +80,9 @@ A service author can copy a complete Keiro integration example and measure Hinag
 
 2026-09-30: Add two measurements the architecture review made necessary: compare the `WAL_LOG` and `FILE_COPY` clone strategies on the million-row baseline, and prove from phase timings that concurrent clone allocations overlap instead of queueing on Hinagata's shared-mode baseline lock.
 
-2026-10-02: Keep `WAL_LOG` as the default. On the reference machine `FILE_COPY` shortened the median million-row clone phase from 330 to 77 ms, but each scope caused two additional requested/completed checkpoints relative to `WAL_LOG`; a cluster-wide checkpoint cost should not be silently traded for local lease latency.
+2026-10-02: Keep `WAL_LOG` as the default. On the latest reference run `FILE_COPY` shortened the median million-row clone phase from 364 to 91 ms, but each scope caused two additional requested/completed checkpoints relative to `WAL_LOG`; a cluster-wide checkpoint cost should not be silently traded for local lease latency.
 
-2026-10-02: Defer a public spare-clone pool. Four prepared spares shortened median handoff from 1,596 to 16 ms but required 1,597 ms initial preparation, 1,650 ms replenishment, 299 MB storage, and new ownership/cancellation/crash semantics. The measured on-demand path meets the initial release targets without that lifecycle expansion.
+2026-10-02: Defer a public spare-clone pool. In the latest run four prepared spares shortened median handoff from 1,976 to 16 ms but required 2,879 ms initial preparation, 1,970 ms replenishment, 299 MB storage, and new ownership/cancellation/crash semantics. The measured on-demand path meets the initial release targets without that lifecycle expansion.
 
 
 ## Outcomes & Retrospective

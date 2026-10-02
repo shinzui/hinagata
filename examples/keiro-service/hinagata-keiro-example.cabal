@@ -9,6 +9,8 @@ build-type: Simple
 extra-source-files:
   README.md
   fixtures/reference-seed/fixture.sql
+  fixtures/service-scenario-alternate/fixture.yaml
+  fixtures/service-scenario-alternate/scenario.sql
   fixtures/service-scenario/fixture.yaml
   fixtures/service-scenario/scenario.sql
   hinagata.yaml
@@ -17,6 +19,7 @@ extra-source-files:
   hurl/generated-id.hurl
   hurl/health.hurl
   hurl/hold.hurl
+  hurl/references-alternate.hurl
   hurl/references.hurl
   service-wrapper.sh
 

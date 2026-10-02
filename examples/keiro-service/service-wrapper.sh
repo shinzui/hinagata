@@ -13,4 +13,11 @@ fi
 if [[ -n "${EXAMPLE_SERVICE_READY_FILE:-}" ]]; then
   printf '%s\n' "$$" > "$EXAMPLE_SERVICE_READY_FILE"
 fi
+if [[ -n "${EXAMPLE_SERVICE_START_BARRIER:-}" ]]; then
+  for attempt in $(seq 1 200); do
+    [[ -e "$EXAMPLE_SERVICE_START_BARRIER" ]] && break
+    sleep 0.05
+  done
+  [[ -e "$EXAMPLE_SERVICE_START_BARRIER" ]] || exit 1
+fi
 exec "${EXAMPLE_SERVICE_BINARY:?EXAMPLE_SERVICE_BINARY is required}"

@@ -127,7 +127,7 @@ EP-1's 2026-10-01 memory probe caught lazy SHA256 context accumulation despite b
 
 EP-3 fault injection confirms that process death after CREATE or marker writing can leave an allocation with no committed OID. EP-4's cleanup command must present that ambiguity and refuse automatic deletion. A sealed but unpublished Building generation remains inspectable while the next builder publishes a replacement; a published Ready generation remains reusable after its publisher exits.
 
-EP-5's stress run exposed a cancellation race between lease heartbeat and release; the bounded watcher query is masked to protect the shared maintenance session. Profiling also found unflushed nonblocking COPY writes and redundant base-bundle hashing on each clone; bounded per-chunk flush and suffix-only preflight corrected the measured cost while preserving digest checks. ADRs 2 and 3 record those durable changes.
+EP-5's stress run exposed a cancellation race between lease heartbeat and release. A mask alone did not protect an interruptible socket wait under concurrent service scopes; the callback now stops the watcher cooperatively and joins its bounded query before using the shared maintenance session for release. Profiling also found unflushed nonblocking COPY writes and redundant base-bundle hashing on each clone; bounded per-chunk flush and suffix-only preflight corrected the measured cost while preserving digest checks. ADRs 2 and 3 record those durable changes.
 
 
 ## Decision Log

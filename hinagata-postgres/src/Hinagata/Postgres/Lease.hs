@@ -12,9 +12,9 @@ module Hinagata.Postgres.Lease
   )
 where
 
-import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async qualified as Async
-import Control.Exception (IOException, SomeAsyncException, SomeException, evaluate, fromException, mask, mask_, throwIO, try)
+import Control.Concurrent.MVar (newEmptyMVar, readMVar, tryPutMVar)
+import Control.Exception (IOException, SomeAsyncException, SomeException, evaluate, fromException, mask, throwIO, try)
 import Data.Bifunctor (first)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.Text qualified as Text
@@ -162,13 +162,13 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
                               returned <-
                                 try @SomeException
                                   ( restore
-                                      ( Async.race
+                                      ( raceWithOwnership
+                                          session
                                           ( do
                                               value <- callback info
                                               failed <- if policy == DetachAlways then pure False else evaluate (classifyResult value)
                                               pure (value, failed)
                                           )
-                                          (watchOwnership session)
                                       )
                                   )
                               case returned of
@@ -202,20 +202,37 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
       Right (_, Left problem) -> LeaseOutcome value info LeaseCleanupFailed (Just problem) recorded
       Right (disposition, Right ()) -> LeaseOutcome value info disposition Nothing recorded
 
-    watchOwnership session = do
-      threadDelay 250000
-      -- The callback winner cancels this watcher. Keep its bounded ping
-      -- atomic with respect to cancellation so release inherits an open
-      -- maintenance session instead of a retired one.
-      checked <- mask_ $ runExclusive session $ \connection _ -> do
-        deadline <- deadlineAfter 1000
-        ping <- query connection deadline Sql "SELECT 1"
-        pure $ case ping of
-          Right () -> Keep True
-          Left _ -> Retire False
-      case checked of
-        Right True -> watchOwnership session
-        _ -> pure (failure "lease ownership connection was lost during callback")
+    raceWithOwnership session action = mask $ \restore -> do
+      stop <- newEmptyMVar
+      watcher <- Async.async (watchOwnership session stop)
+      raced <- try @SomeException (restore (Async.race action (Async.wait watcher)))
+      _ <- tryPutMVar stop ()
+      -- Async.race cancels only the thread waiting on watcher. Let an in-flight
+      -- ping finish before release uses the same maintenance session.
+      settled <- Async.waitCatch watcher
+      case raced of
+        Left exception -> throwIO exception
+        Right (Right (Just problem)) -> pure (Right problem)
+        Right (Right Nothing) -> pure (Right (failure "ownership watcher stopped before callback"))
+        Right (Left value) -> case settled of
+          Right Nothing -> pure (Left value)
+          Right (Just problem) -> pure (Right problem)
+          Left exception -> throwIO exception
+
+    watchOwnership session stop = do
+      stopped <- timeout 250000 (readMVar stop)
+      case stopped of
+        Just () -> pure Nothing
+        Nothing -> do
+          checked <- runExclusive session $ \connection _ -> do
+            deadline <- deadlineAfter 1000
+            ping <- query connection deadline Sql "SELECT 1"
+            pure $ case ping of
+              Right () -> Keep True
+              Left _ -> Retire False
+          case checked of
+            Right True -> watchOwnership session stop
+            _ -> pure (Just (failure "lease ownership connection was lost during callback"))
 
     prepareClone timingRef session clone composed = do
       let OwnedDatabase {name = database} = owned clone
