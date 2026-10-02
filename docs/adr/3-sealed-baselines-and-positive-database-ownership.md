@@ -8,6 +8,8 @@ Amended: 2026-10-01 (lock modes, generation preparation, explicit schema grants,
 
 Amended: 2026-10-02 (role-owned database settings during generation preparation)
 
+Amended: 2026-10-02 (read-only cleanup inspection and per-ID locked revalidation)
+
 ## Context
 
 Reuse must not silently test stale migrations or share scenario state. CREATE/DROP DATABASE are nontransactional, and copying a template requires no connected sessions.
@@ -19,6 +21,9 @@ Build immutable generations on the existing cluster; migrate, load, verify, disc
 Store a non-secret fingerprint manifest, including state-affecting role/configuration and hook revisions, with explainable reuse/build outcomes. Reusable handles avoid rereading fixture bytes but do not bypass database identity checks. Baseline/scenario composition resolves base roots first and skips only that verified prefix on a fresh clone; conflicting shared definitions are errors. Concurrent construction has deadline-bound cancellable waiting and observable failed generations.
 
 Only positively identified owned databases may be removed. Borrowed/protected targets never qualify. A held session lock is the only proof that a lease is live; cleanup skips live and preserved leases, reports a record whose lock is free as orphaned, removes orphans only on explicit apply, previews before applying, and refuses ambiguous crash windows. Use ordinary PostgreSQL durability. PostgreSQL documents the role-specific settings permission boundary in its [ALTER ROLE reference](https://www.postgresql.org/docs/18/sql-alterrole.html).
+
+Cleanup preview validates an existing catalog without creating one and reads candidates in bounded pages. Apply selects concrete allocation IDs, takes their generation lock exclusively, then checks the lease lock and current database identity again; preview results are never deletion authority. A missing bound database can be marked released idempotently, while an allocation without a bound OID remains ambiguous even if its name exists.
+PostgreSQL's [`DROP DATABASE` reference](https://www.postgresql.org/docs/18/sql-dropdatabase.html) limits `FORCE`: prepared transactions, active logical replication slots, and subscriptions can still block removal. Hinagata leaves such records inspectable as cleanup failures.
 
 ## Consequences
 

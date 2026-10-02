@@ -24,6 +24,7 @@ library
   hs-source-dirs: src
   exposed-modules:
     Hinagata.Postgres.Baseline
+    Hinagata.Postgres.Cleanup
     Hinagata.Postgres.Error
     Hinagata.Postgres.Lease
     Hinagata.Postgres.Load

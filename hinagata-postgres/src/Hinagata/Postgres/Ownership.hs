@@ -5,6 +5,7 @@ module Hinagata.Postgres.Ownership
     OwnedDatabase (..),
     OwnershipEvidence (..),
     ensureCatalog,
+    inspectCatalog,
     verifyOwnedDatabase,
   )
 where
@@ -57,6 +58,28 @@ ensureCatalog :: ConnectionTarget -> SqlIdentifier -> SessionOptions -> IO (Eith
 ensureCatalog target schema options = do
   opened <- withSession target options $ \session ->
     runExclusive session $ \connection sessionOptions -> bootstrap connection schema sessionOptions
+  pure $ case opened of
+    Left failure -> Left (sessionFailure failure)
+    Right (Left failure) -> Left (sessionFailure failure)
+    Right (Right result) -> result
+
+-- | Validate an existing catalog without creating a schema or changing any
+-- catalog row. Cleanup previews use this entry point to remain read-only.
+inspectCatalog :: ConnectionTarget -> SqlIdentifier -> SessionOptions -> IO (Either CatalogError CatalogIdentity)
+inspectCatalog target schema options = do
+  opened <- withSession target options $ \session ->
+    runExclusive session $ \connection sessionOptions -> do
+      deadline <- deadlineAfter (operationDeadlineMs sessionOptions)
+      let name = Encoding.encodeUtf8 (sqlIdentifierText schema)
+      namespace <- queryParamRows connection deadline Sql "SELECT pg_get_userbyid(nspowner), current_user FROM pg_namespace WHERE nspname = $1" [Just name] 1
+      checked <- case namespace of
+        Left failure -> pure (Left (nativeFailure failure))
+        Right [[Just owner, Just current]]
+          | owner == current -> validateCatalog connection schema deadline
+          | otherwise -> pure (Left (CatalogError "maintenance schema is owned by another role" Nothing Nothing))
+        Right [] -> pure (Left (CatalogError "maintenance catalog does not exist" Nothing Nothing))
+        Right _ -> pure (Left (CatalogError "maintenance schema identity is ambiguous" Nothing Nothing))
+      pure (Keep checked)
   pure $ case opened of
     Left failure -> Left (sessionFailure failure)
     Right (Left failure) -> Left (sessionFailure failure)

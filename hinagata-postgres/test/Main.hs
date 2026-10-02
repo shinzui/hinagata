@@ -13,6 +13,7 @@ import Hinagata.Connection
 import Hinagata.Fixture.Bundle
 import Hinagata.Fixture.Types
 import Hinagata.Postgres.Baseline hiding (elapsedMs)
+import Hinagata.Postgres.Cleanup
 import Hinagata.Postgres.Error (LoadError (..), LoadPhase (..))
 import Hinagata.Postgres.Lease
 import Hinagata.Postgres.Load
@@ -207,6 +208,9 @@ integrationTests socket = withSystemTempDirectory "hinagata-postgres-test-" $ \w
 lifecycleTests :: ConnectionTarget -> PQ.Connection -> Host -> Port -> Text -> DatabaseName -> FilePath -> FilePath -> FixturePlan -> IO ()
 lifecycleTests target connection host port adminUser database fixtureRoot bundleRoot goodPlan = do
   catalogSchema <- orFail (mkSqlIdentifier "hinagata_test")
+  absentPreview <- inspectCatalog target catalogSchema defaultSessionOptions
+  assert "catalog inspection refuses an absent schema without creating it" (case absentPreview of Left _ -> True; Right _ -> False)
+  assert "catalog inspection leaves the schema absent" =<< ((== 0) <$> queryInt connection "SELECT count(*) FROM pg_namespace WHERE nspname = 'hinagata_test'")
   firstCatalog <- ensureCatalog target catalogSchema defaultSessionOptions
   secondCatalog <- ensureCatalog target catalogSchema defaultSessionOptions
   assert "catalog initializes and reuses one cluster identity" (case (firstCatalog, secondCatalog) of (Right first, Right second) -> first == second && formatVersion first == 1; _ -> False)
@@ -389,6 +393,87 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
     assert "deadline does not cancel another caller's lease" (case holder of Just (Right (Right _)) -> True; _ -> False)
     afterDeadline <- withManagedDatabase manager firstRef scenarioPlan (\_ -> pure ())
     assert "deadline releases pending admission" (case afterDeadline of Right _ -> True; Left _ -> False)
+  generationBytes <- queryText connection (Encoding.encodeUtf8 ("SELECT id FROM hinagata_test.generations WHERE database_name = '" <> databaseNameText (baselineDatabase firstRef) <> "'"))
+  let generationText = Encoding.decodeUtf8 generationBytes
+      orphanId = "11111111-1111-4111-8111-111111111111"
+      orphanLease = "22222222-2222-4222-8222-222222222222"
+      orphanDatabase = "hinagata_cleanup_orphan"
+      orphanToken = "33333333-3333-4333-8333-333333333333"
+      orphanMarker = "hinagata:v1:" <> clusterUuid catalog <> ":" <> orphanToken
+  execCheck connection (Encoding.encodeUtf8 ("CREATE DATABASE " <> orphanDatabase))
+  execCheck connection (Encoding.encodeUtf8 ("COMMENT ON DATABASE " <> orphanDatabase <> " IS '" <> orphanMarker <> "'"))
+  orphanOid <- queryInt connection (Encoding.encodeUtf8 ("SELECT oid FROM pg_database WHERE datname = '" <> orphanDatabase <> "'"))
+  execCheck connection (Encoding.encodeUtf8 ("INSERT INTO hinagata_test.allocations (id, project_id, generation_id, run_id, database_name, database_oid, ownership_token, state) VALUES ('" <> orphanId <> "', 'baseline-test', '" <> generationText <> "', 'recovery-run', '" <> orphanDatabase <> "', " <> Text.pack (show orphanOid) <> "::oid, '" <> orphanToken <> "', 'Active')"))
+  execCheck connection (Encoding.encodeUtf8 ("INSERT INTO hinagata_test.leases (id, allocation_id, run_id, state) VALUES ('" <> orphanLease <> "', '" <> orphanId <> "', 'recovery-run', 'Active')"))
+  candidates <- orFail =<< planCleanup lifecycleConfig
+  assert "free session lock classifies a positively owned active clone as orphaned" (case [disposition candidate | candidate <- candidates, allocationId candidate == orphanId] of [Orphaned] -> True; _ -> False)
+  assert "cleanup preview leaves an orphaned database present" =<< ((== 1) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> orphanDatabase <> "'")))
+  applied <- applyCleanup lifecycleConfig OrphansOnly [orphanId]
+  assert "explicit apply removes a revalidated orphan" (applied == Right [Released orphanId])
+  assert "orphaned clone is absent after apply" =<< ((== 0) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> orphanDatabase <> "'")))
+  reapplied <- applyCleanup lifecycleConfig OrphansOnly [orphanId]
+  assert "recovery release is idempotent" (reapplied == Right [AlreadyReleased orphanId])
+  liveStarted <- newEmptyMVar
+  releaseLive <- newEmptyMVar
+  liveFinished <- newEmptyMVar
+  _ <- forkIO (try @SomeException (withDatabase lifecycleConfig firstRef scenarioPlan (\info -> putMVar liveStarted info >> takeMVar releaseLive)) >>= putMVar liveFinished)
+  liveInfo <- takeMVar liveStarted
+  livePreview <- orFail =<< planCleanup lifecycleConfig
+  let LeaseInfo {leaseId = liveLease} = liveInfo
+      liveCandidates = [candidate | candidate@CleanupCandidate {leaseId = Just identifier} <- livePreview, identifier == liveLease]
+  assert "held lease session lock appears live in cleanup preview" (case liveCandidates of [CleanupCandidate {disposition = Live}] -> True; _ -> False)
+  liveAllocation <- case liveCandidates of [candidate] -> pure (allocationId candidate); _ -> fail "live allocation is absent"
+  liveApply <- applyCleanup lifecycleConfig IncludeRetained [liveAllocation]
+  assert "explicit apply skips a live callback" (liveApply == Right [Skipped liveAllocation Live])
+  putMVar releaseLive ()
+  liveResult <- timeout 10000000 (takeMVar liveFinished)
+  assert "live callback releases normally after cleanup skips it" (case liveResult of Just (Right (Right _)) -> True; _ -> False)
+  let retainedId = "44444444-4444-4444-8444-444444444444"
+      retainedLease = "55555555-5555-4555-8555-555555555555"
+      retainedDatabase = "hinagata_cleanup_retained"
+      retainedToken = "66666666-6666-4666-8666-666666666666"
+      retainedMarker = "hinagata:v1:" <> clusterUuid catalog <> ":" <> retainedToken
+  execCheck connection (Encoding.encodeUtf8 ("CREATE DATABASE " <> retainedDatabase))
+  execCheck connection (Encoding.encodeUtf8 ("COMMENT ON DATABASE " <> retainedDatabase <> " IS '" <> retainedMarker <> "'"))
+  retainedOid <- queryInt connection (Encoding.encodeUtf8 ("SELECT oid FROM pg_database WHERE datname = '" <> retainedDatabase <> "'"))
+  execCheck connection (Encoding.encodeUtf8 ("INSERT INTO hinagata_test.allocations (id, project_id, generation_id, run_id, database_name, database_oid, ownership_token, state) VALUES ('" <> retainedId <> "', 'baseline-test', '" <> generationText <> "', 'recovery-run', '" <> retainedDatabase <> "', " <> Text.pack (show retainedOid) <> "::oid, '" <> retainedToken <> "', 'Preserved')"))
+  execCheck connection (Encoding.encodeUtf8 ("INSERT INTO hinagata_test.leases (id, allocation_id, run_id, state) VALUES ('" <> retainedLease <> "', '" <> retainedId <> "', 'recovery-run', 'Preserved')"))
+  retainedPreview <- orFail =<< planCleanup lifecycleConfig
+  assert "preserved lease is classified as retained" (case [disposition candidate | candidate <- retainedPreview, allocationId candidate == retainedId] of [Retained] -> True; _ -> False)
+  ordinary <- applyCleanup lifecycleConfig OrphansOnly [retainedId]
+  assert "ordinary recovery skips a preserved database" (ordinary == Right [Skipped retainedId Retained])
+  selected <- applyCleanup lifecycleConfig IncludeRetained [retainedId]
+  assert "explicit retained selection releases a positively owned database" (selected == Right [Released retainedId])
+  let foreignId = "77777777-7777-4777-8777-777777777777"
+      foreignLease = "88888888-8888-4888-8888-888888888888"
+      foreignDatabase = "hinagata_cleanup_foreign"
+      foreignToken = "99999999-9999-4999-8999-999999999999"
+  execCheck connection (Encoding.encodeUtf8 ("CREATE DATABASE " <> foreignDatabase))
+  execCheck connection (Encoding.encodeUtf8 ("COMMENT ON DATABASE " <> foreignDatabase <> " IS 'foreign'"))
+  foreignOid <- queryInt connection (Encoding.encodeUtf8 ("SELECT oid FROM pg_database WHERE datname = '" <> foreignDatabase <> "'"))
+  execCheck connection (Encoding.encodeUtf8 ("INSERT INTO hinagata_test.allocations (id, project_id, generation_id, run_id, database_name, database_oid, ownership_token, state) VALUES ('" <> foreignId <> "', 'baseline-test', '" <> generationText <> "', 'recovery-run', '" <> foreignDatabase <> "', " <> Text.pack (show foreignOid) <> "::oid, '" <> foreignToken <> "', 'Active')"))
+  execCheck connection (Encoding.encodeUtf8 ("INSERT INTO hinagata_test.leases (id, allocation_id, run_id, state) VALUES ('" <> foreignLease <> "', '" <> foreignId <> "', 'recovery-run', 'Active')"))
+  foreignPreview <- orFail =<< planCleanup lifecycleConfig
+  assert "altered marker is visible as foreign evidence" (case [disposition candidate | candidate <- foreignPreview, allocationId candidate == foreignId] of [Foreign] -> True; _ -> False)
+  foreignApply <- applyCleanup lifecycleConfig IncludeRetained [foreignId]
+  assert "apply refuses a same-prefix database with altered ownership marker" (case foreignApply of Right [Refused identifier _] -> identifier == foreignId; _ -> False)
+  assert "refused foreign database remains present" =<< ((== 1) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> foreignDatabase <> "'")))
+  execCheck connection (Encoding.encodeUtf8 ("DROP DATABASE " <> foreignDatabase))
+  let ambiguousId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+      ambiguousDatabase = "hinagata_cleanup_ambiguous"
+      ambiguousToken = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+  execCheck connection (Encoding.encodeUtf8 ("CREATE DATABASE " <> ambiguousDatabase))
+  execCheck connection (Encoding.encodeUtf8 ("INSERT INTO hinagata_test.allocations (id, project_id, generation_id, run_id, database_name, ownership_token, state) VALUES ('" <> ambiguousId <> "', 'baseline-test', '" <> generationText <> "', 'recovery-run', '" <> ambiguousDatabase <> "', '" <> ambiguousToken <> "', 'Allocating')"))
+  ambiguousPreview <- orFail =<< planCleanup lifecycleConfig
+  assert "unbound allocation remains ambiguous even when its name exists" (case [disposition candidate | candidate <- ambiguousPreview, allocationId candidate == ambiguousId] of [Ambiguous] -> True; _ -> False)
+  ambiguousApply <- applyCleanup lifecycleConfig IncludeRetained [ambiguousId]
+  assert "apply refuses an unbound database identity" (case ambiguousApply of Right [Refused identifier _] -> identifier == ambiguousId; _ -> False)
+  assert "ambiguous same-prefix database remains present" =<< ((== 1) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> ambiguousDatabase <> "'")))
+  execCheck connection (Encoding.encodeUtf8 ("DROP DATABASE " <> ambiguousDatabase))
+  let protectedId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+  execCheck connection (Encoding.encodeUtf8 ("INSERT INTO hinagata_test.allocations (id, project_id, generation_id, run_id, database_name, ownership_token, state) VALUES ('" <> protectedId <> "', 'baseline-test', '" <> generationText <> "', 'recovery-run', '" <> databaseNameText database <> "', '" <> ambiguousToken <> "', 'Allocating')"))
+  protectedApply <- applyCleanup lifecycleConfig IncludeRetained [protectedId]
+  assert "maintenance database is protected even with a catalog allocation" (case protectedApply of Right [Refused identifier _] -> identifier == protectedId; _ -> False)
   changed <- ensureBaseline baselineSpec {migrationRevision = Just "migration-v2"}
   (changedRef, changedReport) <- orFail changed
   changedCalls <- readIORef migrationCalls
