@@ -514,6 +514,20 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   assert "thrown callback preserves its clone under policy" (case [disposition candidate | candidate@CleanupCandidate {leaseId = Just identifier} <- thrownPreview, identifier == thrownId] of [Retained] -> True; _ -> False)
   thrownRelease <- releaseLease lifecycleConfig thrownId
   assert "exception-preserved lease releases by explicit ID" (case thrownRelease of Right (Released _) -> True; _ -> False)
+  cancelledInfo <- newEmptyMVar
+  cancelledDone <- newEmptyMVar
+  cancelledThread <-
+    forkIO
+      ( try @SomeException
+          (withDatabaseClassified lifecycleConfig firstRef scenarioPlan PreserveFailures (const False) (\info -> putMVar cancelledInfo info >> threadDelay 30000000 >> pure ()))
+          >>= putMVar cancelledDone
+      )
+  LeaseInfo {leaseId = cancelledId, applicationTarget = cancelledTarget} <- takeMVar cancelledInfo
+  killThread cancelledThread
+  cancelledResult <- timeout 10000000 (takeMVar cancelledDone)
+  assert "callback cancellation rethrows its asynchronous exception" (case cancelledResult of Just (Left _) -> True; _ -> False)
+  assert "callback cancellation releases despite failure-preservation policy" =<< ((== 1) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM hinagata_test.leases WHERE id = '" <> cancelledId <> "' AND state = 'Released'")))
+  assert "callback cancellation drops its database" =<< ((== 0) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> databaseNameText (connectionDatabase cancelledTarget) <> "'")))
   changed <- ensureBaseline baselineSpec {migrationRevision = Just "migration-v2"}
   (changedRef, changedReport) <- orFail changed
   changedCalls <- readIORef migrationCalls

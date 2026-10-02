@@ -11,7 +11,7 @@ module Hinagata.Postgres.Lease
   )
 where
 
-import Control.Exception (IOException, SomeException, evaluate, mask, throwIO, try)
+import Control.Exception (IOException, SomeAsyncException, SomeException, evaluate, fromException, mask, throwIO, try)
 import Data.Bifunctor (first)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Encoding
@@ -85,8 +85,9 @@ withDatabase configuration baseline scenario callback = do
     Right LeaseOutcome {callbackValue} -> Right callbackValue
 
 -- | Classify a returned value without changing it. A classified failure is
--- preserved only under 'PreserveFailures'; thrown callback exceptions retain
--- their original identity after bounded release or preservation is attempted.
+-- preserved only under 'PreserveFailures'; synchronous callback exceptions
+-- follow the same policy. Asynchronous cancellation instead attempts release
+-- and rethrows the original exception.
 withDatabaseClassified :: HinagataConfig -> BaselineRef -> FixturePlan -> RetentionPolicy -> (a -> Bool) -> (LeaseInfo -> IO a) -> IO (Either LeaseError (LeaseOutcome a))
 withDatabaseClassified configuration baseline scenario policy classifyResult callback = do
   case composePlans (baselinePlan baseline) scenario of
@@ -135,7 +136,7 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
                               )
                           case returned of
                             Left exception -> do
-                              _ <- try @SomeException (completeFailure session target identity clone)
+                              _ <- try @SomeException (completeFailure (isJust (fromException @SomeAsyncException exception)) session target identity clone)
                               throwIO exception
                             Right (value, failed) -> do
                               finished <- try @SomeException (completeValue session target identity clone failed)
@@ -144,11 +145,12 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
                   Left problem -> Left (sessionFailure problem)
                   Right result -> result
 
-    completeFailure session target identity clone =
-      case policy of
-        ReleaseAlways -> release configuration session target options identity clone
-        PreserveFailures -> markState configuration session clone "Preserved"
-        DetachAlways -> markState configuration session clone "Detached"
+    completeFailure cancelled session target identity clone
+      | cancelled = release configuration session target options identity clone
+      | otherwise = case policy of
+          ReleaseAlways -> release configuration session target options identity clone
+          PreserveFailures -> markState configuration session clone "Preserved"
+          DetachAlways -> markState configuration session clone "Detached"
 
     completeValue session target identity clone failed
       | policy == DetachAlways = fmap (\result -> (LeaseDetached, result)) (markState configuration session clone "Detached")

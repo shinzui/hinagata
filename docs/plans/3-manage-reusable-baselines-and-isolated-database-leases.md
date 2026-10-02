@@ -71,6 +71,8 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 2026-10-02 retention progress: `withDatabaseClassified` accepts an explicit callback-result classifier and retention policy, returns the callback value unchanged in `LeaseOutcome`, and reports release/retention plus cleanup diagnostics separately. `PreserveFailures` records returned and thrown failures as Preserved, while `ReleaseAlways` keeps the simple bracket behavior. `acquireDetached` records a ready clone as Detached; `releaseLease` resolves its public lease ID and repeats ownership-checked cleanup. Managed classified/detached paths honor active and setup admission. Integration tests cover success-value release, failure-value preservation, exception preservation and rethrow, detached acquisition, explicit release, and managed capacity release. Process-death boundary tests, complete operation deadlines, measured connection ceilings, preparation explanations, and full recovery diagnostics remain open.
 
+2026-10-02 cancellation progress: Asynchronous callback cancellation now attempts clone release even under `PreserveFailures`, then rethrows the original asynchronous exception. The disposable-cluster test kills a callback after handoff and verifies both its Released catalog state and absent database. Cancellation during pre-handoff allocation may still leave a catalog-recorded orphan for explicit recovery; cross-phase acquisition deadlines remain open.
+
 
 ## Surprises & Discoveries
 
