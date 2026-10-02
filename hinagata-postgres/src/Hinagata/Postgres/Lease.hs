@@ -15,7 +15,9 @@ import Control.Exception (IOException, SomeAsyncException, SomeException, evalua
 import Data.Bifunctor (first)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Encoding
+import Data.Word (Word64)
 import Database.PostgreSQL.LibPQ qualified as PQ
+import GHC.Clock (getMonotonicTimeNSec)
 import Hinagata.Config
 import Hinagata.Connection (ConnectionTarget)
 import Hinagata.Fixture.Bundle
@@ -27,6 +29,7 @@ import Hinagata.Postgres.Internal.Load (loadComposedRemainder)
 import Hinagata.Postgres.Ownership
 import Hinagata.Prelude
 import Hinagata.Types
+import System.Timeout (timeout)
 import Text.Read (readMaybe)
 
 -- | Application credentials are held only in the target. Its Show instance
@@ -90,60 +93,72 @@ withDatabase configuration baseline scenario callback = do
 -- and rethrows the original exception.
 withDatabaseClassified :: HinagataConfig -> BaselineRef -> FixturePlan -> RetentionPolicy -> (a -> Bool) -> (LeaseInfo -> IO a) -> IO (Either LeaseError (LeaseOutcome a))
 withDatabaseClassified configuration baseline scenario policy classifyResult callback = do
+  expiry <- acquisitionExpiry configuration
   case composePlans (baselinePlan baseline) scenario of
     Left _ -> pure (Left (failure "scenario conflicts with the frozen baseline"))
     Right composed -> do
-      verified <- try @IOException (verifyPlan scenario)
+      verified <- try @IOException (withinDeadline expiry (verifyPlan scenario))
       case verified of
         Left _ -> pure (Left (failure "scenario bundle could not be verified"))
-        Right False -> pure (Left (failure "scenario bundle changed"))
-        Right True -> start composed
+        Right Nothing -> pure (Left acquisitionTimeout)
+        Right (Just False) -> pure (Left (failure "scenario bundle changed"))
+        Right (Just True) -> start expiry composed
   where
     options = defaultSessionOptions {operationDeadlineMs = positiveValue (acquisitionDeadlineMs configuration)}
     maintenance = first accessFailure (Access.adminTarget configuration (maintenanceDatabase configuration))
 
-    start composed = case maintenance of
+    start expiry composed = case maintenance of
       Left problem -> pure (Left problem)
       Right target -> do
-        catalog <- ensureCatalog target (maintenanceSchema configuration) options
+        timedCatalog <- withinDeadline expiry (ensureCatalog target (maintenanceSchema configuration) options)
+        let catalog = maybe (Left (CatalogError "acquisition deadline expired" Nothing Nothing)) id timedCatalog
         case catalog of
           Left CatalogError {cause, sqlState} -> pure (Left (LeaseError cause sqlState Nothing))
           Right identity
             | identity /= clusterIdentity baseline -> pure (Left (failure "baseline belongs to a different catalog or cluster"))
             | otherwise -> do
-                opened <- withSession target options $ \session -> mask $ \restore -> do
-                  acquired <- restore (allocate configuration baseline session target options identity)
-                  case acquired of
-                    Left problem -> pure (Left problem)
-                    Right clone -> do
-                      prepared <- try @SomeException (restore (prepareClone session clone composed))
-                      case prepared of
-                        Left exception -> do
-                          _ <- try @SomeException (release configuration session target options identity clone)
-                          throwIO exception
-                        Right (Left problem) -> do
-                          cleaned <- try @SomeException (release configuration session target options identity clone)
-                          pure (mergeCleanup (Left problem) cleaned)
-                        Right (Right info) -> do
-                          returned <-
-                            try @SomeException
-                              ( restore
-                                  ( do
-                                      value <- callback info
-                                      failed <- if policy == DetachAlways then pure False else evaluate (classifyResult value)
-                                      pure (value, failed)
-                                  )
-                              )
-                          case returned of
+                remaining <- remainingMs expiry
+                case remaining of
+                  Nothing -> pure (Left acquisitionTimeout)
+                  Just milliseconds -> do
+                    let sessionOptions = options {connectDeadlineMs = min (connectDeadlineMs options) milliseconds}
+                    opened <- withSession target sessionOptions $ \session -> mask $ \restore -> do
+                      acquired <- restore (withinDeadline expiry (allocate configuration baseline session target options identity))
+                      case acquired of
+                        Nothing -> pure (Left acquisitionTimeout)
+                        Just (Left problem) -> pure (Left problem)
+                        Just (Right clone) -> do
+                          prepared <- try @SomeException (restore (withinDeadline expiry (prepareClone session clone composed)))
+                          case prepared of
                             Left exception -> do
-                              _ <- try @SomeException (completeFailure (isJust (fromException @SomeAsyncException exception)) session target identity clone)
+                              _ <- try @SomeException (release configuration session target options identity clone)
                               throwIO exception
-                            Right (value, failed) -> do
-                              finished <- try @SomeException (completeValue session target identity clone failed)
-                              pure (Right (outcomeFor info value finished))
-                pure $ case opened of
-                  Left problem -> Left (sessionFailure problem)
-                  Right result -> result
+                            Right Nothing -> do
+                              cleaned <- try @SomeException (release configuration session target options identity clone)
+                              pure (mergeCleanup (Left acquisitionTimeout) cleaned)
+                            Right (Just (Left problem)) -> do
+                              cleaned <- try @SomeException (release configuration session target options identity clone)
+                              pure (mergeCleanup (Left problem) cleaned)
+                            Right (Just (Right info)) -> do
+                              returned <-
+                                try @SomeException
+                                  ( restore
+                                      ( do
+                                          value <- callback info
+                                          failed <- if policy == DetachAlways then pure False else evaluate (classifyResult value)
+                                          pure (value, failed)
+                                      )
+                                  )
+                              case returned of
+                                Left exception -> do
+                                  _ <- try @SomeException (completeFailure (isJust (fromException @SomeAsyncException exception)) session target identity clone)
+                                  throwIO exception
+                                Right (value, failed) -> do
+                                  finished <- try @SomeException (completeValue session target identity clone failed)
+                                  pure (Right (outcomeFor info value finished))
+                    pure $ case opened of
+                      Left problem -> Left (sessionFailure problem)
+                      Right result -> result
 
     completeFailure cancelled session target identity clone
       | cancelled = release configuration session target options identity clone
@@ -386,3 +401,23 @@ generationLockKey baseline = "generation:" <> generationId baseline
 
 leaseLockKey :: Text -> Text
 leaseLockKey lease = "lease:" <> lease
+
+acquisitionTimeout :: LeaseError
+acquisitionTimeout = failure "acquisition deadline expired"
+
+acquisitionExpiry :: HinagataConfig -> IO Word64
+acquisitionExpiry configuration = do
+  now <- getMonotonicTimeNSec
+  pure (now + fromIntegral (positiveValue (acquisitionDeadlineMs configuration)) * 1000000)
+
+remainingMs :: Word64 -> IO (Maybe Int)
+remainingMs expiry = do
+  now <- getMonotonicTimeNSec
+  pure $ if now >= expiry then Nothing else Just (fromIntegral ((expiry - now) `div` 1000000) `max` 1)
+
+withinDeadline :: Word64 -> IO a -> IO (Maybe a)
+withinDeadline expiry action = do
+  now <- getMonotonicTimeNSec
+  if now >= expiry
+    then pure Nothing
+    else timeout (max 1 (fromIntegral (min (fromIntegral (maxBound :: Int)) ((expiry - now) `div` 1000)))) action

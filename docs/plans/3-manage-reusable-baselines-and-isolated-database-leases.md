@@ -75,6 +75,8 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 2026-10-02 fingerprint progress: `BaselineSpec.compareAgainst` accepts an explicitly selected prior `BaselineRef`. The preparation report then reads that generation's versioned non-secret manifest and returns changed component categories; without a selected prior generation it reports no comparison. The socket integration test checks separate migration, base-fixture, verification-hook, and application-setting changes, plus credential rotation yielding an empty change list. Builder-death and waiter deadline proof are still open, so the first milestone remains incomplete.
 
+2026-10-02 acquisition progress: A monotonic lease acquisition deadline now spans bundle verification, catalog setup, maintenance connection establishment, clone allocation, and scenario loading. Managed acquisition passes its remaining queue/setup budget into the same path. A timed-out scenario load attempts ownership-checked release before returning, while the consumer callback is outside the acquisition deadline; socket and TCP tests cover both behaviors. Allocation interrupted before the clone identity is returned remains a catalog-recorded recovery case. Baseline builder/waiter deadline proof remains open.
+
 
 ## Surprises & Discoveries
 

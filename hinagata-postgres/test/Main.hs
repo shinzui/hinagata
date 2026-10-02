@@ -338,6 +338,17 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   failedLoad <- withDatabase lifecycleConfig firstRef badScenario (\_ -> pure ())
   assert "failed scenario load refuses callback" (case failedLoad of Left _ -> True; Right _ -> False)
   assert "failed scenario load releases its clone" =<< ((== 6) <$> queryInt connection "SELECT count(*) FROM hinagata_test.leases WHERE state = 'Released'")
+  createDirectoryIfMissing True (fixtureRoot </> "slow-acquisition")
+  ByteString.writeFile (fixtureRoot </> "slow-acquisition" </> "fixture.sql") "SELECT pg_sleep(2);"
+  slowScenario <- bundleOrFail =<< compileFixtures (BundleConfig fixtureRoot bundleRoot (positive 1048576) (positive 65536)) [fixtureName "good", fixtureName "slow-acquisition"]
+  callbackStarted <- newIORef False
+  releasedBeforeTimeout <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations WHERE state = 'Released'"
+  timedSetup <- withDatabase (lifecycleConfig {acquisitionDeadlineMs = positive 1500}) firstRef slowScenario (\_ -> modifyIORef' callbackStarted (const True))
+  releasedAfterTimeout <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations WHERE state = 'Released'"
+  ranTimedCallback <- readIORef callbackStarted
+  assert "one deadline stops slow scenario setup before callback and releases its clone" (case timedSetup of Left LeaseError {cause = "acquisition deadline expired"} -> not ranTimedCallback && releasedAfterTimeout == releasedBeforeTimeout + 1; _ -> False)
+  slowConsumer <- withDatabase (lifecycleConfig {acquisitionDeadlineMs = positive 1500}) firstRef scenarioPlan (\_ -> threadDelay 1700000 >> pure True)
+  assert "acquisition deadline stops at callback handoff" (slowConsumer == Right True)
   withManager lifecycleConfig $ \manager -> do
     let requests = DatabaseRequest "zeta" firstRef scenarioPlan :| [DatabaseRequest "alpha" firstRef scenarioPlan]
     collection <-
