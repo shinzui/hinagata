@@ -93,6 +93,8 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 2026-10-02 lifecycle timing progress: `LeaseOutcome` now includes `LeaseTimings` with separate monotonic durations for manager queue admission, catalog setup, generation-lock wait, clone creation/binding, scenario connection/load, and lease completion. Direct leases report zero queue time; the manager sums active and setup gate waits. Integration tests use a two-second scenario and a deliberately queued managed request to verify the stage attribution. `PreparationReport` already pairs build/reuse kind with its elapsed duration. Timing for failures before handoff and named collections is still open.
 
+2026-10-02 process-crash progress: The disposable-cluster test executable now spawns a separate worker and kills it with SIGKILL after a baseline reaches its migration hook, while a clone is Loading, and after callback handoff. The surviving baseline caller marks the interrupted Building generation Failed and publishes one Ready generation. A killed Loading or Active clone becomes an inspectable orphan; only explicit `applyCleanup` removes its positively owned database. Fault injection at intent, CREATE, marker binding, seal, publication, and DROP remains open, as does proving behavior when the maintenance connection dies while a callback continues running.
+
 
 ## Surprises & Discoveries
 

@@ -5,6 +5,7 @@ import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, bracket, try)
 import Data.ByteString.Char8 qualified as ByteString
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
+import Data.List (find)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Encoding
 import Database.PostgreSQL.LibPQ qualified as PQ
@@ -23,19 +24,26 @@ import Hinagata.Postgres.Session
 import Hinagata.Prelude
 import Hinagata.Types
 import Paths_hinagata_postgres (getDataFileName)
-import System.Directory (createDirectoryIfMissing)
-import System.Environment (lookupEnv)
-import System.Exit (exitFailure)
+import System.Directory (createDirectoryIfMissing, doesFileExist, renameFile)
+import System.Environment (getArgs, getExecutablePath, lookupEnv)
+import System.Exit (ExitCode (..), exitFailure)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
+import System.Posix.Signals (sigKILL, signalProcess)
+import System.Process (ProcessHandle, getPid, getProcessExitCode, proc, waitForProcess, withCreateProcess)
 import System.Timeout (timeout)
 
 main :: IO ()
 main = do
-  host <- lookupEnv "HINAGATA_TEST_PGHOST"
-  case host of
-    Nothing -> putStrLn "PostgreSQL integration tests require scripts/test-postgres.sh"
-    Just socket -> integrationTests socket
+  arguments <- getArgs
+  case arguments of
+    ["--crash-lease-worker", fixtureRoot, bundleRoot, mode, readyFile] -> crashLeaseWorker fixtureRoot bundleRoot mode readyFile
+    [] -> do
+      host <- lookupEnv "HINAGATA_TEST_PGHOST"
+      case host of
+        Nothing -> putStrLn "PostgreSQL integration tests require scripts/test-postgres.sh"
+        Just socket -> integrationTests socket
+    _ -> fail "unknown integration-test arguments"
 
 integrationTests :: FilePath -> IO ()
 integrationTests socket = withSystemTempDirectory "hinagata-postgres-test-" $ \workspace -> do
@@ -206,6 +214,76 @@ integrationTests socket = withSystemTempDirectory "hinagata-postgres-test-" $ \w
   assert "final COPY result error rolls back" =<< ((== 0) <$> queryInt setupConnection "SELECT count(*) FROM final_copy_items")
   PQ.finish setupConnection
 
+lifecycleConfigFor :: Host -> Port -> Text -> DatabaseName -> FilePath -> FilePath -> SqlIdentifier -> ProjectId -> SqlIdentifier -> SqlIdentifier -> HinagataConfig
+lifecycleConfigFor host port adminUser database fixtureRoot bundleRoot catalogSchema projectId publicSchema messageSetting =
+  HinagataConfig
+    { endpoint = EndpointConfig host port,
+      project = projectId,
+      fixtureRoot,
+      bundleRoot,
+      maintenanceDatabase = database,
+      maintenanceSchema = catalogSchema,
+      administration = AccessConfig adminUser database Nothing,
+      setup = AccessConfig "hinagata_setup" database Nothing,
+      application = AccessConfig "hinagata_app" database Nothing,
+      setupGrants = [GrantConnect, GrantCreate, GrantTemporary],
+      applicationGrants = [GrantConnect],
+      setupSchemaGrants = [SchemaGrant publicSchema SchemaUsage, SchemaGrant publicSchema SchemaCreate],
+      applicationSchemaGrants = [SchemaGrant publicSchema SchemaUsage],
+      setupSettings = [RoleSetting messageSetting "warning"],
+      applicationSettings = [RoleSetting messageSetting "warning"],
+      cloneStrategy = WalLog,
+      acquisitionDeadlineMs = positive 300000,
+      setupDeadlineMs = positive 300000,
+      setupWorkers = positive 2,
+      activeLeases = positive 4,
+      pendingRequests = positive 8,
+      chunkSize = positive 65536,
+      sqlSizeLimit = positive 1048576
+    }
+
+crashLeaseWorker :: FilePath -> FilePath -> String -> FilePath -> IO ()
+crashLeaseWorker fixtureRoot bundleRoot mode readyFile = do
+  socket <- requiredEnv "HINAGATA_TEST_PGHOST"
+  portText <- requiredEnv "HINAGATA_TEST_PGPORT"
+  adminUser <- Text.pack <$> requiredEnv "HINAGATA_TEST_PGUSER"
+  database <- orFail . mkDatabaseName . Text.pack =<< requiredEnv "HINAGATA_TEST_PGDATABASE"
+  host <- orFail (socketDirectory (Text.pack socket))
+  port <- orFail (mkPort (read portText))
+  catalogSchema <- orFail (mkSqlIdentifier "hinagata_test")
+  projectId <- orFail (mkProjectId "baseline-test")
+  publicSchema <- orFail (mkSqlIdentifier "public")
+  messageSetting <- orFail (mkSqlIdentifier "client_min_messages")
+  let configuration = lifecycleConfigFor host port adminUser database fixtureRoot bundleRoot catalogSchema projectId publicSchema messageSetting
+      bundleConfig = BundleConfig fixtureRoot bundleRoot (positive 1048576) (positive 65536)
+  base <- bundleOrFail =<< compileFixtures bundleConfig [fixtureName "good"]
+  let unexpectedHook _ = pure (Left "crash worker unexpectedly rebuilt the baseline")
+      specification = BaselineSpec configuration base (Just "migration-v1") (Just "verify-v1") ["plpgsql"] (Just "C") unexpectedHook unexpectedHook Nothing Nothing
+  case mode of
+    "building" -> do
+      let blockedHook _ = writeReady readyFile "building" >> threadDelay 60000000 >> pure (Right ())
+      _ <- ensureBaseline specification {migrationRevision = Just "migration-process-crash", migrationHook = blockedHook}
+      fail "crash worker reached normal baseline completion"
+    "handoff" -> runLease specification bundleConfig
+    "loading" -> runLease specification bundleConfig
+    _ -> fail "unknown crash-worker phase"
+  where
+    runLease specification bundleConfig = do
+      (baseline, report) <- orFail =<< ensureBaseline specification
+      assert "crash worker reuses the existing sealed baseline" (kind report == Reused)
+      let scenarioName = if mode == "handoff" then "scenario" else "crash-loading"
+      scenario <- bundleOrFail =<< compileFixtures bundleConfig [fixtureName "good", fixtureName scenarioName]
+      _ <- withDatabase (configuration specification) baseline scenario $ \LeaseInfo {leaseId} -> do
+        when (mode == "handoff") (writeReady readyFile (Encoding.encodeUtf8 leaseId))
+        threadDelay 60000000
+      fail "crash worker reached normal lease completion"
+
+writeReady :: FilePath -> ByteString.ByteString -> IO ()
+writeReady path payload = do
+  let temporary = path ++ ".tmp"
+  ByteString.writeFile temporary payload
+  renameFile temporary path
+
 lifecycleTests :: ConnectionTarget -> PQ.Connection -> Host -> Port -> Text -> DatabaseName -> FilePath -> FilePath -> FixturePlan -> IO ()
 lifecycleTests target connection host port adminUser database fixtureRoot bundleRoot goodPlan = do
   legacySchema <- orFail (mkSqlIdentifier "hinagata_legacy_test")
@@ -261,35 +339,10 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   publicSchema <- orFail (mkSqlIdentifier "public")
   messageSetting <- orFail (mkSqlIdentifier "client_min_messages")
   migrationCalls <- newIORef (0 :: Int)
-  let adminRole = AccessConfig adminUser database Nothing
+  let lifecycleConfig = lifecycleConfigFor host port adminUser database fixtureRoot bundleRoot catalogSchema projectId publicSchema messageSetting
+      adminRole = AccessConfig adminUser database Nothing
       setupRole = AccessConfig "hinagata_setup" database Nothing
       appRole = AccessConfig "hinagata_app" database Nothing
-      lifecycleConfig =
-        HinagataConfig
-          { endpoint = EndpointConfig host port,
-            project = projectId,
-            fixtureRoot,
-            bundleRoot,
-            maintenanceDatabase = database,
-            maintenanceSchema = catalogSchema,
-            administration = adminRole,
-            setup = setupRole,
-            application = appRole,
-            setupGrants = [GrantConnect, GrantCreate, GrantTemporary],
-            applicationGrants = [GrantConnect],
-            setupSchemaGrants = [SchemaGrant publicSchema SchemaUsage, SchemaGrant publicSchema SchemaCreate],
-            applicationSchemaGrants = [SchemaGrant publicSchema SchemaUsage],
-            setupSettings = [RoleSetting messageSetting "warning"],
-            applicationSettings = [RoleSetting messageSetting "warning"],
-            cloneStrategy = WalLog,
-            acquisitionDeadlineMs = positive 300000,
-            setupDeadlineMs = positive 300000,
-            setupWorkers = positive 2,
-            activeLeases = positive 4,
-            pendingRequests = positive 8,
-            chunkSize = positive 65536,
-            sqlSizeLimit = positive 1048576
-          }
       migrate setupTarget = do
         modifyIORef' migrationCalls (+ 1)
         migrated <- PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString setupTarget)))
@@ -478,6 +531,7 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
     afterDeadline <- withManagedDatabase manager firstRef scenarioPlan (\_ -> pure ())
     assert "deadline releases pending admission" (case afterDeadline of Right _ -> True; Left _ -> False)
   connectionCeilingTest lifecycleConfig firstRef scenarioPlan connection
+  processCrashTests lifecycleConfig baselineSpec connection fixtureRoot bundleRoot
   cleanupLifecycleTests lifecycleConfig catalog firstRef scenarioPlan connection database
   retentionLifecycleTests lifecycleConfig firstRef scenarioPlan connection catalog
   generationLifecycleTests lifecycleConfig baselineSpec firstRef scenarioPlan fixtureRoot bundleRoot connection migrationCalls messageSetting target catalogSchema
@@ -502,6 +556,96 @@ connectionCeilingTest configuration baseline scenario connection = withManager c
   mapM_ (const (putMVar release ())) [1 .. 4 :: Int]
   outcomes <- mapM (timeout 10000000 . takeMVar) finished
   assert "measured callbacks all release their managed leases" (all (\case Just (Right (Right ())) -> True; _ -> False) outcomes)
+
+processCrashTests :: HinagataConfig -> BaselineSpec -> PQ.Connection -> FilePath -> FilePath -> IO ()
+processCrashTests configuration baselineSpec connection fixtureRoot bundleRoot = do
+  let slowDirectory = fixtureRoot </> "crash-loading"
+  createDirectoryIfMissing True slowDirectory
+  ByteString.writeFile (slowDirectory </> "fixture.sql") "SELECT pg_sleep(30);"
+  executable <- getExecutablePath
+  runBuilderCase executable
+  mapM_ (runCase executable) ["loading", "handoff"]
+  where
+    runBuilderCase executable = do
+      let readyFile = bundleRoot </> "crash-building.ready"
+          command = proc executable ["--crash-lease-worker", fixtureRoot, bundleRoot, "building", readyFile]
+      withCreateProcess command $ \_ _ _ child -> do
+        _ <- waitForChild child $ do
+          exists <- doesFileExist readyFile
+          if not exists
+            then pure Nothing
+            else do
+              bytes <- ByteString.readFile readyFile
+              pure (if bytes == "building" then Just () else Nothing)
+        building <- queryInt connection "SELECT count(*) FROM hinagata_test.generations WHERE fingerprint_manifest->>'manifest' LIKE '%migration-process-crash%' AND state = 'Building'"
+        assert "process-kill builder reached a recorded Building generation" (building == 1)
+        processId <- maybe (fail "crash builder has no process ID") pure =<< getPid child
+        signalProcess sigKILL processId
+        ended <- timeout 10000000 (waitForProcess child)
+        assert "killed baseline builder exits abnormally" (case ended of Just ExitSuccess -> False; Just (ExitFailure _) -> True; Nothing -> False)
+      rebuilt <- ensureBaseline baselineSpec {migrationRevision = Just "migration-process-crash"}
+      assert "surviving caller publishes after builder process death" (case rebuilt of Right (_, report) -> kind report == Built; Left _ -> False)
+      failed <- queryInt connection "SELECT count(*) FROM hinagata_test.generations WHERE fingerprint_manifest->>'manifest' LIKE '%migration-process-crash%' AND state = 'Failed'"
+      ready <- queryInt connection "SELECT count(*) FROM hinagata_test.generations WHERE fingerprint_manifest->>'manifest' LIKE '%migration-process-crash%' AND state = 'Ready'"
+      assert "builder process death leaves one Failed and one Ready generation" (failed == 1 && ready == 1)
+
+    runCase executable mode = do
+      before <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations"
+      let readyFile = bundleRoot </> ("crash-" ++ mode ++ ".ready")
+          command = proc executable ["--crash-lease-worker", fixtureRoot, bundleRoot, mode, readyFile]
+      withCreateProcess command $ \_ _ _ child -> do
+        identifier <- waitForChild child $ case mode of
+          "loading" -> do
+            count <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations"
+            if count <= before
+              then pure Nothing
+              else do
+                latest <- queryText connection "SELECT id FROM hinagata_test.allocations ORDER BY created_at DESC LIMIT 1"
+                state <- queryText connection ("SELECT state FROM hinagata_test.allocations WHERE id = '" <> latest <> "'")
+                pure (if state == "Loading" then Just (Encoding.decodeUtf8 latest) else Nothing)
+          "handoff" -> do
+            exists <- doesFileExist readyFile
+            if not exists
+              then pure Nothing
+              else do
+                lease <- ByteString.readFile readyFile
+                if ByteString.null lease
+                  then pure Nothing
+                  else Just . Encoding.decodeUtf8 <$> queryText connection ("SELECT allocation_id FROM hinagata_test.leases WHERE id = '" <> lease <> "'")
+          _ -> fail "unknown crash phase"
+        processId <- maybe (fail "crash worker has no process ID") pure =<< getPid child
+        signalProcess sigKILL processId
+        ended <- timeout 10000000 (waitForProcess child)
+        assert ("killed " ++ mode ++ " worker exits abnormally") (case ended of Just ExitSuccess -> False; Just (ExitFailure _) -> True; Nothing -> False)
+        candidate <- waitForOrphan identifier
+        assert ("killed " ++ mode ++ " worker leaves an inspectable orphan") (state candidate == if mode == "loading" then "Loading" else "Active")
+        released <- applyCleanup configuration OrphansOnly [identifier]
+        assert ("explicit apply releases killed " ++ mode ++ " worker's clone") (released == Right [Released identifier])
+        let CleanupCandidate {database = crashedDatabase} = candidate
+        assert ("killed " ++ mode ++ " worker's database is absent after apply") =<< ((== 0) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> databaseNameText crashedDatabase <> "'")))
+
+    waitForOrphan identifier = loop (100 :: Int)
+      where
+        loop 0 = fail "killed worker's allocation did not become orphaned"
+        loop remaining = do
+          candidates <- orFail =<< planCleanup configuration
+          case find (\candidate -> allocationId candidate == identifier && disposition candidate == Orphaned) candidates of
+            Just candidate -> pure candidate
+            Nothing -> threadDelay 100000 >> loop (remaining - 1)
+
+waitForChild :: ProcessHandle -> IO (Maybe a) -> IO a
+waitForChild child probe = loop (100 :: Int)
+  where
+    loop 0 = fail "crash worker did not reach its requested boundary"
+    loop remaining = do
+      found <- probe
+      case found of
+        Just value -> pure value
+        Nothing -> do
+          exited <- getProcessExitCode child
+          case exited of
+            Just status -> fail ("crash worker exited before its boundary: " ++ show status)
+            Nothing -> threadDelay 100000 >> loop (remaining - 1)
 
 cleanupLifecycleTests :: HinagataConfig -> CatalogIdentity -> BaselineRef -> FixturePlan -> PQ.Connection -> DatabaseName -> IO ()
 cleanupLifecycleTests lifecycleConfig catalog firstRef scenarioPlan connection database = do
@@ -671,10 +815,11 @@ retentionLifecycleTests lifecycleConfig firstRef scenarioPlan connection catalog
 
 generationLifecycleTests :: HinagataConfig -> BaselineSpec -> BaselineRef -> FixturePlan -> FilePath -> FilePath -> PQ.Connection -> IORef Int -> SqlIdentifier -> ConnectionTarget -> SqlIdentifier -> IO ()
 generationLifecycleTests lifecycleConfig baselineSpec firstRef scenarioPlan fixtureRoot bundleRoot connection migrationCalls messageSetting target catalogSchema = do
+  startingCalls <- readIORef migrationCalls
   changed <- ensureBaseline baselineSpec {migrationRevision = Just "migration-v2", compareAgainst = Just firstRef}
   (changedRef, changedReport) <- orFail changed
   changedCalls <- readIORef migrationCalls
-  assert "migration revision creates a distinct baseline with an explained change" (baselineDatabase changedRef /= baselineDatabase firstRef && kind changedReport == Built && fmap changedComponents (comparison changedReport) == Just [MigrationRevision] && changedCalls == 2)
+  assert "migration revision creates a distinct baseline with an explained change" (baselineDatabase changedRef /= baselineDatabase firstRef && kind changedReport == Built && fmap changedComponents (comparison changedReport) == Just [MigrationRevision] && changedCalls == startingCalls + 1)
   ByteString.writeFile (fixtureRoot </> "good" </> "fixture.sql") "INSERT INTO items (id, note) VALUES (1, 'changed first'); INSERT INTO items (id, note) VALUES (2, 'second');"
   changedPlan <- bundleOrFail =<< compileFixtures (BundleConfig fixtureRoot bundleRoot (positive 1048576) (positive 65536)) [fixtureName "good"]
   allocationsBeforeConflict <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations"
