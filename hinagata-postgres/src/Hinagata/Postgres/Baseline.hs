@@ -37,7 +37,8 @@ import System.Timeout (timeout)
 import Text.Read (readMaybe)
 
 -- | Hooks must close their own database connections before returning.
--- Missing revisions force a new generation on every call.
+-- Missing migration or verification revisions force a new generation on every
+-- call. Clone preparation runs on each fresh clone before scenario loading.
 data BaselineSpec = BaselineSpec
   { configuration :: !HinagataConfig,
     basePlan :: !FixturePlan,
@@ -47,6 +48,7 @@ data BaselineSpec = BaselineSpec
     requiredLocale :: !(Maybe Text),
     migrationHook :: !(ConnectionTarget -> IO (Either Text ())),
     verificationHook :: !(ConnectionTarget -> IO (Either Text ())),
+    clonePreparationHook :: !(Maybe (ConnectionTarget -> IO (Either Text ()))),
     compareAgainst :: !(Maybe BaselineRef)
   }
 
@@ -166,7 +168,7 @@ prepareLocked comparison connection maintenance options identity configuration b
   case interrupted of
     Left failure -> pure (Left (nativeFailure failure))
     Right _ -> do
-      previous <- if reusable then lookupReady connection configuration basePlan deadline projectText digest else pure (Right Nothing)
+      previous <- if reusable then lookupReady connection configuration basePlan (clonePreparationHook spec) deadline projectText digest else pure (Right Nothing)
       case previous of
         Left failure -> pure (Left failure)
         Right (Just baseline) -> do
@@ -223,8 +225,8 @@ fingerprintComponents =
     ApplicationRoleSettings
   ]
 
-lookupReady :: PQ.Connection -> HinagataConfig -> FixturePlan -> Deadline -> Text -> Text -> IO (Either BaselineError (Maybe BaselineRef))
-lookupReady connection configuration plan deadline project digest = do
+lookupReady :: PQ.Connection -> HinagataConfig -> FixturePlan -> Maybe (ConnectionTarget -> IO (Either Text ())) -> Deadline -> Text -> Text -> IO (Either BaselineError (Maybe BaselineRef))
+lookupReady connection configuration plan hook deadline project digest = do
   let table = quoteSqlIdentifier (maintenanceSchema configuration) <> ".\"generations\""
       statement = Encoding.encodeUtf8 ("SELECT id, database_name::text, database_oid::text, ownership_token::text FROM " <> table <> " WHERE project_id = $1 AND fingerprint = $2 AND state = 'Ready' ORDER BY created_at DESC LIMIT 1")
   rows <- queryParamRows connection deadline Sql statement [Just (Encoding.encodeUtf8 project), Just (Encoding.encodeUtf8 digest)] 1
@@ -235,7 +237,7 @@ lookupReady connection configuration plan deadline project digest = do
       database <- maybe (Left (BaselineError "ready generation has an invalid database name" Nothing)) Right (either (const Nothing) Just (mkDatabaseName (Encoding.decodeUtf8 name)))
       number <- maybe (Left (BaselineError "ready generation has an invalid database OID" Nothing)) Right (readMaybe (Text.unpack (Encoding.decodeUtf8 oid)))
       let owned = OwnedDatabase database number (Encoding.decodeUtf8 token)
-      Right (Just (BaselineRef database (Encoding.decodeUtf8 generationId) digest (CatalogIdentity 1 "") owned plan))
+      Right (Just (BaselineRef database (Encoding.decodeUtf8 generationId) digest (CatalogIdentity 1 "") owned plan hook))
     Right _ -> Left (BaselineError "ready generation has incomplete identity" Nothing)
 
 buildGeneration :: PQ.Connection -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> HinagataConfig -> FixturePlan -> Text -> Text -> Text -> BaselineSpec -> Deadline -> IO (Either BaselineError (BaselineRef, PreparationKind))
@@ -267,7 +269,7 @@ buildGeneration connection maintenance options identity configuration plan proje
                   published <- queryParamRows connection deadline Sql readySql [Just identifier, Just (Encoding.encodeUtf8 (Text.pack (show (oid owned))))] 0
                   pure $ case published of
                     Left failure -> Left (nativeFailure failure)
-                    Right _ -> Right (BaselineRef database generationId digest identity owned plan, Built)
+                    Right _ -> Right (BaselineRef database generationId digest identity owned plan (clonePreparationHook spec), Built)
     Left failure -> pure (Left (nativeFailure failure))
     Right _ -> pure (Left (BaselineError "UUID generation returned an invalid result" Nothing))
 

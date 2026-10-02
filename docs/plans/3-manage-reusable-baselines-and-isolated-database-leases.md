@@ -81,6 +81,8 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 2026-10-02 lease inspection progress: `inspectLease` looks up a public lease ID and classifies live, retained, missing, foreign, and released records without changing them. `preserveLease` uses the same generation lock, live lease try-lock, protected-target checks, and name/OID/owner/marker verification as cleanup before atomically marking an ended clone Preserved. Integration tests cover live refusal, detached preservation, foreign-marker refusal, idempotent preservation, and inspection after release. Allocation-boundary process kills and catalog-format upgrades remain open in the third milestone.
 
+2026-10-02 clone preparation progress: `BaselineSpec.clonePreparationHook` travels in the opaque in-memory `BaselineRef` and runs with setup access after clone grants/settings but before transactional scenario loading. It does not change the sealed template or its fingerprint; reused baseline handles use the hook supplied by the current request. A disposable-cluster test verifies the hook prepares a table in each of two clones before application callback handoff, and a failed hook prevents handoff and releases its clone. Clone/release timing reports, measured connection ceilings, and baseline retirement remain open in the second milestone.
+
 
 ## Surprises & Discoveries
 

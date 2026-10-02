@@ -284,7 +284,7 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
         count <- queryInt verified "SELECT count(*) FROM items"
         PQ.finish verified
         pure (if count == 2 then Right () else Left "unexpected baseline rows")
-      baselineSpec = BaselineSpec lifecycleConfig goodPlan (Just "migration-v1") (Just "verify-v1") ["plpgsql"] (Just "C") migrate verify Nothing
+      baselineSpec = BaselineSpec lifecycleConfig goodPlan (Just "migration-v1") (Just "verify-v1") ["plpgsql"] (Just "C") migrate verify Nothing Nothing
   firstBaseline <- ensureBaseline baselineSpec
   secondBaseline <- ensureBaseline baselineSpec
   (firstRef, firstReport) <- orFail firstBaseline
@@ -349,6 +349,33 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   assert "one deadline stops slow scenario setup before callback and releases its clone" (case timedSetup of Left LeaseError {cause = "acquisition deadline expired"} -> not ranTimedCallback && releasedAfterTimeout == releasedBeforeTimeout + 1; _ -> False)
   slowConsumer <- withDatabase (lifecycleConfig {acquisitionDeadlineMs = positive 1500}) firstRef scenarioPlan (\_ -> threadDelay 1700000 >> pure True)
   assert "acquisition deadline stops at callback handoff" (slowConsumer == Right True)
+  cloneHookCalls <- newIORef (0 :: Int)
+  let prepareCloneHook setupTarget = do
+        modifyIORef' cloneHookCalls (+ 1)
+        prepared <- PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString setupTarget)))
+        execCheck prepared "CREATE TABLE clone_hook_probe (value integer NOT NULL)"
+        execCheck prepared "INSERT INTO clone_hook_probe (value) VALUES (42)"
+        execCheck prepared "GRANT SELECT ON clone_hook_probe TO hinagata_app"
+        PQ.finish prepared
+        pure (Right ())
+  hookedBaseline <- ensureBaseline baselineSpec {clonePreparationHook = Just prepareCloneHook}
+  (hookedRef, hookedReport) <- orFail hookedBaseline
+  assert "adding clone preparation does not rebuild an unchanged template" (kind hookedReport == Reused && baselineDatabase hookedRef == baselineDatabase firstRef)
+  let inspectHook info = do
+        app <- PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString (applicationTarget info))))
+        value <- queryInt app "SELECT value FROM clone_hook_probe"
+        PQ.finish app
+        pure value
+  firstHooked <- withDatabase lifecycleConfig hookedRef scenarioPlan inspectHook
+  secondHooked <- withDatabase lifecycleConfig hookedRef scenarioPlan inspectHook
+  hookCalls <- readIORef cloneHookCalls
+  assert "clone preparation runs separately before both callback handoffs" (firstHooked == Right 42 && secondHooked == Right 42 && hookCalls == 2)
+  failedHookBaseline <- ensureBaseline baselineSpec {clonePreparationHook = Just (\_ -> pure (Left "intentional hook failure"))}
+  (failedHookRef, _) <- orFail failedHookBaseline
+  failedHookCallback <- newIORef False
+  failedHookLease <- withDatabase lifecycleConfig failedHookRef scenarioPlan (\_ -> modifyIORef' failedHookCallback (const True))
+  calledAfterFailedHook <- readIORef failedHookCallback
+  assert "failed clone preparation releases its clone before callback" (case failedHookLease of Left LeaseError {cause = "clone preparation hook failed"} -> not calledAfterFailedHook; _ -> False)
   withManager lifecycleConfig $ \manager -> do
     let requests = DatabaseRequest "zeta" firstRef scenarioPlan :| [DatabaseRequest "alpha" firstRef scenarioPlan]
     collection <-

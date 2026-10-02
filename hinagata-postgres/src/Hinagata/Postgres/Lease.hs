@@ -188,17 +188,25 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
         Right () -> case first accessFailure (Access.accessToTarget configuration (setup configuration) database) of
           Left problem -> pure (Left problem)
           Right setupTarget -> do
-            loaded <- withSession setupTarget options (\setupSession -> loadComposedRemainder setupSession scenario composed)
-            case loaded of
-              Left problem -> pure (Left (sessionFailure problem))
-              Right (Left _) -> pure (Left (failure "scenario fixture load failed"))
-              Right (Right _) -> do
-                active <- markState configuration session clone "Active"
-                case active of
-                  Left problem -> pure (Left problem)
-                  Right () -> case first accessFailure (Access.accessToTarget configuration (application configuration) database) of
-                    Left problem -> pure (Left problem)
-                    Right appTarget -> pure (Right LeaseInfo {leaseId = cloneLeaseId clone, runId = cloneRunId clone, applicationTarget = appTarget})
+            preparedHook <- case cloneHook baseline of
+              Nothing -> pure (Right ())
+              Just hook -> do
+                result <- hook setupTarget
+                pure $ case result of Left _ -> Left (failure "clone preparation hook failed"); Right () -> Right ()
+            case preparedHook of
+              Left problem -> pure (Left problem)
+              Right () -> do
+                loaded <- withSession setupTarget options (\setupSession -> loadComposedRemainder setupSession scenario composed)
+                case loaded of
+                  Left problem -> pure (Left (sessionFailure problem))
+                  Right (Left _) -> pure (Left (failure "scenario fixture load failed"))
+                  Right (Right _) -> do
+                    active <- markState configuration session clone "Active"
+                    case active of
+                      Left problem -> pure (Left problem)
+                      Right () -> case first accessFailure (Access.accessToTarget configuration (application configuration) database) of
+                        Left problem -> pure (Left problem)
+                        Right appTarget -> pure (Right LeaseInfo {leaseId = cloneLeaseId clone, runId = cloneRunId clone, applicationTarget = appTarget})
 
 -- | Acquire and retain a clone without a callback scope. It is recorded as
 -- Detached and needs an explicit release by lease ID through cleanup.
