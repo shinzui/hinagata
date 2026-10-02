@@ -22,6 +22,8 @@ Amended: 2026-10-02 (monotonic lease-stage and manager-queue timings)
 
 Amended: 2026-10-02 (callback cleanup failure diagnostics and retry clearing)
 
+Amended: 2026-10-02 (interrupt callbacks when their lease-owning session dies)
+
 ## Context
 
 Reuse must not silently test stale migrations or share scenario state. CREATE/DROP DATABASE are nontransactional, and copying a template requires no connected sessions.
@@ -38,6 +40,8 @@ Cleanup preview validates an existing catalog without creating one and reads can
 PostgreSQL's [`DROP DATABASE` reference](https://www.postgresql.org/docs/18/sql-dropdatabase.html) limits `FORCE`: prepared transactions, active logical replication slots, and subscriptions can still block removal. Hinagata leaves such records inspectable as cleanup failures. Callback completion and explicit cleanup both store a bounded diagnostic; successful release clears it.
 
 A caller-supplied classifier identifies failure values without changing them. The policy may preserve those values or thrown callback failures; detached acquisition records a retained clone after setup. Both are released by explicit lease ID, with the same lock and positive-ownership checks as orphan cleanup. Cleanup diagnostics accompany returned values separately, while a thrown callback keeps its original exception.
+
+While a callback runs, Hinagata probes its existing maintenance session for liveness. Losing that session cancels the callback and returns a lease error after the callback has unwound; the clone stays cataloged as an orphan for explicit ownership-checked recovery. A timed heartbeat adds no database connection and does not turn elapsed time into cleanup authority.
 
 An optional trusted clone preparation hook uses setup access after clone grants and settings and before scenario fixtures. It runs for every new clone, including clones of a reused baseline. The hook is kept on the in-memory baseline handle and does not affect the sealed template fingerprint; a hook failure prevents callback handoff and triggers ownership-checked release.
 

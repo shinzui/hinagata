@@ -12,6 +12,8 @@ module Hinagata.Postgres.Lease
   )
 where
 
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async qualified as Async
 import Control.Exception (IOException, SomeAsyncException, SomeException, evaluate, fromException, mask, throwIO, try)
 import Data.Bifunctor (first)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
@@ -160,17 +162,21 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
                               returned <-
                                 try @SomeException
                                   ( restore
-                                      ( do
-                                          value <- callback info
-                                          failed <- if policy == DetachAlways then pure False else evaluate (classifyResult value)
-                                          pure (value, failed)
+                                      ( Async.race
+                                          ( do
+                                              value <- callback info
+                                              failed <- if policy == DetachAlways then pure False else evaluate (classifyResult value)
+                                              pure (value, failed)
+                                          )
+                                          (watchOwnership session)
                                       )
                                   )
                               case returned of
                                 Left exception -> do
                                   _ <- try @SomeException (completeFailure (isJust (fromException @SomeAsyncException exception)) session target identity clone)
                                   throwIO exception
-                                Right (value, failed) -> do
+                                Right (Right problem) -> pure (Left problem)
+                                Right (Left (value, failed)) -> do
                                   (finished, duration) <- measure (try @SomeException (completeValue session target identity clone failed))
                                   modifyIORef' timingRef (\record -> record {completionMs = duration})
                                   recorded <- readIORef timingRef
@@ -195,6 +201,18 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
       Left _ -> LeaseOutcome value info LeaseCleanupFailed (Just (failure "lease completion raised an exception")) recorded
       Right (_, Left problem) -> LeaseOutcome value info LeaseCleanupFailed (Just problem) recorded
       Right (disposition, Right ()) -> LeaseOutcome value info disposition Nothing recorded
+
+    watchOwnership session = do
+      threadDelay 250000
+      checked <- runExclusive session $ \connection _ -> do
+        deadline <- deadlineAfter 1000
+        ping <- query connection deadline Sql "SELECT 1"
+        pure $ case ping of
+          Right () -> Keep True
+          Left _ -> Retire False
+      case checked of
+        Right True -> watchOwnership session
+        _ -> pure (failure "lease ownership connection was lost during callback")
 
     prepareClone timingRef session clone composed = do
       let OwnedDatabase {name = database} = owned clone

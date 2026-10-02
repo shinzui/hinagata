@@ -790,6 +790,26 @@ cleanupLifecycleTests lifecycleConfig catalog firstRef scenarioPlan connection d
     _ -> fail "lost-owner allocation was not classified orphaned"
   recoveredOwner <- applyCleanup lifecycleConfig OrphansOnly [allocationId lostCandidate]
   assert "lost-owner clone requires explicit ownership-checked release" (recoveredOwner == Right [Released (allocationId lostCandidate)])
+  interruptedLease <- newEmptyMVar
+  continuedAfterLoss <- newIORef False
+  lostDuringCallback <- timeout 10000000 $ withDatabase lifecycleConfig firstRef scenarioPlan $ \info@LeaseInfo {leaseId = lostLease} -> do
+    putMVar interruptedLease info
+    let key = "lease:" <> lostLease
+        statement = Encoding.encodeUtf8 ("SELECT pg_terminate_backend(pid)::text FROM pg_locks WHERE locktype = 'advisory' AND classid = 1212761905::oid AND objid = hashtext('" <> key <> "')::oid AND granted AND pid <> pg_backend_pid()")
+    terminated <- queryText connection statement
+    assert "running-callback test terminates the held maintenance lock" (terminated == "true")
+    threadDelay 30000000
+    modifyIORef' continuedAfterLoss (const True)
+  assert "ownership loss interrupts a still-running callback" (case lostDuringCallback of Just (Left LeaseError {cause = "lease ownership connection was lost during callback"}) -> True; _ -> False)
+  ranAfterLoss <- readIORef continuedAfterLoss
+  assert "interrupted callback does not continue after lease ownership loss" (not ranAfterLoss)
+  LeaseInfo {leaseId = interruptedId} <- takeMVar interruptedLease
+  interruptedInspection <- inspectLease lifecycleConfig interruptedId
+  interruptedAllocation <- case interruptedInspection of
+    Right (Just candidate@CleanupCandidate {state = "Active", disposition = Orphaned}) -> pure (allocationId candidate)
+    _ -> fail "interrupted callback did not leave an inspectable orphan"
+  interruptedRelease <- applyCleanup lifecycleConfig OrphansOnly [interruptedAllocation]
+  assert "interrupted callback requires explicit ownership-checked cleanup" (interruptedRelease == Right [Released interruptedAllocation])
   let retainedId = "44444444-4444-4444-8444-444444444444"
       retainedLease = "55555555-5555-4555-8555-555555555555"
       retainedDatabase = "hinagata_cleanup_retained"
