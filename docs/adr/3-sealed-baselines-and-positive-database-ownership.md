@@ -20,6 +20,8 @@ Amended: 2026-10-02 (transactional catalog v1-to-v2 upgrade and failure diagnost
 
 Amended: 2026-10-02 (monotonic lease-stage and manager-queue timings)
 
+Amended: 2026-10-02 (callback cleanup failure diagnostics and retry clearing)
+
 ## Context
 
 Reuse must not silently test stale migrations or share scenario state. CREATE/DROP DATABASE are nontransactional, and copying a template requires no connected sessions.
@@ -33,7 +35,7 @@ Store a non-secret fingerprint manifest, including state-affecting role/configur
 Only positively identified owned databases may be removed. Borrowed/protected targets never qualify. A held session lock is the only proof that a lease is live; cleanup skips live and preserved leases, reports a record whose lock is free as orphaned, removes orphans only on explicit apply, previews before applying, and refuses ambiguous crash windows. Use ordinary PostgreSQL durability. PostgreSQL documents the role-specific settings permission boundary in its [ALTER ROLE reference](https://www.postgresql.org/docs/18/sql-alterrole.html).
 
 Cleanup preview validates an existing catalog without creating one and reads candidates in bounded pages. Apply selects concrete allocation IDs, takes their generation lock exclusively, then checks the lease lock and current database identity again; preview results are never deletion authority. A missing bound database can be marked released idempotently, while an allocation without a bound OID remains ambiguous even if its name exists.
-PostgreSQL's [`DROP DATABASE` reference](https://www.postgresql.org/docs/18/sql-dropdatabase.html) limits `FORCE`: prepared transactions, active logical replication slots, and subscriptions can still block removal. Hinagata leaves such records inspectable as cleanup failures.
+PostgreSQL's [`DROP DATABASE` reference](https://www.postgresql.org/docs/18/sql-dropdatabase.html) limits `FORCE`: prepared transactions, active logical replication slots, and subscriptions can still block removal. Hinagata leaves such records inspectable as cleanup failures. Callback completion and explicit cleanup both store a bounded diagnostic; successful release clears it.
 
 A caller-supplied classifier identifies failure values without changing them. The policy may preserve those values or thrown callback failures; detached acquisition records a retained clone after setup. Both are released by explicit lease ID, with the same lock and positive-ownership checks as orphan cleanup. Cleanup diagnostics accompany returned values separately, while a thrown callback keeps its original exception.
 

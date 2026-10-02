@@ -344,14 +344,17 @@ createClone configuration baseline connection sessionOptions identity = do
     Right _ -> pure (Left (failure "clone UUID generation returned an invalid result"))
 
 markState :: HinagataConfig -> Session -> Clone -> Text -> IO (Either LeaseError ())
-markState configuration session clone state =
+markState configuration session clone state = markStateWithDiagnostic configuration session clone state Nothing
+
+markStateWithDiagnostic :: HinagataConfig -> Session -> Clone -> Text -> Maybe Text -> IO (Either LeaseError ())
+markStateWithDiagnostic configuration session clone state diagnostic =
   flatten
     <$> runExclusive
       session
       ( \connection options -> do
           deadline <- deadlineAfter (operationDeadlineMs options)
           let schema = quoteSqlIdentifier (maintenanceSchema configuration)
-              allocationSql = Encoding.encodeUtf8 ("UPDATE " <> schema <> ".\"allocations\" SET state = $2, updated_at = clock_timestamp() WHERE id = $1 RETURNING id")
+              allocationSql = Encoding.encodeUtf8 ("UPDATE " <> schema <> ".\"allocations\" SET state = $2, last_error = $3, updated_at = clock_timestamp() WHERE id = $1 RETURNING id")
               leaseSql = Encoding.encodeUtf8 ("UPDATE " <> schema <> ".\"leases\" SET state = $2, updated_at = clock_timestamp() WHERE id = $1 RETURNING id")
               update statement identifier = queryParamRows connection deadline Sql statement (map (Just . Encoding.encodeUtf8) [identifier, state]) 1
               rollback problem = do
@@ -364,7 +367,7 @@ markState configuration session clone state =
           case begun of
             Left problem -> pure (Retire (Left (nativeFailure problem)))
             Right () -> do
-              allocation <- update allocationSql (allocationId clone)
+              allocation <- queryParamRows connection deadline Sql allocationSql [Just (Encoding.encodeUtf8 (allocationId clone)), Just (Encoding.encodeUtf8 state), Encoding.encodeUtf8 . Text.take 512 <$> diagnostic] 1
               case allocation of
                 Right [[Just _]] -> do
                   lease <- update leaseSql (cloneLeaseId clone)
@@ -403,9 +406,11 @@ release configuration session maintenance options identity clone = do
                     pure (Keep (first nativeFailure outcome))
                 )
           case dropped of
-            Left problem -> do
-              _ <- markState configuration session clone "CleanupFailed"
-              pure (Left problem)
+            Left problem@LeaseError {cause = dropCause, sqlState = dropState} -> do
+              marked <- markStateWithDiagnostic configuration session clone "CleanupFailed" (Just dropCause)
+              pure $ case marked of
+                Right () -> Left problem
+                Left LeaseError {cause = recordCause} -> Left (LeaseError dropCause dropState (Just ("could not record cleanup failure: " <> recordCause)))
             Right () -> markState configuration session clone "Released"
 
 mergeCleanup :: Either LeaseError a -> Either SomeException (Either LeaseError ()) -> Either LeaseError a

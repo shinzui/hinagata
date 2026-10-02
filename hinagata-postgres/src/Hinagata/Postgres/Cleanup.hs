@@ -360,7 +360,7 @@ generationDatabase connection configuration deadline identifier = do
 changeState :: PQ.Connection -> HinagataConfig -> Deadline -> Snapshot -> Text -> IO (Either CleanupError ())
 changeState connection configuration deadline snapshot next = do
   let schema = quoteSqlIdentifier (maintenanceSchema configuration)
-      statement = Encoding.encodeUtf8 ("WITH allocation_change AS (UPDATE " <> schema <> ".\"allocations\" SET state = $2, updated_at = clock_timestamp() WHERE id = $1 RETURNING id), lease_change AS (UPDATE " <> schema <> ".\"leases\" SET state = $2, updated_at = clock_timestamp() WHERE allocation_id IN (SELECT id FROM allocation_change) RETURNING id) SELECT allocation_change.id, (SELECT count(*)::text FROM lease_change) FROM allocation_change")
+      statement = Encoding.encodeUtf8 ("WITH allocation_change AS (UPDATE " <> schema <> ".\"allocations\" SET state = $2, last_error = CASE WHEN $2 = 'Released' THEN NULL ELSE last_error END, updated_at = clock_timestamp() WHERE id = $1 RETURNING id), lease_change AS (UPDATE " <> schema <> ".\"leases\" SET state = $2, updated_at = clock_timestamp() WHERE allocation_id IN (SELECT id FROM allocation_change) RETURNING id) SELECT allocation_change.id, (SELECT count(*)::text FROM lease_change) FROM allocation_change")
       args = map (Just . Encoding.encodeUtf8) [allocation snapshot, next]
   rows <- queryParamRows connection deadline Sql statement args 1
   pure $ case rows of

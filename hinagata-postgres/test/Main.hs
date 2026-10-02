@@ -896,6 +896,25 @@ retentionLifecycleTests lifecycleConfig firstRef scenarioPlan connection catalog
     execCheck preparedConnection (Encoding.encodeUtf8 ("ROLLBACK PREPARED '" <> preparedGid <> "'"))
   retriedRelease <- releaseLease lifecycleConfig dropBlockedId
   assert "failed drop can be retried after its blocker is cleared" (case retriedRelease of Right (Released _) -> True; _ -> False)
+  callbackBlocked <- withDatabaseClassified lifecycleConfig firstRef scenarioPlan ReleaseAlways (const False) $ \LeaseInfo {leaseId, applicationTarget} -> do
+    let connectionString = Encoding.encodeUtf8 (connectionStringText (renderConnectionString applicationTarget))
+        callbackGid = "hinagata-callback-drop-" <> leaseId
+    bracket (PQ.connectdb connectionString) PQ.finish $ \preparedConnection -> do
+      execCheck preparedConnection "BEGIN"
+      execCheck preparedConnection "INSERT INTO items (id, note) VALUES (123457, 'callback drop blocker')"
+      execCheck preparedConnection (Encoding.encodeUtf8 ("PREPARE TRANSACTION '" <> callbackGid <> "'"))
+  callbackBlockedInfo <- case callbackBlocked of
+    Right LeaseOutcome {leaseInfo, leaseDisposition = LeaseCleanupFailed, cleanupDiagnostic = Just _} -> pure leaseInfo
+    _ -> fail "callback force-drop failure was not reported separately from its callback result"
+  let LeaseInfo {leaseId = callbackBlockedId, applicationTarget = callbackBlockedTarget} = callbackBlockedInfo
+      callbackConnectionString = Encoding.encodeUtf8 (connectionStringText (renderConnectionString callbackBlockedTarget))
+      callbackPreparedGid = "hinagata-callback-drop-" <> callbackBlockedId
+  assert "callback force-drop failure retains its diagnostic" =<< ((== 1) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM hinagata_test.allocations a JOIN hinagata_test.leases l ON l.allocation_id = a.id WHERE l.id = '" <> callbackBlockedId <> "' AND a.state = 'CleanupFailed' AND l.state = 'CleanupFailed' AND length(a.last_error) > 0")))
+  bracket (PQ.connectdb callbackConnectionString) PQ.finish $ \preparedConnection ->
+    execCheck preparedConnection (Encoding.encodeUtf8 ("ROLLBACK PREPARED '" <> callbackPreparedGid <> "'"))
+  callbackRetried <- releaseLease lifecycleConfig callbackBlockedId
+  assert "callback force-drop failure can be retried by lease ID" (case callbackRetried of Right (Released _) -> True; _ -> False)
+  assert "successful callback cleanup retry clears the diagnostic" =<< ((== 1) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM hinagata_test.allocations a JOIN hinagata_test.leases l ON l.allocation_id = a.id WHERE l.id = '" <> callbackBlockedId <> "' AND a.state = 'Released' AND a.last_error IS NULL")))
   thrownInfo <- newEmptyMVar
   classifiedThrown <- try @SomeException (withDatabaseClassified lifecycleConfig firstRef scenarioPlan PreserveFailures (const False) (\info -> putMVar thrownInfo info >> fail "intentional classified exception"))
   assert "classified callback exception keeps its original exception" (case classifiedThrown of Left _ -> True; Right _ -> False)
