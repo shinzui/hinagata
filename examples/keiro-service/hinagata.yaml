@@ -1,0 +1,10 @@
+project:
+  id: keiro-example
+baseline:
+  fixtures: [reference-seed]
+migration:
+  argv: [up]
+  deadline_ms: "120000"
+verification:
+  argv: [verify]
+  deadline_ms: "120000"

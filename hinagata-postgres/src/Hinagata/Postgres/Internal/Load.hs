@@ -55,17 +55,18 @@ loadInto target options plan = do
 -- Concurrent calls on that session fail with @SessionBusy@; an uncertain
 -- connection is retired instead of returned to the caller for reuse.
 loadPlan :: Session -> FixturePlan -> IO (Either LoadError LoadReport)
-loadPlan session plan = loadSelected session plan (map (CapturedFixtureRef (planDirectory plan)) (planFixtures plan))
+loadPlan session plan = loadSelected True session plan (map (CapturedFixtureRef (planDirectory plan)) (planFixtures plan))
 
--- | Load only the exact suffix returned by composition after verifying the
--- complete scenario bundle. This stays private to the lease lifecycle.
+-- | Load only the exact suffix returned by composition. The lease path has
+-- already verified its manifest and selected steps; streamed bytes are checked
+-- against captured digests again as they are used. This stays private.
 loadComposedRemainder :: Session -> FixturePlan -> ComposedPlan -> IO (Either LoadError LoadReport)
-loadComposedRemainder session plan composed = loadSelected session plan (scenarioRemainder composed)
+loadComposedRemainder session plan composed = loadSelected False session plan (scenarioRemainder composed)
 
-loadSelected :: Session -> FixturePlan -> [CapturedFixtureRef] -> IO (Either LoadError LoadReport)
-loadSelected session plan selected = do
+loadSelected :: Bool -> Session -> FixturePlan -> [CapturedFixtureRef] -> IO (Either LoadError LoadReport)
+loadSelected verifyBeforeLoad session plan selected = do
   verifyStart <- getMonotonicTimeNSec
-  verified <- try @IOException (verifyPlan plan)
+  verified <- try @IOException (if verifyBeforeLoad then verifyPlan plan else pure True)
   case verified of
     Left _ -> pure (Left ((simpleError VerifyBundle "bundle verification failed") {targetIdentity = Just (sessionIdentity session)}))
     Right False -> pure (Left ((simpleError VerifyBundle "bundle changed or is incomplete") {targetIdentity = Just (sessionIdentity session)}))

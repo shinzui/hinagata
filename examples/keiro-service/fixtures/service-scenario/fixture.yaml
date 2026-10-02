@@ -1,0 +1,5 @@
+name: service-scenario
+description: Include the verified baseline reference fixture and add one scenario row.
+include: [reference-seed]
+steps:
+  - sql: scenario.sql

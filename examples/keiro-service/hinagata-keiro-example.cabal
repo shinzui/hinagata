@@ -1,0 +1,72 @@
+cabal-version: 3.12
+name: hinagata-keiro-example
+version: 0.1.0.0
+synopsis: Test-only Keiro consumer for Hinagata fixture and lease integration
+category: Testing
+license: BSD-3-Clause
+license-file: LICENSE
+build-type: Simple
+extra-source-files:
+  README.md
+  fixtures/reference-seed/fixture.sql
+  fixtures/service-scenario/fixture.yaml
+  fixtures/service-scenario/scenario.sql
+  hinagata.yaml
+  hurl-workbench.dhall
+  hurl/counter-write.hurl
+  hurl/generated-id.hurl
+  hurl/health.hurl
+  hurl/hold.hurl
+  hurl/references.hurl
+  service-wrapper.sh
+
+common common
+  default-language: GHC2024
+  default-extensions:
+    DeriveAnyClass
+    DuplicateRecordFields
+    OverloadedLabels
+    OverloadedStrings
+
+  ghc-options: -Wall
+
+executable hinagata-keiro-service
+  import: common
+  hs-source-dirs: service
+  main-is: Main.hs
+  other-modules: Counter
+  ghc-options: -threaded
+  build-depends:
+    aeson >=2.2 && <2.3,
+    base >=4.21 && <5,
+    bytestring >=0.12 && <0.13,
+    effectful >=2.6 && <2.7,
+    hasql >=1.10 && <1.11,
+    hinagata-core,
+    http-types >=0.12.4 && <0.13,
+    keiki >=0.9 && <0.10,
+    keiro >=0.19 && <0.20,
+    keiro-core >=0.19 && <0.20,
+    kiroku-store >=0.9.0.1 && <0.10,
+    postgresql-libpq >=0.11.0.0 && <0.12,
+    settei >=0.2 && <0.3,
+    settei-env >=0.2 && <0.3,
+    text >=2.1 && <2.2,
+    vector >=0.13 && <0.14,
+    wai >=3.2.4 && <3.3,
+    warp >=3.4.9 && <3.5,
+
+executable hinagata-keiro-migrate
+  import: common
+  hs-source-dirs: migration
+  main-is: Main.hs
+  build-depends:
+    base >=4.21 && <5,
+    bytestring >=0.12 && <0.13,
+    containers >=0.6 && <0.8,
+    hasql >=1.10 && <1.11,
+    keiro-migrations >=0.19 && <0.20,
+    kiroku-store-migrations >=0.6 && <0.7,
+    pg-migrate >=1.2 && <1.3,
+    postgresql-libpq >=0.11.0.0 && <0.12,
+    text >=2.1 && <2.2,

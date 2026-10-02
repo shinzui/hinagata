@@ -14,7 +14,7 @@ where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async qualified as Async
-import Control.Exception (IOException, SomeAsyncException, SomeException, evaluate, fromException, mask, throwIO, try)
+import Control.Exception (IOException, SomeAsyncException, SomeException, evaluate, fromException, mask, mask_, throwIO, try)
 import Data.Bifunctor (first)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.Text qualified as Text
@@ -115,7 +115,7 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
   case composePlans (baselinePlan baseline) scenario of
     Left _ -> pure (Left (failure "scenario conflicts with the frozen baseline"))
     Right composed -> do
-      verified <- try @IOException (withinDeadline expiry (verifyPlan scenario))
+      verified <- try @IOException (withinDeadline expiry (verifyComposedRemainder scenario composed))
       case verified of
         Left _ -> pure (Left (failure "scenario bundle could not be verified"))
         Right Nothing -> pure (Left acquisitionTimeout)
@@ -204,7 +204,10 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
 
     watchOwnership session = do
       threadDelay 250000
-      checked <- runExclusive session $ \connection _ -> do
+      -- The callback winner cancels this watcher. Keep its bounded ping
+      -- atomic with respect to cancellation so release inherits an open
+      -- maintenance session instead of a retired one.
+      checked <- mask_ $ runExclusive session $ \connection _ -> do
         deadline <- deadlineAfter 1000
         ping <- query connection deadline Sql "SELECT 1"
         pure $ case ping of

@@ -7,16 +7,18 @@ run_case() {
     test|--tcp|--bulk-baseline) cabal test hinagata-postgres-test --test-show-details=direct ;;
     --cli) bash scripts/test-cli-postgres.sh ;;
     --example) bash scripts/example-workbench.sh ;;
+    --keiro-example) bash scripts/example-keiro.sh ;;
     --bench)
       cabal bench hinagata-postgres-direct-load --benchmark-options='100000 +RTS -s'
       cabal bench hinagata-postgres-direct-load --benchmark-options='1000000 +RTS -s'
       ;;
+    --bench-fixtures) python3 bench/run.py ;;
     *) echo "unknown mode: $mode" >&2; exit 2 ;;
   esac
 }
 
 if [[ -n "${HINAGATA_TEST_PGHOST:-}" ]]; then
-  if [[ "$mode" == --bench || "$mode" == --bulk-baseline || "$mode" == --cli || "$mode" == --example ]]; then
+  if [[ "$mode" == --bench || "$mode" == --bench-fixtures || "$mode" == --bulk-baseline || "$mode" == --cli || "$mode" == --example || "$mode" == --keiro-example ]]; then
     echo "bulk, benchmark, CLI, or example mode requires the disposable PostgreSQL cluster" >&2
     exit 2
   fi

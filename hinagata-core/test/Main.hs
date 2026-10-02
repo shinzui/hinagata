@@ -253,6 +253,22 @@ bundleTests = withSystemTempDirectory "hinagata-core-test-" $ \workspace -> do
   base <- bundleOrFail =<< Bundle.compileFixtures config (map fixtureName ["members", "left", "right"])
   let composed = Bundle.composePlans base orderOne
   assert "base prefix retains unrelated fixtures" (case composed of Right result -> length (Bundle.basePrefix result) == 3 && length (Bundle.scenarioRemainder result) == 1; _ -> False)
+  case composed of
+    Left _ -> fail "expected composable plans"
+    Right selected -> do
+      assert "scenario remainder verifies" =<< Bundle.verifyComposedRemainder orderOne selected
+      (sharedStep, suffixStep) <- case (Bundle.planFixtures orderOne, Bundle.scenarioRemainder selected) of
+        (shared : _, suffix : _) -> case (Bundle.steps shared, Bundle.steps (Bundle.fixture suffix)) of
+          (sharedStep : _, suffixStep : _) -> pure (sharedStep, suffixStep)
+          _ -> fail "expected shared and suffix steps"
+        _ -> fail "expected shared and suffix fixtures"
+      let sharedPath = Bundle.planDirectory orderOne </> Bundle.relativePath sharedStep
+          suffixPath = Bundle.planDirectory orderOne </> Bundle.relativePath suffixStep
+      ByteString.writeFile sharedPath "corrupted shared bytes"
+      assert "complete plan detects changed shared bytes" . not =<< Bundle.verifyPlan orderOne
+      assert "clone skips already sealed shared bytes" =<< Bundle.verifyComposedRemainder orderOne selected
+      ByteString.writeFile suffixPath "corrupted scenario bytes"
+      assert "clone rejects changed scenario suffix" . not =<< Bundle.verifyComposedRemainder orderOne selected
   assert "COPY option conflict rejected" (Bundle.composePlans copyOne copyTwo == Left (Bundle.ConflictingFixture (fixtureName "members")))
   ByteString.writeFile (leftDirectory </> "fixture.sql") "SELECT 11;"
   changedShared <- bundleOrFail =<< Bundle.compileFixtures config [fixtureName "scenario"]

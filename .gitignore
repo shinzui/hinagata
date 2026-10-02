@@ -13,3 +13,4 @@ db/
 result
 result-*
 .pre-commit-config.yaml
+bench/results/

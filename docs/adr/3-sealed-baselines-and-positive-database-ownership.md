@@ -26,6 +26,10 @@ Amended: 2026-10-02 (interrupt callbacks when their lease-owning session dies)
 
 Amended: 2026-10-02 (process-death evidence across allocation and publication boundaries)
 
+Amended: 2026-10-02 (bounded ownership heartbeat survives callback cancellation)
+
+Amended: 2026-10-02 (verify only the scenario suffix on repeated leases)
+
 ## Context
 
 Reuse must not silently test stale migrations or share scenario state. CREATE/DROP DATABASE are nontransactional, and copying a template requires no connected sessions.
@@ -34,7 +38,7 @@ Reuse must not silently test stale migrations or share scenario state. CREATE/DR
 
 Build immutable generations on the existing cluster; migrate, load, verify, disconnect, seal, then publish. Fingerprints cover real migration identity, frozen base sources, configuration, and server requirements. Reuse requires matching cluster/catalog/database identity. A maintenance catalog records allocation intent, identity, baseline/run association, and active/detached/preserved state. Advisory locks coordinate build, acquisition, retirement, and cleanup: a generation's lock is taken in shared mode by clone allocation and exclusively by build, retirement, and cleanup, matching PostgreSQL's own share lock on the template so concurrent clones are never serialized by Hinagata. The administration role owns every database Hinagata creates and applies declared database and schema grants before the application migration hook, and on every clone. Each setup or application role applies its own declared `ALTER ROLE ... IN DATABASE ... SET` values through a short-lived connection, so the database owner does not need `CREATEROLE` over those roles. PostgreSQL 15 and later give non-owners no `CREATE` on `public`; database `CREATE` alone does not confer that schema privilege, so setup roles migrating into `public` need an explicit schema grant.
 
-Store a non-secret fingerprint manifest, including state-affecting role/configuration and hook revisions, with explainable reuse/build outcomes. Reusable handles avoid rereading fixture bytes but do not bypass database identity checks. Baseline/scenario composition resolves base roots first and skips only that verified prefix on a fresh clone; conflicting shared definitions are errors. Concurrent construction has deadline-bound cancellable waiting and observable failed generations.
+Store a non-secret fingerprint manifest, including state-affecting role/configuration and hook revisions, with explainable reuse/build outcomes. Reusable handles avoid rereading fixture bytes but do not bypass database identity checks. Baseline/scenario composition resolves base roots first and skips only that verified prefix on a fresh clone; conflicting shared definitions are errors. Each lease checks the scenario bundle manifest and only the suffix it will load. The sealed base was verified during construction, and selected SQL/COPY bytes are checked again when used, so an unchanged base is neither rehashed nor reloaded per lease. Concurrent construction has deadline-bound cancellable waiting and observable failed generations.
 
 Only positively identified owned databases may be removed. Borrowed/protected targets never qualify. A held session lock is the only proof that a lease is live; cleanup skips live and preserved leases, reports a record whose lock is free as orphaned, removes orphans only on explicit apply, previews before applying, and refuses ambiguous crash windows. Use ordinary PostgreSQL durability. PostgreSQL documents the role-specific settings permission boundary in its [ALTER ROLE reference](https://www.postgresql.org/docs/18/sql-alterrole.html).
 
@@ -43,7 +47,7 @@ PostgreSQL's [`DROP DATABASE` reference](https://www.postgresql.org/docs/18/sql-
 
 A caller-supplied classifier identifies failure values without changing them. The policy may preserve those values or thrown callback failures; detached acquisition records a retained clone after setup. Both are released by explicit lease ID, with the same lock and positive-ownership checks as orphan cleanup. Cleanup diagnostics accompany returned values separately, while a thrown callback keeps its original exception.
 
-While a callback runs, Hinagata probes its existing maintenance session for liveness. Losing that session cancels the callback and returns a lease error after the callback has unwound; the clone stays cataloged as an orphan for explicit ownership-checked recovery. A timed heartbeat adds no database connection and does not turn elapsed time into cleanup authority.
+While a callback runs, Hinagata probes its existing maintenance session for liveness. Losing that session cancels the callback and returns a lease error after the callback has unwound; the clone stays cataloged as an orphan for explicit ownership-checked recovery. A timed heartbeat adds no database connection and does not turn elapsed time into cleanup authority. When a callback completes, cancellation of its watcher must not interrupt an in-flight heartbeat query and retire the maintenance session before ownership-checked release. The bounded probe finishes under asynchronous-exception masking, then the watcher exits.
 
 An optional trusted clone preparation hook uses setup access after clone grants and settings and before scenario fixtures. It runs for every new clone, including clones of a reused baseline. The hook is kept on the in-memory baseline handle and does not affect the sealed template fingerprint; a hook failure prevents callback handoff and triggers ownership-checked release.
 

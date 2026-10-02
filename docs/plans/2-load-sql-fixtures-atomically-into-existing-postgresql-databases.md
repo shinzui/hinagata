@@ -32,6 +32,11 @@ provenance:
       at: 2026-10-02T05:59:39Z
       mode: "implement"
       note: "Begin EP-2 native PostgreSQL loader implementation"
+    - model: "gpt-6-sol"
+      harness: "codex-cli"
+      at: 2026-10-02T15:49:58Z
+      mode: "implement"
+      note: "Correct bounded nonblocking COPY flush after performance profiling"
   reviews:
     - model: "claude-fable-5-1"
       harness: "claude-code"
@@ -56,12 +61,16 @@ A caller can load a compiled fixture plan into its existing migrated PostgreSQL 
 - [x] 2026-10-01: CSV COPY shares the transaction, streams 64 KiB chunks, and reports final-result failures. Mixed SQL/COPY/SQL, late duplicate rows, a trigger failure after all COPY bytes, deferred COMMIT failure, and a changed bundle are covered by the integration suite.
 - [x] 2026-10-01: Session reuse, retirement, cancellation, and direct-load costs are verified. The suite covers clean reuse after rollback, concurrent/closed use refusal, server disconnect, and interrupted COPY with no active loader after cleanup. The 100k/1m-row benchmark measured 150/1791 ms load time and 220,936/220,832 bytes maximum GHC heap residency on aarch64-darwin with GHC 9.12.4 and PostgreSQL 18.6.
 
+2026-10-02 EP-5 correction: A one-million-row comparison found that successful nonblocking COPY calls accumulated in libpq's output queue until COPY end. Flushing each bounded chunk corrected client RSS growth and reduced the measured COPY median from 1,553 ms to 919 ms, versus 869 ms for one-session `psql` on the same reference machine. The full benchmark and method are in [performance evidence](../performance.md); this supersedes the earlier load-speed probe for release decisions.
+
 
 ## Surprises & Discoveries
 
 `postgresql-libpq` was absent from the local Mori registry. Hackage's current 0.11.0.0 revision and the upstream `v0.11.0.0` release tag agreed, so the package bounds use `>=0.11 && <0.12`; the released source was inspected before adapting its nonblocking query/COPY calls. Multi-result SQL can otherwise retain a large SELECT result even when the caller discards it, so the adapter requests single-row mode immediately after dispatch and drains each result. Bundle verification before mutation is supplemented by a second SQL digest check immediately before dispatch and an incremental CSV digest check during transfer.
 
 Haddock builds the public library HTML with 100% symbol coverage for the exposed PostgreSQL modules. The core package's separate Haddock coverage remains an improvement opportunity.
+
+PostgreSQL's nonblocking libpq contract requires `PQflush` after successful `PQputCopyData`: success means queued locally, not sent. Flushing on `CopyInWouldBlock` or only at COPY end allowed the queue and client RSS to grow with the fixture. ADR 2 now records the bounded per-chunk flush requirement.
 
 
 ## Decision Log

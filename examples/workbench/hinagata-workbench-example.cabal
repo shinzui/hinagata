@@ -6,6 +6,17 @@ category: Testing
 license: BSD-3-Clause
 license-file: LICENSE
 build-type: Simple
+extra-source-files:
+  README.md
+  fixtures/member-schema/fixture.sql
+  fixtures/seeded-member/fixture.sql
+  hinagata.yaml
+  hurl-workbench.dhall
+  hurl/health.hurl
+  hurl/intentional-failure.hurl
+  hurl/members.hurl
+  hurl/slow.hurl
+  service-wrapper.sh
 
 common common
   default-language: GHC2024

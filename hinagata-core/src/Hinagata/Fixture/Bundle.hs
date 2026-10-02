@@ -8,6 +8,7 @@ module Hinagata.Fixture.Bundle
     planDirectory,
     planFixtures,
     verifyPlan,
+    verifyComposedRemainder,
     compileFixtures,
     CompositionError (..),
     CapturedFixtureRef (..),
@@ -114,6 +115,12 @@ planFixtures FixturePlan {fixtures} = fixtures
 verifyPlan :: FixturePlan -> IO Bool
 verifyPlan FixturePlan {directory, digest, fixtures} =
   verifyBundle directory (strictBuilder (manifestEncoding digest fixtures)) fixtures
+
+-- | Verify the bundle manifest and only the scenario fixtures that a clone
+-- will load. A shared base prefix was verified when its template was sealed.
+verifyComposedRemainder :: FixturePlan -> ComposedPlan -> IO Bool
+verifyComposedRemainder FixturePlan {directory, digest, fixtures} ComposedPlan {scenarioRemainder} =
+  verifyBundle directory (strictBuilder (manifestEncoding digest fixtures)) (map fixture scenarioRemainder)
 
 data CompositionError = ConflictingFixture !FixtureName
   deriving stock (Eq, Show)

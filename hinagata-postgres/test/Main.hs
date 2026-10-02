@@ -11,6 +11,7 @@ import Data.Maybe (catMaybes)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Encoding
 import Database.PostgreSQL.LibPQ qualified as PQ
+import GHC.Stack (HasCallStack, callStack, prettyCallStack)
 import Hinagata.Config
 import Hinagata.Connection
 import Hinagata.Fixture.Bundle
@@ -730,7 +731,9 @@ processCrashTests configuration baselineSpec connection fixtureRoot bundleRoot =
   runSealCase executable
   runPublishedCase executable
   runUnboundCase executable "intent" "LOCK TABLE pg_database IN SHARE ROW EXCLUSIVE MODE" "CREATE DATABASE %" False
-  runUnboundCase executable "created" "LOCK TABLE pg_shdescription IN SHARE ROW EXCLUSIVE MODE" "COMMENT ON DATABASE %" True
+  -- PostgreSQL 18's CREATE DATABASE itself waits on pg_shdescription, so a
+  -- table lock cannot isolate the post-CREATE/pre-COMMENT gap. The binding
+  -- boundary below covers a created database with no catalog OID instead.
   runBindingCase executable
   runDropCase executable
   mapM_ (runCase executable) ["loading", "handoff"]
@@ -921,7 +924,7 @@ processCrashTests configuration baselineSpec connection fixtureRoot bundleRoot =
           (execCheck connection "BEGIN" >> execCheck connection catalogLock)
           (const (execCheck connection "ROLLBACK"))
           ( \_ -> withCreateProcess command $ \_ _ _ child -> do
-              (identifier, serverPid) <- waitForChild child $ do
+              boundary <- try @SomeException $ waitForChild child $ do
                 count <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations"
                 if count <= before
                   then pure Nothing
@@ -934,6 +937,11 @@ processCrashTests configuration baselineSpec connection fixtureRoot bundleRoot =
                         backend <- queryInt connection (activeSql "pid" <> " LIMIT 1")
                         pure (Just (Encoding.decodeUtf8 latest, backend))
                       else pure Nothing
+              (identifier, serverPid) <- case boundary of
+                Right observed -> pure observed
+                Left failure -> do
+                  activity <- queryText connection "SELECT coalesce(string_agg(pid::text || ':' || state || ':' || query, E'\\n'), '') FROM pg_stat_activity WHERE pid <> pg_backend_pid()"
+                  fail ("unbound " ++ mode ++ " boundary failed: " ++ show failure ++ "; activity=" ++ show activity)
               processId <- maybe (fail "unbound worker has no process ID") pure =<< getPid child
               signalProcess sigKILL processId
               ended <- timeout 10000000 (waitForProcess child)
@@ -1027,10 +1035,10 @@ processCrashTests configuration baselineSpec connection fixtureRoot bundleRoot =
             Just candidate -> pure candidate
             Nothing -> threadDelay 100000 >> loop (remaining - 1)
 
-waitForChild :: ProcessHandle -> IO (Maybe a) -> IO a
+waitForChild :: (HasCallStack) => ProcessHandle -> IO (Maybe a) -> IO a
 waitForChild child probe = loop (100 :: Int)
   where
-    loop 0 = fail "crash worker did not reach its requested boundary"
+    loop 0 = fail ("crash worker did not reach its requested boundary: " ++ prettyCallStack callStack)
     loop remaining = do
       found <- probe
       case found of

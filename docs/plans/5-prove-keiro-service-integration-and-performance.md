@@ -52,14 +52,24 @@ A service author can copy a complete Keiro integration example and measure Hinag
 
 ## Progress
 
-- [ ] A public-API Keiro service example migrates, loads, serves, and passes workbench assertions over local sockets.
-- [ ] Small/bulk benchmarks and concurrent suites meet recorded gates or receive an explicit evidence-backed plan revision.
-- [ ] Published API docs and isolated source distributions reproduce the examples and completed integration checks.
+- [x] A public-API Keiro service example migrates, loads, serves, and passes workbench assertions over local sockets.
+- [x] Small/bulk benchmarks and concurrent suites meet recorded gates or receive an explicit evidence-backed plan revision.
+- [x] Published API docs and isolated source distributions reproduce the examples and completed integration checks.
 
 2026-10-02 release-gate progress: `just release-check` now generates all four source archives, unpacks them into a fresh temporary project with no sibling checkout, builds and tests them, generates Haddocks, and confirms archive CLI help and the no-Git revision fallback. The gate passes under `nix develop`; Keiro example and benchmark deliverables remain open. Hackage lists Keiro and keiro-migrations 0.19.0.0, and their matching upstream release tags were verified. The Seihou-pinned Nix package set lacks Keiro packages, so the example will resolve a deliberate released Cabal cohort inside the Nix development shell.
 
+2026-10-02 Keiro integration progress: A fifth, test-only source package now composes Kiroku, Keiro, and application pg-migrate components. `just example-keiro` builds it with GHC 9.12.4, starts a disposable PostgreSQL 18 socket cluster, prepares cold and warm baselines, demonstrates migration/base-fixture invalidation, runs two isolated workbench read suites, and proves public Keiro command/Kiroku read, generated-ID insertion, and application-role denial of schema creation. The setup and application roles are distinct. The application fixture does not synthesize runtime rows. The release gate must be rerun with the new archive before marking the package complete.
+
+2026-10-02 benchmark progress: `just release-check` passes with all five unpacked packages and their Haddocks. A disposable-cluster `just bench-fixtures` driver writes ignored per-sample JSON and validates 30 warm 100/1,000-row scenarios, five 100k/1m COPY runs against one-session `psql`, GHC/process residency, and five million-row clone/rebuild samples. On the documented M1 Max reference run, warm medians are 207.6/201.4 ms, 1m COPY is 919 ms versus `psql` 869 ms (1.06×), and the 100k-to-1m client RSS increment is 16 KiB; all three numeric gates pass. `FILE_COPY` clones are faster locally but retain the checkpoint tradeoff and `WAL_LOG` default. Concurrent throughput, service timing, and spare-clone evidence remain open.
+
+2026-10-02 completion: The final full reference run is recorded in [performance evidence](../performance.md) and its ignored `bench/results/20261002T154229Z/results.json` artifact. Thirty warm small scenarios per size measured 232/230 ms median and 286/257 ms nearest-rank p95, below the 250/500 ms limits. Five 100k/1m COPY samples per method measured 0.90×/1.09× one-session `psql`; client RSS stayed flat across tenfold input growth. One prepared manager showed four overlapping `CREATE DATABASE` operations at concurrency four and eight under the four-worker cap. The four-spare experiment reduced handoff latency but moved clone work and 299 MB of storage ahead of demand. The service proof includes two distinct leases/ports, public command and read, generated IDs, role denial, readiness failure, and cancellation cleanup. All five source archives build, test, and generate Haddocks in isolation.
+
 
 ## Surprises & Discoveries
+
+2026-10-02: Repeated service runs found an intermittent `SessionClosed` during release. The ownership watcher shared the maintenance session and `race` could cancel its heartbeat query as the child completed, retiring that session before the release step. The bounded heartbeat query is now masked against callback-completion cancellation; repeated service runs and PostgreSQL tests verify the correction. The earlier `pg_shdescription` lock test did not isolate the claimed post-CREATE window on PostgreSQL 18 and was removed; ADR 3 and EP-3 record the boundary correction.
+
+2026-10-02: The first measured 1m COPY was 1.68× `psql` and client RSS grew with input size. Nonblocking libpq had queued successful `PQputCopyData` calls until COPY end; flushing each 64 KiB chunk reduced the median ratio to about 1.06× and held RSS flat. The first million-row clone probe also rehashed the same base bundle twice per lease. Verifying only the scenario suffix before clone creation, while checking streamed bytes again during use, reduced the no-op remainder's scenario-load phase from about 76 ms to 1–2 ms.
 
 
 ## Decision Log
@@ -68,8 +78,16 @@ A service author can copy a complete Keiro integration example and measure Hinag
 
 2026-09-30: Add two measurements the architecture review made necessary: compare the `WAL_LOG` and `FILE_COPY` clone strategies on the million-row baseline, and prove from phase timings that concurrent clone allocations overlap instead of queueing on Hinagata's shared-mode baseline lock.
 
+2026-10-02: Keep `WAL_LOG` as the default. On the reference machine `FILE_COPY` shortened the median million-row clone phase from 330 to 77 ms, but each scope caused two additional requested/completed checkpoints relative to `WAL_LOG`; a cluster-wide checkpoint cost should not be silently traded for local lease latency.
+
+2026-10-02: Defer a public spare-clone pool. Four prepared spares shortened median handoff from 1,596 to 16 ms but required 1,597 ms initial preparation, 1,650 ms replenishment, 299 MB storage, and new ownership/cancellation/crash semantics. The measured on-demand path meets the initial release targets without that lifecycle expansion.
+
 
 ## Outcomes & Retrospective
+
+The first-release consumer path is reproducible from a disposable local PostgreSQL cluster through source-archive builds, migration and fixture preparation, isolated Keiro service suites, and cleanup on normal/failure/cancellation exits. The [integration guide](../integration.md) gives the tested cohort and service-owned migration boundary; [performance evidence](../performance.md) records methodology, sample counts, and limits. All three numeric performance targets pass on the documented M1 Max reference machine. This is a measured single-machine result, not a cross-platform speed guarantee.
+
+The service stress run exposed a heartbeat cancellation race in lease cleanup; masking the bounded query retained the shared maintenance session until release. COPY profiling exposed queued nonblocking libpq writes; flushing each bounded chunk brought one-million-row transfer within the `psql` budget while holding client RSS flat. Suffix-only verification removed repeated base-bundle hashing on a fresh clone. ADRs 2 and 3 carry these durable contracts; the benchmark's sample artifact remains ignored and regenerable.
 
 
 ## Context and Orientation

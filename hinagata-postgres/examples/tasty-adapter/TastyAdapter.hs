@@ -1,15 +1,24 @@
 -- | A small Tasty adapter kept in the test component so the library has no
 -- dependency on a particular test framework. Build with
 -- @nix develop -c cabal build hinagata-postgres:hinagata-postgres-test@.
-module TastyAdapter (databaseCase, runDatabaseCase) where
+module TastyAdapter (withPreparedManager, databaseCase, runDatabaseCase) where
 
 import Data.Either (isLeft)
 import Hinagata.Fixture.Bundle (FixturePlan)
-import Hinagata.Postgres.Baseline (BaselineRef)
+import Hinagata.Postgres.Baseline (BaselineError, BaselineRef, BaselineSpec (..), ensureBaseline)
 import Hinagata.Postgres.Lease (LeaseDisposition (..), LeaseInfo, LeaseOutcome (..), RetentionPolicy (..))
-import Hinagata.Postgres.Manager (Manager, withManagedDatabaseClassified)
+import Hinagata.Postgres.Manager (Manager, withManagedDatabaseClassified, withManager)
 import Test.Tasty (TestTree)
 import Test.Tasty.HUnit (assertFailure, testCase)
+
+-- | Prepare once per test group, then reuse the sealed baseline for as many
+-- isolated lease callbacks as the caller runs inside this manager scope.
+withPreparedManager :: BaselineSpec -> (Manager -> BaselineRef -> IO a) -> IO (Either BaselineError a)
+withPreparedManager spec run = do
+  prepared <- ensureBaseline spec
+  case prepared of
+    Left problem -> pure (Left problem)
+    Right (baseline, _) -> Right <$> withManager (configuration spec) (\manager -> run manager baseline)
 
 -- | Construct a Tasty case around a prepared suite-scoped manager and frozen
 -- fixture plans. A failed assertion returned as 'Left' retains its clone for

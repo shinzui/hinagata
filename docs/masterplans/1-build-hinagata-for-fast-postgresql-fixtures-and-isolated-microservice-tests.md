@@ -75,7 +75,7 @@ No relevant local ADR existed initially; `mori show --full` confirms there is no
 | 2 | Load SQL fixtures atomically into existing PostgreSQL databases | [2-load-sql-fixtures-atomically-into-existing-postgresql-databases.md](../plans/2-load-sql-fixtures-atomically-into-existing-postgresql-databases.md) | EP-1 | None | Complete |
 | 3 | Manage reusable baselines and isolated database leases | [3-manage-reusable-baselines-and-isolated-database-leases.md](../plans/3-manage-reusable-baselines-and-isolated-database-leases.md) | EP-2 | None | Complete |
 | 4 | Expose fixture commands and hurl-workbench handoff | [4-expose-fixture-commands-and-hurl-workbench-handoff.md](../plans/4-expose-fixture-commands-and-hurl-workbench-handoff.md) | EP-3 | None | Complete |
-| 5 | Prove Keiro service integration and performance | [5-prove-keiro-service-integration-and-performance.md](../plans/5-prove-keiro-service-integration-and-performance.md) | EP-4 | None | In Progress |
+| 5 | Prove Keiro service integration and performance | [5-prove-keiro-service-integration-and-performance.md](../plans/5-prove-keiro-service-integration-and-performance.md) | EP-4 | None | Complete |
 
 Status values are Not Started, In Progress, Complete, or Cancelled. The registry is authoritative for child status.
 
@@ -114,7 +114,7 @@ The [Haskell standards audit](../research/haskell-standards-audit.md) owns the a
 
 ## Progress
 
-Planning complete and architecture-reviewed on 2026-09-30, with the review's shared-contract refinements applied. EP-1 is complete: Seihou's `nix-haskell-flake` bootstrapped the development environment, and the core package passes its tests, source-distribution, formatter, Nix package and flake checks, and the CSV capture residency probe. EP-2 is complete: the private libpq loader passes socket-only and TCP integration suites, source distribution, Haddock, local Nix checks, and a 100k/1m-row bounded-residency benchmark. EP-3 is complete: sealed baseline reuse, concurrent isolated leases, ownership-aware recovery, catalog upgrades, and a million-row prepared baseline pass disposable socket/TCP and bulk acceptance runs. EP-4 is complete: the CLI and workbench example pass offline, disposable-cluster, Nix, and source-distribution gates, including failure/cancellation cleanup. 4 of 5 child plans are complete. Full Keiro service integration, performance, and release gates remain assigned to EP-5.
+Planning completed and architecture-reviewed on 2026-09-30. EP-1 bootstrapped the development environment with Seihou's `nix-haskell-flake` and delivered deterministic fixture plans and typed configuration. EP-2 delivered atomic SQL/COPY loading; EP-3 delivered sealed baseline reuse and isolated leases; EP-4 delivered the CLI and workbench handoff. EP-5 completed the Keiro service proof, repeatable performance evidence, compatibility guidance, and isolated five-package source distribution gate. All 5 child plans are complete. The repository checks, disposable PostgreSQL suites, real-service failure/cancellation checks, and three numeric reference-machine performance targets pass.
 
 
 ## Surprises & Discoveries
@@ -126,6 +126,8 @@ The 2026-09-30 architecture review verified two PostgreSQL facts that shape the 
 EP-1's 2026-10-01 memory probe caught lazy SHA256 context accumulation despite bounded reads; strict updates hold roughly constant GHC heap residency for 8 MiB and 80 MiB CSV captures. PostgreSQL's database-level `CREATE` privilege does not provide `CREATE ON SCHEMA public`, so the shared Settei contract now declares schema grants separately and [ADR 3](../adr/3-sealed-baselines-and-positive-database-ownership.md) records the distinction. EP-3 applies the declared schema grants before migration on a fresh generation and asserts them on clones.
 
 EP-3 fault injection confirms that process death after CREATE or marker writing can leave an allocation with no committed OID. EP-4's cleanup command must present that ambiguity and refuse automatic deletion. A sealed but unpublished Building generation remains inspectable while the next builder publishes a replacement; a published Ready generation remains reusable after its publisher exits.
+
+EP-5's stress run exposed a cancellation race between lease heartbeat and release; the bounded watcher query is masked to protect the shared maintenance session. Profiling also found unflushed nonblocking COPY writes and redundant base-bundle hashing on each clone; bounded per-chunk flush and suffix-only preflight corrected the measured cost while preserving digest checks. ADRs 2 and 3 record those durable changes.
 
 
 ## Decision Log
@@ -154,6 +156,8 @@ EP-3 fault injection confirms that process death after CREATE or marker writing 
 
 
 ## Outcomes & Retrospective
+
+The five-plan release delivers direct transactional fixture loading, prepared and fingerprinted baselines, bounded concurrent leases, a CLI/service handoff, and a working Keiro consumer. The [integration guide](../integration.md) records the tested GHC/PostgreSQL/service cohort; [performance evidence](../performance.md) records full sample data and the three passing speed/memory gates. Archive-only build/test/Haddock checks cover all five packages. `WAL_LOG` remains the default after the measured `FILE_COPY` checkpoint tradeoff, and spare-clone pooling remains deferred after its bounded experiment. The project is ready for review as an initial release; results outside the documented reference machine and cohort remain unmeasured.
 
 
 Revision note (2026-09-26): Prior-art research tightens shared contracts and acceptance across the five existing children. Their dependency order and Not Started status are unchanged; no upstream timing is treated as measured Hinagata performance.

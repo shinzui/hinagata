@@ -14,7 +14,7 @@ done
 cat > "$workspace/unpacked/cabal.project" <<'PROJECT'
 packages: ./*/*.cabal
 tests: True
-benchmarks: False
+benchmarks: True
 write-ghc-environment-files: never
 PROJECT
 

@@ -90,7 +90,11 @@ sendChunk :: PQ.Connection -> Deadline -> ByteString -> IO (Either NativeError (
 sendChunk connection deadline bytes = do
   outcome <- PQ.putCopyData connection bytes
   case outcome of
-    PQ.CopyInOk -> pure (Right ())
+    PQ.CopyInOk -> do
+      -- Nonblocking libpq queues successful COPY writes until PQflush. Drain
+      -- each bounded chunk so client memory cannot grow with fixture size.
+      flushed <- flushOutput connection deadline
+      pure $ if flushed then Right () else Left (NativeError Copy Nothing "COPY data flush timed out")
     PQ.CopyInError -> pure (Left (NativeError Copy Nothing "COPY data transfer failed"))
     PQ.CopyInWouldBlock -> do
       flushed <- flushOutput connection deadline

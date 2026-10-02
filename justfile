@@ -19,6 +19,11 @@ example-workbench:
     hurlfmt --check examples/workbench/hurl/health.hurl examples/workbench/hurl/members.hurl examples/workbench/hurl/intentional-failure.hurl examples/workbench/hurl/slow.hurl
     bash scripts/test-postgres.sh --example
 
+example-keiro:
+    cabal build hinagata-cli hinagata-keiro-example
+    hurlfmt --check examples/keiro-service/hurl/health.hurl examples/keiro-service/hurl/references.hurl examples/keiro-service/hurl/counter-write.hurl examples/keiro-service/hurl/generated-id.hurl examples/keiro-service/hurl/hold.hurl
+    bash scripts/test-postgres.sh --keiro-example
+
 test-postgres:
     bash scripts/test-postgres.sh
 
@@ -30,6 +35,10 @@ test-postgres-bulk:
 
 bench-postgres:
     bash scripts/test-postgres.sh --bench
+
+bench-fixtures:
+    cabal build hinagata-cli hinagata-postgres-direct-load hinagata-postgres-concurrent-leases
+    bash scripts/test-postgres.sh --bench-fixtures
 
 release-check:
     bash scripts/release-check.sh
@@ -45,4 +54,5 @@ check: check-conventions core-test postgres-test test-cli fmt-check
     cabal sdist hinagata-postgres
     cabal sdist hinagata-cli
     cabal sdist hinagata-workbench-example
+    cabal sdist hinagata-keiro-example
     nix flake check

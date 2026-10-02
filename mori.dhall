@@ -31,5 +31,26 @@ in  Schema.Project::{
         , path = Some "hinagata-postgres"
         , description = Some "Atomic fixture loading over private PostgreSQL sessions"
         }
+      , Schema.Package::{
+        , name = "hinagata-cli"
+        , type = Schema.PackageType.Application
+        , language = Schema.Language.Haskell
+        , path = Some "hinagata-cli"
+        , description = Some "Fixture commands and scoped PostgreSQL lease handoff"
+        }
+      , Schema.Package::{
+        , name = "hinagata-workbench-example"
+        , type = Schema.PackageType.Application
+        , language = Schema.Language.Haskell
+        , path = Some "examples/workbench"
+        , description = Some "Test-only HTTP workbench consumer"
+        }
+      , Schema.Package::{
+        , name = "hinagata-keiro-example"
+        , type = Schema.PackageType.Application
+        , language = Schema.Language.Haskell
+        , path = Some "examples/keiro-service"
+        , description = Some "Test-only Keiro service and migration consumer"
+        }
       ]
     }
