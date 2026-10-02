@@ -284,19 +284,19 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
         count <- queryInt verified "SELECT count(*) FROM items"
         PQ.finish verified
         pure (if count == 2 then Right () else Left "unexpected baseline rows")
-      baselineSpec = BaselineSpec lifecycleConfig goodPlan (Just "migration-v1") (Just "verify-v1") ["plpgsql"] (Just "C") migrate verify
+      baselineSpec = BaselineSpec lifecycleConfig goodPlan (Just "migration-v1") (Just "verify-v1") ["plpgsql"] (Just "C") migrate verify Nothing
   firstBaseline <- ensureBaseline baselineSpec
   secondBaseline <- ensureBaseline baselineSpec
   (firstRef, firstReport) <- orFail firstBaseline
   (secondRef, secondReport) <- orFail secondBaseline
   calls <- readIORef migrationCalls
-  assert "baseline builds once and reuses a sealed generation" (baselineDatabase firstRef == baselineDatabase secondRef && kind firstReport == Built && kind secondReport == Reused && calls == 1)
+  assert "baseline builds once and reuses a sealed generation" (baselineDatabase firstRef == baselineDatabase secondRef && kind firstReport == Built && kind secondReport == Reused && comparison firstReport == Nothing && comparison secondReport == Nothing && calls == 1)
   recordedManifest <- queryText connection "SELECT fingerprint_manifest::text FROM hinagata_test.generations WHERE state = 'Ready' LIMIT 1"
   assert "fingerprint manifest omits raw role-setting values" (not ("warning" `ByteString.isInfixOf` recordedManifest))
   rotatedPassword <- orFail (mkSecret "rotated-passphrase")
   let rotatedConfig = lifecycleConfig {administration = adminRole {password = Just rotatedPassword}, setup = setupRole {password = Just rotatedPassword}, application = appRole {password = Just rotatedPassword}}
-  rotated <- ensureBaseline baselineSpec {configuration = rotatedConfig}
-  assert "credential rotation does not invalidate a baseline" (case rotated of Right (ref, report) -> baselineDatabase ref == baselineDatabase firstRef && kind report == Reused; _ -> False)
+  rotated <- ensureBaseline baselineSpec {configuration = rotatedConfig, compareAgainst = Just firstRef}
+  assert "credential rotation does not invalidate a baseline" (case rotated of Right (ref, report) -> baselineDatabase ref == baselineDatabase firstRef && kind report == Reused && fmap changedComponents (comparison report) == Just []; _ -> False)
   let sealedSql = Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> databaseNameText (baselineDatabase firstRef) <> "' AND datallowconn = false")
   assert "ready baseline rejects connections" =<< ((== 1) <$> queryInt connection sealedSql)
   createDirectoryIfMissing True (fixtureRoot </> "scenario")
@@ -528,10 +528,10 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   assert "callback cancellation rethrows its asynchronous exception" (case cancelledResult of Just (Left _) -> True; _ -> False)
   assert "callback cancellation releases despite failure-preservation policy" =<< ((== 1) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM hinagata_test.leases WHERE id = '" <> cancelledId <> "' AND state = 'Released'")))
   assert "callback cancellation drops its database" =<< ((== 0) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> databaseNameText (connectionDatabase cancelledTarget) <> "'")))
-  changed <- ensureBaseline baselineSpec {migrationRevision = Just "migration-v2"}
+  changed <- ensureBaseline baselineSpec {migrationRevision = Just "migration-v2", compareAgainst = Just firstRef}
   (changedRef, changedReport) <- orFail changed
   changedCalls <- readIORef migrationCalls
-  assert "migration revision creates a distinct baseline" (baselineDatabase changedRef /= baselineDatabase firstRef && kind changedReport == Built && changedCalls == 2)
+  assert "migration revision creates a distinct baseline with an explained change" (baselineDatabase changedRef /= baselineDatabase firstRef && kind changedReport == Built && fmap changedComponents (comparison changedReport) == Just [MigrationRevision] && changedCalls == 2)
   ByteString.writeFile (fixtureRoot </> "good" </> "fixture.sql") "INSERT INTO items (id, note) VALUES (1, 'changed first'); INSERT INTO items (id, note) VALUES (2, 'second');"
   changedPlan <- bundleOrFail =<< compileFixtures (BundleConfig fixtureRoot bundleRoot (positive 1048576) (positive 65536)) [fixtureName "good"]
   allocationsBeforeConflict <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations"
@@ -539,8 +539,13 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   allocationsAfterConflict <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations"
   assert "conflicting captured fixture refused before allocation" (case conflicting of Left _ -> allocationsBeforeConflict == allocationsAfterConflict; Right _ -> False)
   ByteString.writeFile (fixtureRoot </> "good" </> "fixture.sql") "INSERT INTO items (id, note) VALUES (1, 'first'); INSERT INTO items (id, note) VALUES (2, 'second');"
-  changedFixture <- ensureBaseline baselineSpec {basePlan = changedPlan}
-  assert "base fixture bytes select a new generation" (case changedFixture of Right (ref, report) -> baselineDatabase ref /= baselineDatabase firstRef && kind report == Built; _ -> False)
+  changedFixture <- ensureBaseline baselineSpec {basePlan = changedPlan, compareAgainst = Just firstRef}
+  assert "base fixture bytes select a new generation with an explained change" (case changedFixture of Right (ref, report) -> baselineDatabase ref /= baselineDatabase firstRef && kind report == Built && fmap changedComponents (comparison report) == Just [BaseFixtures]; _ -> False)
+  changedHook <- ensureBaseline baselineSpec {verificationRevision = Just "verify-v2", compareAgainst = Just firstRef}
+  assert "verification hook revision is independently explained" (case changedHook of Right (_, report) -> kind report == Built && fmap changedComponents (comparison report) == Just [VerificationRevision]; _ -> False)
+  let changedRoleConfig = lifecycleConfig {applicationSettings = [RoleSetting messageSetting "notice"]}
+  changedRole <- ensureBaseline baselineSpec {configuration = changedRoleConfig, compareAgainst = Just firstRef}
+  assert "application role setting is independently explained without its value" (case changedRole of Right (_, report) -> kind report == Built && fmap changedComponents (comparison report) == Just [ApplicationRoleSettings]; _ -> False)
   failed <- ensureBaseline baselineSpec {migrationRevision = Just "migration-v3", verificationHook = \_ -> pure (Left "verification failed")}
   assert "failed rebuild remains unpublished" (case failed of Left _ -> True; Right _ -> False)
   missingExtension <- ensureBaseline baselineSpec {migrationRevision = Just "migration-v4", requiredExtensions = ["not_installed"]}

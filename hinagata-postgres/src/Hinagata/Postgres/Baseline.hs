@@ -4,6 +4,8 @@ module Hinagata.Postgres.Baseline
     BaselineRef,
     baselineDatabase,
     PreparationKind (..),
+    FingerprintComponent (..),
+    FingerprintComparison (..),
     PreparationReport (..),
     BaselineError (..),
     ensureBaseline,
@@ -14,6 +16,7 @@ import Control.Exception (IOException, try)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.Bifunctor (first)
 import Data.ByteString qualified as ByteString
+import Data.Maybe (listToMaybe)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Encoding
 import Database.PostgreSQL.LibPQ qualified as PQ
@@ -43,7 +46,8 @@ data BaselineSpec = BaselineSpec
     requiredExtensions :: ![Text],
     requiredLocale :: !(Maybe Text),
     migrationHook :: !(ConnectionTarget -> IO (Either Text ())),
-    verificationHook :: !(ConnectionTarget -> IO (Either Text ()))
+    verificationHook :: !(ConnectionTarget -> IO (Either Text ())),
+    compareAgainst :: !(Maybe BaselineRef)
   }
 
 -- | Name of the sealed template database. Consumers should acquire a clone
@@ -55,11 +59,41 @@ baselineDatabase BaselineRef {baselineName} = baselineName
 data PreparationKind = Built | Reused
   deriving stock (Eq, Show)
 
--- | Initial build/reuse report. The duration includes hook and fixture work.
+-- | Non-secret categories in the versioned fingerprint manifest.
+data FingerprintComponent
+  = FingerprintVersion
+  | ServerMajor
+  | ProjectIdentity
+  | BaseFixtures
+  | MigrationRevision
+  | VerificationRevision
+  | ExtensionRequirements
+  | LocaleRequirement
+  | AdministrationRole
+  | SetupRole
+  | ApplicationRole
+  | SetupPrivileges
+  | ApplicationPrivileges
+  | SetupSchemaPrivileges
+  | ApplicationSchemaPrivileges
+  | SetupRoleSettings
+  | ApplicationRoleSettings
+  deriving stock (Eq, Show)
+
+-- | Changes against the caller's explicitly selected prior generation.
+data FingerprintComparison = FingerprintComparison
+  { previousFingerprint :: !Text,
+    changedComponents :: ![FingerprintComponent]
+  }
+  deriving stock (Eq, Show)
+
+-- | Build/reuse report. The duration includes hook and fixture work. No
+-- comparison is claimed unless the caller selected a prior generation.
 data PreparationReport = PreparationReport
   { kind :: !PreparationKind,
     fingerprint :: !Text,
-    elapsedMs :: !Int
+    elapsedMs :: !Int,
+    comparison :: !(Maybe FingerprintComparison)
   }
   deriving stock (Eq, Show)
 
@@ -102,10 +136,10 @@ ensureBaseline spec@BaselineSpec {configuration} = do
             pure $ case opened of
               Left failure -> Left (sessionFailure failure)
               Right (Left failure) -> Left (sessionFailure failure)
-              Right (Right (Right (baseline, kind))) -> Right (baseline, PreparationReport kind (baselineFingerprint baseline) (fromIntegral ((end - start) `div` 1000000)))
+              Right (Right (Right (baseline, kind, comparison))) -> Right (baseline, PreparationReport kind (baselineFingerprint baseline) (fromIntegral ((end - start) `div` 1000000)) comparison)
               Right (Right (Left failure)) -> Left failure
 
-prepare :: PQ.Connection -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> BaselineSpec -> IO (Either BaselineError (BaselineRef, PreparationKind))
+prepare :: PQ.Connection -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> BaselineSpec -> IO (Either BaselineError (BaselineRef, PreparationKind, Maybe FingerprintComparison))
 prepare connection maintenance options identity spec@BaselineSpec {configuration, basePlan, migrationRevision, verificationRevision} = do
   server <- PQ.serverVersion connection
   let manifest = fingerprintManifest server spec
@@ -114,25 +148,73 @@ prepare connection maintenance options identity spec@BaselineSpec {configuration
       lockName = projectText <> ":" <> digest
       reusable = isJust migrationRevision && isJust verificationRevision
   deadline <- deadlineAfter (operationDeadlineMs options)
-  locked <- queryParamRows connection deadline Sql "SELECT pg_advisory_lock(1212761905, hashtext($1))" [Just (Encoding.encodeUtf8 lockName)] 1
-  case locked of
-    Left failure -> pure (Left (nativeFailure failure))
-    Right _ -> do
-      previous <- if reusable then lookupReady connection configuration basePlan deadline projectText digest else pure (Right Nothing)
-      case previous of
-        Left failure -> pure (Left failure)
-        Right (Just baseline) -> do
-          evidence <- verifyOwnedDatabase maintenance options identity (ownership baseline)
-          case evidence of
-            Right OwnershipMatches -> do
-              sealed <- queryParamRows connection deadline Sql "SELECT datallowconn::text FROM pg_database WHERE datname = $1" [Just (Encoding.encodeUtf8 (databaseNameText (baselineDatabase baseline)))] 1
-              pure $ case sealed of
-                Right [[Just "false"]] -> Right (baseline {clusterIdentity = identity}, Reused)
-                Right _ -> Left (BaselineError "ready generation is not sealed" Nothing)
-                Left failure -> Left (nativeFailure failure)
-            Right _ -> pure (Left (BaselineError "ready generation lost positive database ownership" Nothing))
-            Left CatalogError {cause, sqlState} -> pure (Left (BaselineError cause sqlState))
-        Right Nothing -> buildGeneration connection maintenance options identity configuration basePlan projectText digest manifest spec deadline
+  compared <- comparePrevious connection configuration identity (compareAgainst spec) manifest deadline
+  case compared of
+    Left failure -> pure (Left failure)
+    Right comparison -> do
+      locked <- queryParamRows connection deadline Sql "SELECT pg_advisory_lock(1212761905, hashtext($1))" [Just (Encoding.encodeUtf8 lockName)] 1
+      case locked of
+        Left failure -> pure (Left (nativeFailure failure))
+        Right _ -> prepareLocked comparison connection maintenance options identity configuration basePlan projectText digest manifest spec reusable deadline
+
+prepareLocked :: Maybe FingerprintComparison -> PQ.Connection -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> HinagataConfig -> FixturePlan -> Text -> Text -> Text -> BaselineSpec -> Bool -> Deadline -> IO (Either BaselineError (BaselineRef, PreparationKind, Maybe FingerprintComparison))
+prepareLocked comparison connection maintenance options identity configuration basePlan projectText digest manifest spec reusable deadline = do
+  previous <- if reusable then lookupReady connection configuration basePlan deadline projectText digest else pure (Right Nothing)
+  case previous of
+    Left failure -> pure (Left failure)
+    Right (Just baseline) -> do
+      evidence <- verifyOwnedDatabase maintenance options identity (ownership baseline)
+      case evidence of
+        Right OwnershipMatches -> do
+          sealed <- queryParamRows connection deadline Sql "SELECT datallowconn::text FROM pg_database WHERE datname = $1" [Just (Encoding.encodeUtf8 (databaseNameText (baselineDatabase baseline)))] 1
+          pure $ case sealed of
+            Right [[Just "false"]] -> Right (baseline {clusterIdentity = identity}, Reused, comparison)
+            Right _ -> Left (BaselineError "ready generation is not sealed" Nothing)
+            Left failure -> Left (nativeFailure failure)
+        Right _ -> pure (Left (BaselineError "ready generation lost positive database ownership" Nothing))
+        Left CatalogError {cause, sqlState} -> pure (Left (BaselineError cause sqlState))
+    Right Nothing -> fmap (fmap (\(baseline, kind) -> (baseline, kind, comparison))) (buildGeneration connection maintenance options identity configuration basePlan projectText digest manifest spec deadline)
+
+comparePrevious :: PQ.Connection -> HinagataConfig -> CatalogIdentity -> Maybe BaselineRef -> Text -> Deadline -> IO (Either BaselineError (Maybe FingerprintComparison))
+comparePrevious _ _ _ Nothing _ _ = pure (Right Nothing)
+comparePrevious connection configuration identity (Just previous) manifest deadline
+  | clusterIdentity previous /= identity = pure (Left (BaselineError "comparison generation belongs to a different catalog or cluster" Nothing))
+  | otherwise = do
+      let table = quoteSqlIdentifier (maintenanceSchema configuration) <> ".\"generations\""
+          statement = Encoding.encodeUtf8 ("SELECT fingerprint::text, fingerprint_manifest->>'manifest' FROM " <> table <> " WHERE id = $1 AND project_id = $2")
+          args = map (Just . Encoding.encodeUtf8) [generationId previous, projectIdText (project configuration)]
+      rows <- queryParamRows connection deadline Sql statement args 1
+      pure $ case rows of
+        Left failure -> Left (nativeFailure failure)
+        Right [[Just recordedFingerprint, Just recordedManifest]]
+          | recordedFingerprint == Encoding.encodeUtf8 (baselineFingerprint previous) ->
+              let before = Text.lines (Encoding.decodeUtf8 recordedManifest)
+                  after = Text.lines manifest
+               in if length before /= length fingerprintComponents || length after /= length fingerprintComponents || listToMaybe before /= Just "hinagata-fingerprint-v1"
+                    then Left (BaselineError "comparison generation has an unsupported fingerprint manifest" Nothing)
+                    else Right (Just (FingerprintComparison (baselineFingerprint previous) [component | (component, old, new) <- zip3 fingerprintComponents before after, old /= new]))
+        Right _ -> Left (BaselineError "comparison generation is missing or has changed fingerprint identity" Nothing)
+
+fingerprintComponents :: [FingerprintComponent]
+fingerprintComponents =
+  [ FingerprintVersion,
+    ServerMajor,
+    ProjectIdentity,
+    BaseFixtures,
+    MigrationRevision,
+    VerificationRevision,
+    ExtensionRequirements,
+    LocaleRequirement,
+    AdministrationRole,
+    SetupRole,
+    ApplicationRole,
+    SetupPrivileges,
+    ApplicationPrivileges,
+    SetupSchemaPrivileges,
+    ApplicationSchemaPrivileges,
+    SetupRoleSettings,
+    ApplicationRoleSettings
+  ]
 
 lookupReady :: PQ.Connection -> HinagataConfig -> FixturePlan -> Deadline -> Text -> Text -> IO (Either BaselineError (Maybe BaselineRef))
 lookupReady connection configuration plan deadline project digest = do

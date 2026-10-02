@@ -73,6 +73,8 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 2026-10-02 cancellation progress: Asynchronous callback cancellation now attempts clone release even under `PreserveFailures`, then rethrows the original asynchronous exception. The disposable-cluster test kills a callback after handoff and verifies both its Released catalog state and absent database. Cancellation during pre-handoff allocation may still leave a catalog-recorded orphan for explicit recovery; cross-phase acquisition deadlines remain open.
 
+2026-10-02 fingerprint progress: `BaselineSpec.compareAgainst` accepts an explicitly selected prior `BaselineRef`. The preparation report then reads that generation's versioned non-secret manifest and returns changed component categories; without a selected prior generation it reports no comparison. The socket integration test checks separate migration, base-fixture, verification-hook, and application-setting changes, plus credential rotation yielding an empty change list. Builder-death and waiter deadline proof are still open, so the first milestone remains incomplete.
+
 
 ## Surprises & Discoveries
 
@@ -84,6 +86,8 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 2026-09-30: Architecture review refinements. Clone allocation takes a generation's advisory lock in shared mode so concurrent clones of one template overlap, as PostgreSQL itself permits; build, retirement, and cleanup take it exclusively. The administration role owns every Hinagata-created database and prepares its declared access before the migration hook, because PostgreSQL 15 and later give non-owners no CREATE privilege on `public`. A lease record whose session lock can be acquired is classified orphaned rather than skipped, so crashed leases are recoverable without a time threshold. The clone strategy is a setting with `WAL_LOG` default, not a fingerprint input.
 
 2026-10-02: Apply database/schema grants as the administration database owner, then have setup and application roles apply their own database-specific settings over short-lived connections. PostgreSQL permits ordinary roles to set their own defaults; altering another role would require `CREATEROLE`/admin-option authority unrelated to database ownership. Include role names and setting-value digests in the fingerprint manifest, omitting raw setting values and access passwords.
+
+2026-10-02: Compare fingerprints only against a caller-selected prior generation. A new baseline has no meaningful implicit predecessor when projects can have several baseline variants; an absent selection is reported as no comparison, not as an inferred change.
 
 
 ## Outcomes & Retrospective
