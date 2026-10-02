@@ -21,6 +21,7 @@ if [[ -n "${HINAGATA_TEST_PGHOST:-}" ]]; then
   export HINAGATA_TEST_PGPORT="${HINAGATA_TEST_PGPORT:-5432}"
   export HINAGATA_TEST_PGUSER="${HINAGATA_TEST_PGUSER:-$(id -un)}"
   export HINAGATA_TEST_PGDATABASE="${HINAGATA_TEST_PGDATABASE:-hinagata_test}"
+  unset HINAGATA_TEST_OWNED_CLUSTER
   run_case
   exit
 fi
@@ -49,4 +50,5 @@ export HINAGATA_TEST_PGHOST="$socket"
 export HINAGATA_TEST_PGPORT="$port"
 export HINAGATA_TEST_PGUSER="$(id -un)"
 export HINAGATA_TEST_PGDATABASE=hinagata_test
+export HINAGATA_TEST_OWNED_CLUSTER=1
 run_case

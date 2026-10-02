@@ -4,12 +4,15 @@ import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, try)
 import Data.ByteString.Char8 qualified as ByteString
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Encoding
 import Database.PostgreSQL.LibPQ qualified as PQ
+import Hinagata.Config
 import Hinagata.Connection
 import Hinagata.Fixture.Bundle
 import Hinagata.Fixture.Types
+import Hinagata.Postgres.Baseline hiding (elapsedMs)
 import Hinagata.Postgres.Error (LoadError (..), LoadPhase (..))
 import Hinagata.Postgres.Load
 import Hinagata.Postgres.Ownership
@@ -35,6 +38,7 @@ integrationTests socket = withSystemTempDirectory "hinagata-postgres-test-" $ \w
   portText <- requiredEnv "HINAGATA_TEST_PGPORT"
   user <- requiredEnv "HINAGATA_TEST_PGUSER"
   databaseText <- requiredEnv "HINAGATA_TEST_PGDATABASE"
+  ownedCluster <- (== Just "1") <$> lookupEnv "HINAGATA_TEST_OWNED_CLUSTER"
   host <- orFail (socketDirectory (Text.pack socket))
   port <- orFail (mkPort (read portText))
   database <- orFail (mkDatabaseName (Text.pack databaseText))
@@ -87,29 +91,6 @@ integrationTests socket = withSystemTempDirectory "hinagata-postgres-test-" $ \w
   ByteString.writeFile (finalCopyDirectory </> "fixture.yaml") "name: final-copy-error\nsteps:\n  - copy:\n      table: {schema: public, name: final_copy_items}\n      columns: [id]\n      file: rows.csv\n      format: csv\n      header: false\n"
   ByteString.writeFile (finalCopyDirectory </> "rows.csv") "1\n2\n"
   setupConnection <- PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString target)))
-  catalogSchema <- orFail (mkSqlIdentifier "hinagata_test")
-  firstCatalog <- ensureCatalog target catalogSchema defaultSessionOptions
-  secondCatalog <- ensureCatalog target catalogSchema defaultSessionOptions
-  assert "catalog initializes and reuses one cluster identity" (case (firstCatalog, secondCatalog) of (Right first, Right second) -> first == second && formatVersion first == 1; _ -> False)
-  catalog <- orFail firstCatalog
-  execCheck setupConnection "CREATE DATABASE hinagata_owned_test"
-  let marker = "hinagata:v1:" <> clusterUuid catalog <> ":test-token"
-  execCheck setupConnection (Encoding.encodeUtf8 ("COMMENT ON DATABASE hinagata_owned_test IS '" <> marker <> "'"))
-  ownedName <- orFail (mkDatabaseName "hinagata_owned_test")
-  ownedOid <- queryInt setupConnection "SELECT oid FROM pg_database WHERE datname = 'hinagata_owned_test'"
-  let owned = OwnedDatabase {name = ownedName, oid = ownedOid, token = "test-token"}
-  matched <- verifyOwnedDatabase target defaultSessionOptions catalog owned
-  assert "name, OID, and marker prove ownership" (matched == Right OwnershipMatches)
-  execCheck setupConnection "COMMENT ON DATABASE hinagata_owned_test IS 'foreign'"
-  replaced <- verifyOwnedDatabase target defaultSessionOptions catalog owned
-  assert "changed ownership marker is refused" (replaced == Right OwnershipMismatch)
-  execCheck setupConnection "DROP DATABASE hinagata_owned_test"
-  missing <- verifyOwnedDatabase target defaultSessionOptions catalog owned
-  assert "missing owned database is distinct from a mismatch" (missing == Right OwnershipMissing)
-  execCheck setupConnection "CREATE SCHEMA foreign_catalog"
-  foreignSchema <- orFail (mkSqlIdentifier "foreign_catalog")
-  foreignCatalog <- ensureCatalog target foreignSchema defaultSessionOptions
-  assert "existing foreign schema without format marker is refused" (case foreignCatalog of Left _ -> True; _ -> False)
   execCheck setupConnection "CREATE TABLE items (id integer PRIMARY KEY, note text NOT NULL)"
   execCheck setupConnection "INSERT INTO items (id, note) VALUES (99, 'sentinel')"
   execCheck setupConnection "CREATE TABLE parent_items (id integer PRIMARY KEY)"
@@ -122,6 +103,7 @@ integrationTests socket = withSystemTempDirectory "hinagata-postgres-test-" $ \w
   execCheck setupConnection "CREATE FUNCTION fail_final_copy() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'final COPY failure'; END $$"
   execCheck setupConnection "CREATE TRIGGER fail_final_copy AFTER INSERT ON final_copy_items FOR EACH STATEMENT EXECUTE FUNCTION fail_final_copy()"
   goodPlan <- bundleOrFail =<< compileFixtures config [fixtureName "good"]
+  when ownedCluster (lifecycleTests target setupConnection host port (Text.pack user) database fixtureRoot bundleRoot goodPlan)
   loaded <- loadInto target defaultSessionOptions goodPlan
   assert "SQL closure loads" (case loaded of Right report -> fixtureCount report == 1 && stepCount report == 1; Left _ -> False)
   assert "SQL rows committed" =<< ((== 3) <$> queryInt setupConnection "SELECT count(*) FROM items")
@@ -218,10 +200,131 @@ integrationTests socket = withSystemTempDirectory "hinagata-postgres-test-" $ \w
   finalCopy <- loadInto target defaultSessionOptions finalCopyPlan
   assert "final COPY result error is reported" (case finalCopy of Left LoadError {phase = ExecuteCopy, sqlState = Just "P0001"} -> True; _ -> False)
   assert "final COPY result error rolls back" =<< ((== 0) <$> queryInt setupConnection "SELECT count(*) FROM final_copy_items")
-  execCheck setupConnection "DROP TABLE hinagata_test.leases"
+  PQ.finish setupConnection
+
+lifecycleTests :: ConnectionTarget -> PQ.Connection -> Host -> Port -> Text -> DatabaseName -> FilePath -> FilePath -> FixturePlan -> IO ()
+lifecycleTests target connection host port adminUser database fixtureRoot bundleRoot goodPlan = do
+  catalogSchema <- orFail (mkSqlIdentifier "hinagata_test")
+  firstCatalog <- ensureCatalog target catalogSchema defaultSessionOptions
+  secondCatalog <- ensureCatalog target catalogSchema defaultSessionOptions
+  assert "catalog initializes and reuses one cluster identity" (case (firstCatalog, secondCatalog) of (Right first, Right second) -> first == second && formatVersion first == 1; _ -> False)
+  catalog <- orFail firstCatalog
+  execCheck connection "CREATE DATABASE hinagata_owned_test"
+  let marker = "hinagata:v1:" <> clusterUuid catalog <> ":test-token"
+  execCheck connection (Encoding.encodeUtf8 ("COMMENT ON DATABASE hinagata_owned_test IS '" <> marker <> "'"))
+  ownedName <- orFail (mkDatabaseName "hinagata_owned_test")
+  ownedOid <- queryInt connection "SELECT oid FROM pg_database WHERE datname = 'hinagata_owned_test'"
+  let owned = OwnedDatabase {name = ownedName, oid = ownedOid, token = "test-token"}
+  matched <- verifyOwnedDatabase target defaultSessionOptions catalog owned
+  assert "name, OID, and marker prove ownership" (matched == Right OwnershipMatches)
+  execCheck connection "COMMENT ON DATABASE hinagata_owned_test IS 'foreign'"
+  replaced <- verifyOwnedDatabase target defaultSessionOptions catalog owned
+  assert "changed ownership marker is refused" (replaced == Right OwnershipMismatch)
+  execCheck connection "DROP DATABASE hinagata_owned_test"
+  missing <- verifyOwnedDatabase target defaultSessionOptions catalog owned
+  assert "missing owned database is distinct from a mismatch" (missing == Right OwnershipMissing)
+  execCheck connection "CREATE SCHEMA foreign_catalog"
+  foreignSchema <- orFail (mkSqlIdentifier "foreign_catalog")
+  foreignCatalog <- ensureCatalog target foreignSchema defaultSessionOptions
+  assert "existing foreign schema without format marker is refused" (case foreignCatalog of Left _ -> True; _ -> False)
+
+  execCheck connection "CREATE ROLE hinagata_setup LOGIN"
+  execCheck connection "CREATE ROLE hinagata_app LOGIN"
+  projectId <- orFail (mkProjectId "baseline-test")
+  publicSchema <- orFail (mkSqlIdentifier "public")
+  messageSetting <- orFail (mkSqlIdentifier "client_min_messages")
+  migrationCalls <- newIORef (0 :: Int)
+  let adminRole = AccessConfig adminUser database Nothing
+      setupRole = AccessConfig "hinagata_setup" database Nothing
+      appRole = AccessConfig "hinagata_app" database Nothing
+      lifecycleConfig =
+        HinagataConfig
+          { endpoint = EndpointConfig host port,
+            project = projectId,
+            fixtureRoot,
+            bundleRoot,
+            maintenanceDatabase = database,
+            maintenanceSchema = catalogSchema,
+            administration = adminRole,
+            setup = setupRole,
+            application = appRole,
+            setupGrants = [GrantConnect, GrantCreate, GrantTemporary],
+            applicationGrants = [GrantConnect],
+            setupSchemaGrants = [SchemaGrant publicSchema SchemaUsage, SchemaGrant publicSchema SchemaCreate],
+            applicationSchemaGrants = [SchemaGrant publicSchema SchemaUsage],
+            setupSettings = [RoleSetting messageSetting "warning"],
+            applicationSettings = [RoleSetting messageSetting "warning"],
+            cloneStrategy = WalLog,
+            acquisitionDeadlineMs = positive 300000,
+            setupDeadlineMs = positive 300000,
+            setupWorkers = positive 2,
+            activeLeases = positive 4,
+            pendingRequests = positive 8,
+            chunkSize = positive 65536,
+            sqlSizeLimit = positive 1048576
+          }
+      migrate setupTarget = do
+        modifyIORef' migrationCalls (+ 1)
+        migrated <- PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString setupTarget)))
+        level <- queryText migrated "SHOW client_min_messages"
+        assert "setup role settings apply before migration" (level == "warning")
+        execCheck migrated "CREATE TABLE items (id integer PRIMARY KEY, note text NOT NULL)"
+        execCheck migrated "CREATE INDEX CONCURRENTLY items_note_idx ON items (note)"
+        PQ.finish migrated
+        pure (Right ())
+      verify setupTarget = do
+        verified <- PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString setupTarget)))
+        count <- queryInt verified "SELECT count(*) FROM items"
+        PQ.finish verified
+        pure (if count == 2 then Right () else Left "unexpected baseline rows")
+      baselineSpec = BaselineSpec lifecycleConfig goodPlan (Just "migration-v1") (Just "verify-v1") ["plpgsql"] (Just "C") migrate verify
+  firstBaseline <- ensureBaseline baselineSpec
+  secondBaseline <- ensureBaseline baselineSpec
+  (firstRef, firstReport) <- orFail firstBaseline
+  (secondRef, secondReport) <- orFail secondBaseline
+  calls <- readIORef migrationCalls
+  assert "baseline builds once and reuses a sealed generation" (baselineDatabase firstRef == baselineDatabase secondRef && kind firstReport == Built && kind secondReport == Reused && calls == 1)
+  recordedManifest <- queryText connection "SELECT fingerprint_manifest::text FROM hinagata_test.generations WHERE state = 'Ready' LIMIT 1"
+  assert "fingerprint manifest omits raw role-setting values" (not ("warning" `ByteString.isInfixOf` recordedManifest))
+  rotatedPassword <- orFail (mkSecret "rotated-passphrase")
+  let rotatedConfig = lifecycleConfig {administration = adminRole {password = Just rotatedPassword}, setup = setupRole {password = Just rotatedPassword}, application = appRole {password = Just rotatedPassword}}
+  rotated <- ensureBaseline baselineSpec {configuration = rotatedConfig}
+  assert "credential rotation does not invalidate a baseline" (case rotated of Right (ref, report) -> baselineDatabase ref == baselineDatabase firstRef && kind report == Reused; _ -> False)
+  let sealedSql = Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> databaseNameText (baselineDatabase firstRef) <> "' AND datallowconn = false")
+  assert "ready baseline rejects connections" =<< ((== 1) <$> queryInt connection sealedSql)
+  changed <- ensureBaseline baselineSpec {migrationRevision = Just "migration-v2"}
+  (changedRef, changedReport) <- orFail changed
+  changedCalls <- readIORef migrationCalls
+  assert "migration revision creates a distinct baseline" (baselineDatabase changedRef /= baselineDatabase firstRef && kind changedReport == Built && changedCalls == 2)
+  ByteString.writeFile (fixtureRoot </> "good" </> "fixture.sql") "INSERT INTO items (id, note) VALUES (1, 'changed first'); INSERT INTO items (id, note) VALUES (2, 'second');"
+  changedPlan <- bundleOrFail =<< compileFixtures (BundleConfig fixtureRoot bundleRoot (positive 1048576) (positive 65536)) [fixtureName "good"]
+  ByteString.writeFile (fixtureRoot </> "good" </> "fixture.sql") "INSERT INTO items (id, note) VALUES (1, 'first'); INSERT INTO items (id, note) VALUES (2, 'second');"
+  changedFixture <- ensureBaseline baselineSpec {basePlan = changedPlan}
+  assert "base fixture bytes select a new generation" (case changedFixture of Right (ref, report) -> baselineDatabase ref /= baselineDatabase firstRef && kind report == Built; _ -> False)
+  failed <- ensureBaseline baselineSpec {migrationRevision = Just "migration-v3", verificationHook = \_ -> pure (Left "verification failed")}
+  assert "failed rebuild remains unpublished" (case failed of Left _ -> True; Right _ -> False)
+  missingExtension <- ensureBaseline baselineSpec {migrationRevision = Just "migration-v4", requiredExtensions = ["not_installed"]}
+  assert "missing declared extension prevents publication" (case missingExtension of Left _ -> True; Right _ -> False)
+  unknownFirst <- ensureBaseline baselineSpec {migrationRevision = Nothing}
+  unknownSecond <- ensureBaseline baselineSpec {migrationRevision = Nothing}
+  assert "unknown migration revision disables persistent reuse" (case (unknownFirst, unknownSecond) of (Right (left, leftReport), Right (right, rightReport)) -> baselineDatabase left /= baselineDatabase right && kind leftReport == Built && kind rightReport == Built; _ -> False)
+  oldReady <- ensureBaseline baselineSpec
+  assert "failed rebuild preserves earlier ready baseline" (case oldReady of Right (ref, report) -> baselineDatabase ref == baselineDatabase firstRef && kind report == Reused; _ -> False)
+  firstCold <- newEmptyMVar
+  secondCold <- newEmptyMVar
+  let concurrentSpec = baselineSpec {migrationRevision = Just "migration-concurrent"}
+  _ <- forkIO (ensureBaseline concurrentSpec >>= putMVar firstCold)
+  _ <- forkIO (ensureBaseline concurrentSpec >>= putMVar secondCold)
+  concurrentFirst <- timeout 10000000 (takeMVar firstCold)
+  concurrentSecond <- timeout 10000000 (takeMVar secondCold)
+  assert "concurrent cold callers publish one generation" (case (concurrentFirst, concurrentSecond) of (Just (Right (left, leftReport)), Just (Right (right, rightReport))) -> baselineDatabase left == baselineDatabase right && [kind leftReport, kind rightReport] `elem` [[Built, Reused], [Reused, Built]]; _ -> False)
+  let tamperedName = databaseNameText (baselineDatabase firstRef)
+  execCheck connection (Encoding.encodeUtf8 ("COMMENT ON DATABASE \"" <> tamperedName <> "\" IS 'foreign'"))
+  tampered <- ensureBaseline baselineSpec
+  assert "ready generation with altered marker is refused" (case tampered of Left _ -> True; Right _ -> False)
+  execCheck connection "DROP TABLE hinagata_test.leases"
   incompleteCatalog <- ensureCatalog target catalogSchema defaultSessionOptions
   assert "incomplete version-1 catalog is refused" (case incompleteCatalog of Left _ -> True; _ -> False)
-  PQ.finish setupConnection
 
 requiredEnv :: String -> IO String
 requiredEnv name = maybe (fail (name ++ " is missing")) pure =<< lookupEnv name
@@ -237,12 +340,16 @@ execCheck connection statement = do
 
 queryInt :: PQ.Connection -> ByteString.ByteString -> IO Int
 queryInt connection statement = do
+  read . ByteString.unpack <$> queryText connection statement
+
+queryText :: PQ.Connection -> ByteString.ByteString -> IO ByteString.ByteString
+queryText connection statement = do
   result <- PQ.exec connection statement
   case result of
     Nothing -> fail "PostgreSQL returned no result"
     Just value -> do
       cell <- PQ.getvalue value (PQ.toRow (0 :: Int)) (PQ.toColumn (0 :: Int))
-      maybe (fail "PostgreSQL returned null") (pure . read . ByteString.unpack) cell
+      maybe (fail "PostgreSQL returned null") pure cell
 
 fixtureName :: Text -> FixtureName
 fixtureName = either (error . Text.unpack) id . mkFixtureName

@@ -78,14 +78,14 @@ verifyOwnedDatabase target options identity expected = do
 
 checkOwnership :: PQ.Connection -> Deadline -> CatalogIdentity -> OwnedDatabase -> IO (Either CatalogError OwnershipEvidence)
 checkOwnership connection deadline identity expected = do
-  let statement = "SELECT d.oid::text, s.description FROM pg_database d LEFT JOIN pg_shdescription s ON s.objoid = d.oid AND s.classoid = 'pg_database'::regclass WHERE d.datname = $1"
+  let statement = "SELECT d.oid::text, s.description, pg_get_userbyid(d.datdba), current_user FROM pg_database d LEFT JOIN pg_shdescription s ON s.objoid = d.oid AND s.classoid = 'pg_database'::regclass WHERE d.datname = $1"
       expectedMarker = "hinagata:v1:" <> clusterUuid identity <> ":" <> token expected
   rows <- queryParamRows connection deadline Sql statement [Just (Encoding.encodeUtf8 (databaseNameText (name expected)))] 1
   pure $ case rows of
     Left failure -> Left (nativeFailure failure)
     Right [] -> Right OwnershipMissing
-    Right [[Just actualOid, Just marker]]
-      | actualOid == Encoding.encodeUtf8 (Text.pack (show (oid expected))) && marker == Encoding.encodeUtf8 expectedMarker -> Right OwnershipMatches
+    Right [[Just actualOid, Just marker, Just owner, Just current]]
+      | actualOid == Encoding.encodeUtf8 (Text.pack (show (oid expected))) && marker == Encoding.encodeUtf8 expectedMarker && owner == current -> Right OwnershipMatches
     Right _ -> Right OwnershipMismatch
 
 bootstrap :: PQ.Connection -> SqlIdentifier -> SessionOptions -> IO (SessionDisposition (Either CatalogError CatalogIdentity))

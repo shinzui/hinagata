@@ -23,12 +23,14 @@ library
   import: common
   hs-source-dirs: src
   exposed-modules:
+    Hinagata.Postgres.Baseline
     Hinagata.Postgres.Error
     Hinagata.Postgres.Load
     Hinagata.Postgres.Ownership
     Hinagata.Postgres.Session
 
   other-modules:
+    Hinagata.Postgres.Internal.BaselineRef
     Hinagata.Postgres.Internal.Copy
     Hinagata.Postgres.Internal.Libpq
     Hinagata.Postgres.Internal.Sql

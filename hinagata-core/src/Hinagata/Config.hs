@@ -55,7 +55,8 @@ data SchemaGrant = SchemaGrant
   }
   deriving stock (Eq, Show)
 
--- | A declared database-level role setting. Its value is configuration, never SQL text.
+-- | A declared, non-secret database-level role setting. Its value is
+-- configuration, never SQL text. Credential values belong in access targets.
 data RoleSetting = RoleSetting
   { name :: !SqlIdentifier,
     value :: !Text

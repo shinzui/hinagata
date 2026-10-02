@@ -1,0 +1,418 @@
+-- | Build and reuse immutable PostgreSQL template generations.
+module Hinagata.Postgres.Baseline
+  ( BaselineSpec (..),
+    BaselineRef,
+    baselineDatabase,
+    PreparationKind (..),
+    PreparationReport (..),
+    BaselineError (..),
+    ensureBaseline,
+  )
+where
+
+import Control.Exception (IOException, try)
+import Crypto.Hash.SHA256 qualified as SHA256
+import Data.ByteString qualified as ByteString
+import Data.Text qualified as Text
+import Data.Text.Encoding qualified as Encoding
+import Database.PostgreSQL.LibPQ qualified as PQ
+import GHC.Clock (getMonotonicTimeNSec)
+import Hinagata.Config
+import Hinagata.Connection
+import Hinagata.Fixture.Bundle
+import Hinagata.Postgres.Error (NativeError (..), NativePhase (..), SessionError (..))
+import Hinagata.Postgres.Internal.BaselineRef
+import Hinagata.Postgres.Internal.Libpq
+import Hinagata.Postgres.Load (loadInto)
+import Hinagata.Postgres.Ownership
+import Hinagata.Prelude
+import Hinagata.Types
+import Numeric (showHex)
+import System.Timeout (timeout)
+import Text.Read (readMaybe)
+
+-- | Hooks must close their own database connections before returning.
+-- Missing revisions force a new generation on every call.
+data BaselineSpec = BaselineSpec
+  { configuration :: !HinagataConfig,
+    basePlan :: !FixturePlan,
+    migrationRevision :: !(Maybe Text),
+    verificationRevision :: !(Maybe Text),
+    requiredExtensions :: ![Text],
+    requiredLocale :: !(Maybe Text),
+    migrationHook :: !(ConnectionTarget -> IO (Either Text ())),
+    verificationHook :: !(ConnectionTarget -> IO (Either Text ()))
+  }
+
+-- | Name of the sealed template database. Consumers should acquire a clone
+-- through the lease API instead of connecting to this database.
+baselineDatabase :: BaselineRef -> DatabaseName
+baselineDatabase BaselineRef {baselineName} = baselineName
+
+-- | Whether this call published a new generation or reused a ready one.
+data PreparationKind = Built | Reused
+  deriving stock (Eq, Show)
+
+-- | Initial build/reuse report. The duration includes hook and fixture work.
+data PreparationReport = PreparationReport
+  { kind :: !PreparationKind,
+    fingerprint :: !Text,
+    elapsedMs :: !Int
+  }
+  deriving stock (Eq, Show)
+
+-- | Non-secret operational failure. An incomplete generation remains recorded
+-- for explicit inspection instead of being guessed safe to delete.
+data BaselineError = BaselineError
+  { cause :: !Text,
+    sqlState :: !(Maybe Text)
+  }
+  deriving stock (Eq, Show)
+
+-- | Verify a frozen base plan, then reuse a positively identified sealed
+-- generation or build one from @template0@. A failed build leaves its record
+-- inspectable and never replaces an earlier ready generation. The caller owns
+-- migration and verification hooks and must close their connections before
+-- returning; unexpected hook exceptions propagate after the admin session
+-- closes.
+ensureBaseline :: BaselineSpec -> IO (Either BaselineError (BaselineRef, PreparationReport))
+ensureBaseline spec@BaselineSpec {configuration} = do
+  start <- getMonotonicTimeNSec
+  verified <- try @IOException (verifyPlan (basePlan spec))
+  case verified of
+    Left _ -> pure (Left (BaselineError "base fixture bundle could not be verified" Nothing))
+    Right False -> pure (Left (BaselineError "base fixture bundle changed" Nothing))
+    Right True -> startCatalog start
+  where
+    startCatalog start = case adminTarget configuration (maintenanceDatabase configuration) of
+      Left failure -> pure (Left failure)
+      Right maintenance -> do
+        let options = defaultSessionOptions {operationDeadlineMs = positiveValue (setupDeadlineMs configuration)}
+        catalog <- ensureCatalog maintenance (maintenanceSchema configuration) options
+        case catalog of
+          Left CatalogError {cause, sqlState} -> pure (Left (BaselineError cause sqlState))
+          Right identity -> do
+            opened <- withSession maintenance options $ \session ->
+              runExclusive session $ \connection sessionOptions -> do
+                outcome <- prepare connection maintenance sessionOptions identity spec
+                pure (Keep outcome)
+            end <- getMonotonicTimeNSec
+            pure $ case opened of
+              Left failure -> Left (sessionFailure failure)
+              Right (Left failure) -> Left (sessionFailure failure)
+              Right (Right (Right (baseline, kind))) -> Right (baseline, PreparationReport kind (baselineFingerprint baseline) (fromIntegral ((end - start) `div` 1000000)))
+              Right (Right (Left failure)) -> Left failure
+
+prepare :: PQ.Connection -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> BaselineSpec -> IO (Either BaselineError (BaselineRef, PreparationKind))
+prepare connection maintenance options identity spec@BaselineSpec {configuration, basePlan, migrationRevision, verificationRevision} = do
+  server <- PQ.serverVersion connection
+  let manifest = fingerprintManifest server spec
+      digest = hex (SHA256.hash (Encoding.encodeUtf8 manifest))
+      projectText = projectIdText (project configuration)
+      lockName = projectText <> ":" <> digest
+      reusable = isJust migrationRevision && isJust verificationRevision
+  deadline <- deadlineAfter (operationDeadlineMs options)
+  locked <- queryParamRows connection deadline Sql "SELECT pg_advisory_lock(1212761905, hashtext($1))" [Just (Encoding.encodeUtf8 lockName)] 1
+  case locked of
+    Left failure -> pure (Left (nativeFailure failure))
+    Right _ -> do
+      previous <- if reusable then lookupReady connection configuration deadline projectText digest else pure (Right Nothing)
+      case previous of
+        Left failure -> pure (Left failure)
+        Right (Just baseline) -> do
+          evidence <- verifyOwnedDatabase maintenance options identity (ownership baseline)
+          case evidence of
+            Right OwnershipMatches -> do
+              sealed <- queryParamRows connection deadline Sql "SELECT datallowconn::text FROM pg_database WHERE datname = $1" [Just (Encoding.encodeUtf8 (databaseNameText (baselineDatabase baseline)))] 1
+              pure $ case sealed of
+                Right [[Just "false"]] -> Right (baseline {clusterIdentity = identity}, Reused)
+                Right _ -> Left (BaselineError "ready generation is not sealed" Nothing)
+                Left failure -> Left (nativeFailure failure)
+            Right _ -> pure (Left (BaselineError "ready generation lost positive database ownership" Nothing))
+            Left CatalogError {cause, sqlState} -> pure (Left (BaselineError cause sqlState))
+        Right Nothing -> buildGeneration connection maintenance options identity configuration basePlan projectText digest manifest spec deadline
+
+lookupReady :: PQ.Connection -> HinagataConfig -> Deadline -> Text -> Text -> IO (Either BaselineError (Maybe BaselineRef))
+lookupReady connection configuration deadline project digest = do
+  let table = quoteSqlIdentifier (maintenanceSchema configuration) <> ".\"generations\""
+      statement = Encoding.encodeUtf8 ("SELECT id, database_name::text, database_oid::text, ownership_token::text FROM " <> table <> " WHERE project_id = $1 AND fingerprint = $2 AND state = 'Ready' ORDER BY created_at DESC LIMIT 1")
+  rows <- queryParamRows connection deadline Sql statement [Just (Encoding.encodeUtf8 project), Just (Encoding.encodeUtf8 digest)] 1
+  pure $ case rows of
+    Left failure -> Left (nativeFailure failure)
+    Right [] -> Right Nothing
+    Right [[Just generationId, Just name, Just oid, Just token]] -> do
+      database <- maybe (Left (BaselineError "ready generation has an invalid database name" Nothing)) Right (either (const Nothing) Just (mkDatabaseName (Encoding.decodeUtf8 name)))
+      number <- maybe (Left (BaselineError "ready generation has an invalid database OID" Nothing)) Right (readMaybe (Text.unpack (Encoding.decodeUtf8 oid)))
+      let owned = OwnedDatabase database number (Encoding.decodeUtf8 token)
+      Right (Just (BaselineRef database (Encoding.decodeUtf8 generationId) digest (CatalogIdentity 1 "") owned))
+    Right _ -> Left (BaselineError "ready generation has incomplete identity" Nothing)
+
+buildGeneration :: PQ.Connection -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> HinagataConfig -> FixturePlan -> Text -> Text -> Text -> BaselineSpec -> Deadline -> IO (Either BaselineError (BaselineRef, PreparationKind))
+buildGeneration connection maintenance options identity configuration plan project digest manifest spec deadline = do
+  generated <- queryParamRows connection deadline Sql "SELECT gen_random_uuid()::text, gen_random_uuid()::text" [] 1
+  case generated of
+    Right [[Just identifier, Just tokenBytes]] -> do
+      let generationId = Encoding.decodeUtf8 identifier
+          token = Encoding.decodeUtf8 tokenBytes
+          databaseText = "hg_" <> Text.take 8 digest <> "_" <> Text.take 20 (Text.filter (/= '-') token)
+      case mkDatabaseName databaseText of
+        Left _ -> pure (Left (BaselineError "generated database name is invalid" Nothing))
+        Right database -> do
+          let table = quoteSqlIdentifier (maintenanceSchema configuration) <> ".\"generations\""
+              insertSql = Encoding.encodeUtf8 ("INSERT INTO " <> table <> " (id, project_id, fingerprint, fingerprint_manifest, database_name, ownership_token, state) VALUES ($1, $2, $3, jsonb_build_object('version', 1, 'manifest', $4::text), $5, $6::uuid, 'Building')")
+              args = map (Just . Encoding.encodeUtf8) [generationId, project, digest, manifest, databaseText, token]
+          inserted <- queryParamRows connection deadline Sql insertSql args 0
+          case inserted of
+            Left failure -> pure (Left (nativeFailure failure))
+            Right _ -> do
+              built <- construct connection maintenance options identity configuration plan generationId database token spec deadline
+              case built of
+                Left failure -> do
+                  let failedSql = Encoding.encodeUtf8 ("UPDATE " <> table <> " SET state = 'Failed', updated_at = clock_timestamp() WHERE id = $1")
+                  _ <- queryParamRows connection deadline Sql failedSql [Just identifier] 0
+                  pure (Left failure)
+                Right owned -> do
+                  let readySql = Encoding.encodeUtf8 ("UPDATE " <> table <> " SET state = 'Ready', database_oid = $2::oid, updated_at = clock_timestamp() WHERE id = $1")
+                  published <- queryParamRows connection deadline Sql readySql [Just identifier, Just (Encoding.encodeUtf8 (Text.pack (show (oid owned))))] 0
+                  pure $ case published of
+                    Left failure -> Left (nativeFailure failure)
+                    Right _ -> Right (BaselineRef database generationId digest identity owned, Built)
+    Left failure -> pure (Left (nativeFailure failure))
+    Right _ -> pure (Left (BaselineError "UUID generation returned an invalid result" Nothing))
+
+construct :: PQ.Connection -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> HinagataConfig -> FixturePlan -> Text -> DatabaseName -> Text -> BaselineSpec -> Deadline -> IO (Either BaselineError OwnedDatabase)
+construct connection maintenance options identity configuration plan generationId database token BaselineSpec {migrationHook, verificationHook, requiredExtensions, requiredLocale} deadline = do
+  let quoted = quoteDatabase database
+  created <- query connection deadline Sql (Encoding.encodeUtf8 ("CREATE DATABASE " <> quoted <> " TEMPLATE template0"))
+  case created of
+    Left NativeError {sqlState = Just "42501"} -> pure (Left (BaselineError "administration role lacks CREATEDB or template access" (Just "42501")))
+    Left failure -> pure (Left (nativeFailure failure))
+    Right () -> do
+      let marker = "hinagata:v1:" <> clusterUuid identity <> ":" <> token
+      commented <- query connection deadline Sql (Encoding.encodeUtf8 ("COMMENT ON DATABASE " <> quoted <> " IS " <> quoteLiteral marker))
+      case commented of
+        Left failure -> pure (Left (nativeFailure failure))
+        Right () -> do
+          observed <- queryParamRows connection deadline Sql "SELECT oid::text FROM pg_database WHERE datname = $1" [Just (Encoding.encodeUtf8 (databaseNameText database))] 1
+          case observed of
+            Right [[Just oidBytes]] -> case readMaybe (Text.unpack (Encoding.decodeUtf8 oidBytes)) of
+              Nothing -> pure (Left (BaselineError "created database has an invalid OID" Nothing))
+              Just number -> do
+                let owned = OwnedDatabase database number token
+                    table = quoteSqlIdentifier (maintenanceSchema configuration) <> ".\"generations\""
+                    bindSql = Encoding.encodeUtf8 ("UPDATE " <> table <> " SET database_oid = $2::oid, updated_at = clock_timestamp() WHERE id = $1 AND state = 'Building' RETURNING id")
+                bound <- queryParamRows connection deadline Sql bindSql [Just (Encoding.encodeUtf8 generationId), Just oidBytes] 1
+                case bound of
+                  Left failure -> pure (Left (nativeFailure failure))
+                  Right [[Just _]] -> do
+                    prepared <- prepareAccess connection options configuration database deadline
+                    case prepared of
+                      Left failure -> pure (Left failure)
+                      Right () -> do
+                        case accessToTarget configuration (setup configuration) database of
+                          Left failure -> pure (Left failure)
+                          Right setupTarget -> do
+                            migrated <- timeout (positiveValue (setupDeadlineMs configuration) * 1000) (migrationHook setupTarget)
+                            case migrated of
+                              Nothing -> pure (Left (BaselineError "migration hook timed out" Nothing))
+                              Just (Left _) -> pure (Left (BaselineError "migration hook failed" Nothing))
+                              Just (Right ()) -> do
+                                loaded <- loadInto setupTarget options plan
+                                case loaded of
+                                  Left _ -> pure (Left (BaselineError "base fixture load failed" Nothing))
+                                  Right _ -> do
+                                    verified <- timeout (positiveValue (setupDeadlineMs configuration) * 1000) (verificationHook setupTarget)
+                                    case verified of
+                                      Nothing -> pure (Left (BaselineError "verification hook timed out" Nothing))
+                                      Just (Left _) -> pure (Left (BaselineError "verification hook failed" Nothing))
+                                      Just (Right ()) -> do
+                                        requirements <- checkRequirements connection options setupTarget database requiredExtensions requiredLocale deadline
+                                        case requirements of
+                                          Left failure -> pure (Left failure)
+                                          Right () -> do
+                                            sessions <- queryParamRows connection deadline Sql "SELECT count(*)::text FROM pg_stat_activity WHERE datname = $1" [Just (Encoding.encodeUtf8 (databaseNameText database))] 1
+                                            case sessions of
+                                              Right [[Just "0"]] -> do
+                                                sealed <- query connection deadline Sql (Encoding.encodeUtf8 ("ALTER DATABASE " <> quoted <> " WITH ALLOW_CONNECTIONS false"))
+                                                case sealed of
+                                                  Left failure -> pure (Left (nativeFailure failure))
+                                                  Right () -> do
+                                                    remaining <- queryParamRows connection deadline Sql "SELECT count(*)::text FROM pg_stat_activity WHERE datname = $1" [Just (Encoding.encodeUtf8 (databaseNameText database))] 1
+                                                    case remaining of
+                                                      Right [[Just "0"]] -> do
+                                                        evidence <- verifyOwnedDatabase maintenance options identity owned
+                                                        pure $ case evidence of
+                                                          Right OwnershipMatches -> Right owned
+                                                          Right _ -> Left (BaselineError "sealed generation lost positive ownership" Nothing)
+                                                          Left CatalogError {cause, sqlState} -> Left (BaselineError cause sqlState)
+                                                      Right _ -> pure (Left (BaselineError "sealed baseline gained an open session" Nothing))
+                                                      Left failure -> pure (Left (nativeFailure failure))
+                                              Right _ -> pure (Left (BaselineError "baseline still has open sessions" Nothing))
+                                              Left failure -> pure (Left (nativeFailure failure))
+                  Right _ -> pure (Left (BaselineError "generation identity could not be bound" Nothing))
+            Right _ -> pure (Left (BaselineError "created database is missing from the catalog" Nothing))
+            Left failure -> pure (Left (nativeFailure failure))
+
+checkRequirements :: PQ.Connection -> SessionOptions -> ConnectionTarget -> DatabaseName -> [Text] -> Maybe Text -> Deadline -> IO (Either BaselineError ())
+checkRequirements maintenance options setupTarget database extensions locale deadline = do
+  localeResult <- case locale of
+    Nothing -> pure (Right ())
+    Just expected -> do
+      observed <- queryParamRows maintenance deadline Sql "SELECT datcollate FROM pg_database WHERE datname = $1" [Just (Encoding.encodeUtf8 (databaseNameText database))] 1
+      pure $ case observed of
+        Right [[Just actual]] | actual == Encoding.encodeUtf8 expected -> Right ()
+        Right _ -> Left (BaselineError "baseline locale differs from the declared requirement" Nothing)
+        Left failure -> Left (nativeFailure failure)
+  case localeResult of
+    Left failure -> pure (Left failure)
+    Right () ->
+      if null extensions
+        then pure (Right ())
+        else do
+          opened <- withSession setupTarget options $ \session ->
+            runExclusive session $ \connection sessionOptions -> do
+              innerDeadline <- deadlineAfter (operationDeadlineMs sessionOptions)
+              results <- traverse (checkExtension connection innerDeadline) extensions
+              pure (Keep (() <$ sequence results))
+          pure $ case opened of
+            Left failure -> Left (sessionFailure failure)
+            Right (Left failure) -> Left (sessionFailure failure)
+            Right (Right result) -> result
+
+checkExtension :: PQ.Connection -> Deadline -> Text -> IO (Either BaselineError ())
+checkExtension connection deadline extension = do
+  observed <- queryParamRows connection deadline Sql "SELECT extname::text FROM pg_extension WHERE extname = $1" [Just (Encoding.encodeUtf8 extension)] 1
+  pure $ case observed of
+    Right [[Just _]] -> Right ()
+    Right _ -> Left (BaselineError "baseline lacks a declared extension" Nothing)
+    Left failure -> Left (nativeFailure failure)
+
+prepareAccess :: PQ.Connection -> SessionOptions -> HinagataConfig -> DatabaseName -> Deadline -> IO (Either BaselineError ())
+prepareAccess connection options configuration database deadline = do
+  let grants = [(setup configuration, setupGrants configuration), (application configuration, applicationGrants configuration)]
+  databaseGrants <- traverse (uncurry (grantDatabase connection deadline database)) grants
+  case sequence databaseGrants of
+    Left failure -> pure (Left failure)
+    Right _ -> do
+      admin <- pure (adminTarget configuration database)
+      case admin of
+        Left failure -> pure (Left failure)
+        Right target -> do
+          opened <- withSession target options $ \session ->
+            runExclusive session $ \inner innerOptions -> do
+              innerDeadline <- deadlineAfter (operationDeadlineMs innerOptions)
+              outcomes <- traverse (grantSchema inner innerDeadline) ([(setup configuration, item) | item <- setupSchemaGrants configuration] ++ [(application configuration, item) | item <- applicationSchemaGrants configuration])
+              pure (Keep (sequence outcomes))
+          case opened of
+            Left failure -> pure (Left (sessionFailure failure))
+            Right (Left failure) -> pure (Left (sessionFailure failure))
+            Right (Right (Left failure)) -> pure (Left failure)
+            Right (Right (Right _)) -> do
+              setupResult <- applyRoleSettings configuration options database (setup configuration) (setupSettings configuration)
+              case setupResult of
+                Left failure -> pure (Left failure)
+                Right () -> applyRoleSettings configuration options database (application configuration) (applicationSettings configuration)
+
+applyRoleSettings :: HinagataConfig -> SessionOptions -> DatabaseName -> AccessConfig -> [RoleSetting] -> IO (Either BaselineError ())
+applyRoleSettings _ _ _ _ [] = pure (Right ())
+applyRoleSettings configuration options database access settings =
+  case (accessToTarget configuration access database, quoteRole (user access)) of
+    (Left failure, _) -> pure (Left failure)
+    (_, Left failure) -> pure (Left failure)
+    (Right target, Right role) -> do
+      opened <- withSession target options $ \session ->
+        runExclusive session $ \connection sessionOptions -> do
+          deadline <- deadlineAfter (operationDeadlineMs sessionOptions)
+          results <- traverse (setRoleSetting connection deadline role database) settings
+          pure (Keep (sequence results))
+      pure $ case opened of
+        Left failure -> Left (sessionFailure failure)
+        Right (Left failure) -> Left (sessionFailure failure)
+        Right (Right result) -> () <$ result
+
+setRoleSetting :: PQ.Connection -> Deadline -> Text -> DatabaseName -> RoleSetting -> IO (Either BaselineError ())
+setRoleSetting connection deadline role database RoleSetting {name, value}
+  | Text.any (== '\0') value = pure (Left (BaselineError "role setting contains NUL" Nothing))
+  | otherwise = do
+      let statement = Encoding.encodeUtf8 ("ALTER ROLE " <> role <> " IN DATABASE " <> quoteDatabase database <> " SET " <> quoteSqlIdentifier name <> " TO " <> quoteLiteral value)
+      either (Left . nativeFailure) Right <$> query connection deadline Sql statement
+
+grantDatabase :: PQ.Connection -> Deadline -> DatabaseName -> AccessConfig -> [DatabaseGrant] -> IO (Either BaselineError ())
+grantDatabase connection deadline database access grants =
+  case quoteRole (user access) of
+    Left failure -> pure (Left failure)
+    Right role ->
+      if null grants
+        then pure (Right ())
+        else do
+          let privileges = Text.intercalate ", " (map grantName grants)
+              statement = Encoding.encodeUtf8 ("GRANT " <> privileges <> " ON DATABASE " <> quoteDatabase database <> " TO " <> role)
+          either (Left . nativeFailure) Right <$> query connection deadline Sql statement
+
+grantSchema :: PQ.Connection -> Deadline -> (AccessConfig, SchemaGrant) -> IO (Either BaselineError ())
+grantSchema connection deadline (access, SchemaGrant {schema, privilege}) =
+  case quoteRole (user access) of
+    Left failure -> pure (Left failure)
+    Right role -> do
+      let name = case privilege of SchemaUsage -> "USAGE"; SchemaCreate -> "CREATE"
+          statement = Encoding.encodeUtf8 ("GRANT " <> name <> " ON SCHEMA " <> quoteSqlIdentifier schema <> " TO " <> role)
+      either (Left . nativeFailure) Right <$> query connection deadline Sql statement
+
+grantName :: DatabaseGrant -> Text
+grantName = \case GrantConnect -> "CONNECT"; GrantCreate -> "CREATE"; GrantTemporary -> "TEMPORARY"
+
+adminTarget :: HinagataConfig -> DatabaseName -> Either BaselineError ConnectionTarget
+adminTarget configuration = accessToTarget configuration (administration configuration)
+
+accessToTarget :: HinagataConfig -> AccessConfig -> DatabaseName -> Either BaselineError ConnectionTarget
+accessToTarget HinagataConfig {endpoint = EndpointConfig {host, port}} AccessConfig {user, password} database =
+  either (Left . (\message -> BaselineError message Nothing)) Right (mkConnectionTarget host port user database password)
+
+quoteDatabase :: DatabaseName -> Text
+quoteDatabase = (\value -> "\"" <> Text.replace "\"" "\"\"" value <> "\"") . databaseNameText
+
+quoteRole :: Text -> Either BaselineError Text
+quoteRole role = either (Left . (\message -> BaselineError message Nothing)) (Right . quoteSqlIdentifier) (mkSqlIdentifier role)
+
+quoteLiteral :: Text -> Text
+quoteLiteral value = "'" <> Text.replace "'" "''" value <> "'"
+
+fingerprintManifest :: Int -> BaselineSpec -> Text
+fingerprintManifest server BaselineSpec {configuration, basePlan, migrationRevision, verificationRevision, requiredExtensions, requiredLocale} =
+  Text.intercalate
+    "\n"
+    [ "hinagata-fingerprint-v1",
+      render (server `div` 10000),
+      render (projectIdText (project configuration)),
+      render (planDigest basePlan),
+      render migrationRevision,
+      render verificationRevision,
+      render requiredExtensions,
+      render requiredLocale,
+      render (user (administration configuration)),
+      render (user (setup configuration)),
+      render (user (application configuration)),
+      render (setupGrants configuration),
+      render (applicationGrants configuration),
+      render (setupSchemaGrants configuration),
+      render (applicationSchemaGrants configuration),
+      render (nonSecretSettings (setupSettings configuration)),
+      render (nonSecretSettings (applicationSettings configuration))
+    ]
+  where
+    render :: (Show a) => a -> Text
+    render = Text.pack . show
+
+    nonSecretSettings :: [RoleSetting] -> [(Text, Text)]
+    nonSecretSettings = map (\RoleSetting {name, value} -> (sqlIdentifierText name, hex (SHA256.hash (Encoding.encodeUtf8 value))))
+
+hex :: ByteString.ByteString -> Text
+hex = Text.pack . concatMap digits . ByteString.unpack
+  where
+    digits byte = case showHex byte "" of [digit] -> ['0', digit]; value -> value
+
+nativeFailure :: NativeError -> BaselineError
+nativeFailure NativeError {reason, sqlState} = BaselineError reason sqlState
+
+sessionFailure :: SessionError -> BaselineError
+sessionFailure failure = BaselineError (Text.pack (show failure)) Nothing
