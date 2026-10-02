@@ -49,7 +49,16 @@ check-conventions:
 fmt-check:
     nix fmt -- --ci
 
-check: check-conventions core-test postgres-test test-cli fmt-check
+check-docs:
+    dhall type --file mori/user-documentation-profile.dhall > /dev/null
+    dhall type --file mori/terminology-profile.dhall > /dev/null
+    dhall type --file mori.dhall > /dev/null
+    okf validate docs/user --strict --profile mori/user-documentation-profile.dhall --profile-enforce --log-enforce
+    okf validate docs/guides --strict --profile mori/user-documentation-profile.dhall --profile-enforce --log-enforce
+    okf validate docs/terminology --strict --profile mori/terminology-profile.dhall --profile-enforce --log-enforce
+    mori terms validate --path .
+
+check: check-conventions check-docs core-test postgres-test test-cli fmt-check
     cabal sdist hinagata-core
     cabal sdist hinagata-postgres
     cabal sdist hinagata-cli

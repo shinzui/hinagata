@@ -1,5 +1,8 @@
 # Hinagata CLI
 
+Start with the [user documentation](user/README.md) for task-based instructions.
+See the new [command reference](user/cli.md) and [configuration reference](user/configuration.md).
+
 Use `nix develop` in the repository root. The development shell comes from `mori://shinzui/seihou-modules/templates/nix-haskell-flake`; it supplies GHC, Cabal, PostgreSQL tools, Hurl, and Dhall. `cabal run hinagata -- --help` shows the command grammar. Help, version, completion scripts, and `--describe-config-json` work without a config file or PostgreSQL server.
 
 Configuration sources are applied in this order: built-in Settei defaults, repeated `--config FILE` YAML files in argument order, explicit `HINAGATA_*` environment bindings, and repeated `--set KEY=VALUE` overrides. `--check-config` and `--explain-config` resolve settings without connecting to PostgreSQL. Password settings and hook `argv`/`environment` values are redacted in explanations. Endpoint, project, maintenance database, three explicit role/database selections, and absolute fixture and bundle roots are required for operational commands. The [workbench example](../examples/workbench/README.md) sets its machine-specific paths and disposable socket through environment bindings over a checked-in YAML file.

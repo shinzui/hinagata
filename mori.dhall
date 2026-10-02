@@ -16,27 +16,122 @@ in  Schema.Project::{
       }
     , repos =
       [ Schema.Repo::{ name = "hinagata", github = Some "shinzui/hinagata" } ]
+    , docs =
+      [ Schema.DocRef::{
+        , key = "user-documentation"
+        , kind = Schema.DocKind.Guide
+        , audience = Schema.DocAudience.User
+        , location = Schema.DocLocation.LocalFile "docs/user/README.md"
+        , description = Some "First use, concepts, and reference information"
+        }
+      , Schema.DocRef::{
+        , key = "guides"
+        , kind = Schema.DocKind.Guide
+        , audience = Schema.DocAudience.User
+        , location = Schema.DocLocation.LocalFile "docs/guides/README.md"
+        , description = Some
+            "Procedures for fixtures, integration, cleanup, and documentation"
+        }
+      , Schema.DocRef::{
+        , key = "terminology"
+        , kind = Schema.DocKind.Reference
+        , audience = Schema.DocAudience.User
+        , location = Schema.DocLocation.LocalFile "docs/user/terminology.md"
+        , description = Some "Project terms grouped by subject"
+        }
+      ]
+    , okfBundles =
+      [ Schema.OkfBundle::{
+        , name = "user-documentation"
+        , path = "docs/user"
+        , profile = Some "mori/user-documentation-profile.dhall"
+        , profileBinding = Some
+            ( Schema.ProfileBinding.Published
+                Schema.PinnedImport::{
+                , publisher = "shinzui/okf-profiles"
+                , publisherRef = Some Schema.MoriRef::{
+                  , namespace = "shinzui"
+                  , name = "okf-profiles"
+                  }
+                , export = Some "documentation.userDocumentation"
+                , version = Some "v0.19.0"
+                , pin = Some
+                    "sha256:85176d78369b6d73c9f13c30277903b629d6bf048a4c7d71fc26e68b99c3eaa6"
+                }
+            )
+        , okfVersion = "0.2"
+        , description = Some
+            "User documentation for PostgreSQL test databases and fixtures"
+        }
+      , Schema.OkfBundle::{
+        , name = "guides"
+        , path = "docs/guides"
+        , profile = Some "mori/user-documentation-profile.dhall"
+        , profileBinding = Some
+            ( Schema.ProfileBinding.Published
+                Schema.PinnedImport::{
+                , publisher = "shinzui/okf-profiles"
+                , publisherRef = Some Schema.MoriRef::{
+                  , namespace = "shinzui"
+                  , name = "okf-profiles"
+                  }
+                , export = Some "documentation.userDocumentation"
+                , version = Some "v0.19.0"
+                , pin = Some
+                    "sha256:85176d78369b6d73c9f13c30277903b629d6bf048a4c7d71fc26e68b99c3eaa6"
+                }
+            )
+        , okfVersion = "0.2"
+        , description = Some
+            "Task guides for fixture authors and service developers"
+        }
+      , Schema.OkfBundle::{
+        , name = "terminology"
+        , path = "docs/terminology"
+        , profile = Some "mori/terminology-profile.dhall"
+        , profileBinding = Some
+            ( Schema.ProfileBinding.Published
+                Schema.PinnedImport::{
+                , publisher = "shinzui/okf-profiles"
+                , publisherRef = Some Schema.MoriRef::{
+                  , namespace = "shinzui"
+                  , name = "okf-profiles"
+                  }
+                , export = Some "documentation.terminology"
+                , version = Some "v0.19.0"
+                , pin = Some
+                    "sha256:85176d78369b6d73c9f13c30277903b629d6bf048a4c7d71fc26e68b99c3eaa6"
+                }
+            )
+        , okfVersion = "0.2"
+        , description = Some
+            "Controlled vocabulary for fixtures, database lifecycle, and service access"
+        }
+      ]
     , packages =
       [ Schema.Package::{
         , name = "hinagata-core"
         , type = Schema.PackageType.Library
         , language = Schema.Language.Haskell
         , path = Some "hinagata-core"
-        , description = Some "Pure fixture planning, validated identifiers, and connection descriptions"
+        , description = Some
+            "Pure fixture planning, validated identifiers, and connection descriptions"
         }
       , Schema.Package::{
         , name = "hinagata-postgres"
         , type = Schema.PackageType.Library
         , language = Schema.Language.Haskell
         , path = Some "hinagata-postgres"
-        , description = Some "Atomic fixture loading over private PostgreSQL sessions"
+        , description = Some
+            "Atomic fixture loading over private PostgreSQL sessions"
         }
       , Schema.Package::{
         , name = "hinagata-cli"
         , type = Schema.PackageType.Application
         , language = Schema.Language.Haskell
         , path = Some "hinagata-cli"
-        , description = Some "Fixture commands and scoped PostgreSQL lease handoff"
+        , description = Some
+            "Fixture commands and scoped PostgreSQL lease handoff"
         }
       , Schema.Package::{
         , name = "hinagata-workbench-example"
