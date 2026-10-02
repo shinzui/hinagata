@@ -265,6 +265,8 @@ crashLeaseWorker fixtureRoot bundleRoot mode readyFile = do
       let blockedHook _ = writeReady readyFile "building" >> threadDelay 60000000 >> pure (Right ())
       _ <- ensureBaseline specification {migrationRevision = Just "migration-process-crash", migrationHook = blockedHook}
       fail "crash worker reached normal baseline completion"
+    "intent" -> runLease specification bundleConfig
+    "created" -> runLease specification bundleConfig
     "handoff" -> runLease specification bundleConfig
     "loading" -> runLease specification bundleConfig
     _ -> fail "unknown crash-worker phase"
@@ -272,7 +274,7 @@ crashLeaseWorker fixtureRoot bundleRoot mode readyFile = do
     runLease specification bundleConfig = do
       (baseline, report) <- orFail =<< ensureBaseline specification
       assert "crash worker reuses the existing sealed baseline" (kind report == Reused)
-      let scenarioName = if mode == "handoff" then "scenario" else "crash-loading"
+      let scenarioName = if mode == "loading" then "crash-loading" else "scenario"
       scenario <- bundleOrFail =<< compileFixtures bundleConfig [fixtureName "good", fixtureName scenarioName]
       _ <- withDatabase (configuration specification) baseline scenario $ \LeaseInfo {leaseId} -> do
         when (mode == "handoff") (writeReady readyFile (Encoding.encodeUtf8 leaseId))
@@ -601,8 +603,58 @@ processCrashTests configuration baselineSpec connection fixtureRoot bundleRoot =
   ByteString.writeFile (slowDirectory </> "fixture.sql") "SELECT pg_sleep(30);"
   executable <- getExecutablePath
   runBuilderCase executable
+  runUnboundCase executable "intent" "LOCK TABLE pg_database IN SHARE ROW EXCLUSIVE MODE" "CREATE DATABASE %" False
+  runUnboundCase executable "created" "LOCK TABLE pg_shdescription IN SHARE ROW EXCLUSIVE MODE" "COMMENT ON DATABASE %" True
   mapM_ (runCase executable) ["loading", "handoff"]
   where
+    runUnboundCase executable mode catalogLock activePattern expectDatabase = do
+      before <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations"
+      let command = proc executable ["--crash-lease-worker", fixtureRoot, bundleRoot, mode, bundleRoot </> ("crash-" ++ mode ++ ".ready")]
+          activeSql prefix = "SELECT " <> prefix <> " FROM pg_stat_activity WHERE state = 'active' AND query LIKE '" <> activePattern <> "' AND pid <> pg_backend_pid()"
+      (identifier, serverPid) <-
+        bracket
+          (execCheck connection "BEGIN" >> execCheck connection catalogLock)
+          (const (execCheck connection "ROLLBACK"))
+          ( \_ -> withCreateProcess command $ \_ _ _ child -> do
+              (identifier, serverPid) <- waitForChild child $ do
+                count <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations"
+                if count <= before
+                  then pure Nothing
+                  else do
+                    latest <- queryText connection "SELECT id FROM hinagata_test.allocations ORDER BY created_at DESC LIMIT 1"
+                    state <- queryText connection ("SELECT state FROM hinagata_test.allocations WHERE id = '" <> latest <> "'")
+                    pending <- queryInt connection (activeSql "count(*)")
+                    if state == "Allocating" && pending > 0
+                      then do
+                        backend <- queryInt connection (activeSql "pid" <> " LIMIT 1")
+                        pure (Just (Encoding.decodeUtf8 latest, backend))
+                      else pure Nothing
+              processId <- maybe (fail "unbound worker has no process ID") pure =<< getPid child
+              signalProcess sigKILL processId
+              ended <- timeout 10000000 (waitForProcess child)
+              assert ("killed " ++ mode ++ " worker exits abnormally") (case ended of Just ExitSuccess -> False; Just (ExitFailure _) -> True; Nothing -> False)
+              pure (identifier, serverPid)
+          )
+      waitForBackendGone mode serverPid
+      candidates <- orFail =<< planCleanup configuration
+      candidate <- maybe (fail "unbound allocation is absent from cleanup preview") pure (find (\item -> allocationId item == identifier) candidates)
+      assert ("unbound " ++ mode ++ " allocation remains ambiguous after process death") (state candidate == "Allocating" && disposition candidate == Ambiguous)
+      let CleanupCandidate {database = intendedDatabase} = candidate
+          existenceSql = Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> databaseNameText intendedDatabase <> "'")
+      beforeApply <- queryInt connection existenceSql
+      when expectDatabase (assert "database creation completed before marker binding" (beforeApply == 1))
+      applied <- applyCleanup configuration OrphansOnly [identifier]
+      afterApply <- queryInt connection existenceSql
+      assert ("ambiguous " ++ mode ++ " allocation refuses deletion") (applied == Right [Refused identifier "allocation has no bound database OID"] && afterApply == beforeApply)
+
+    waitForBackendGone mode serverPid = loop (100 :: Int)
+      where
+        statement = ByteString.pack ("SELECT count(*) FROM pg_stat_activity WHERE pid = " ++ show serverPid)
+        loop 0 = fail ("server backend continued after killed " ++ mode ++ " worker")
+        loop remaining = do
+          active <- queryInt connection statement
+          if active == 0 then pure () else threadDelay 100000 >> loop (remaining - 1)
+
     runBuilderCase executable = do
       let readyFile = bundleRoot </> "crash-building.ready"
           command = proc executable ["--crash-lease-worker", fixtureRoot, bundleRoot, "building", readyFile]

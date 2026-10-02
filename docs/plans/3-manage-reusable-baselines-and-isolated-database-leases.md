@@ -93,12 +93,16 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 2026-10-02 lifecycle timing progress: `LeaseOutcome` now includes `LeaseTimings` with separate monotonic durations for manager queue admission, catalog setup, generation-lock wait, clone creation/binding, scenario connection/load, and lease completion. Direct leases report zero queue time; the manager sums active and setup gate waits. Integration tests use a two-second scenario and a deliberately queued managed request to verify the stage attribution. `PreparationReport` already pairs build/reuse kind with its elapsed duration. Timing for failures before handoff and named collections is still open.
 
-2026-10-02 process-crash progress: The disposable-cluster test executable now spawns a separate worker and kills it with SIGKILL after a baseline reaches its migration hook, while a clone is Loading, and after callback handoff. The surviving baseline caller marks the interrupted Building generation Failed and publishes one Ready generation. A killed Loading or Active clone becomes an inspectable orphan; only explicit `applyCleanup` removes its positively owned database. Fault injection at intent, CREATE, marker binding, seal, publication, and DROP remains open, as does proving behavior when the maintenance connection dies while a callback continues running.
+2026-10-02 process-crash progress: The disposable-cluster test executable now spawns a separate worker and kills it with SIGKILL after a baseline reaches its migration hook, while a clone is Loading, and after callback handoff. The surviving baseline caller marks the interrupted Building generation Failed and publishes one Ready generation. A killed Loading or Active clone becomes an inspectable orphan; only explicit `applyCleanup` removes its positively owned database. Fault injection at marker binding, seal, publication, and DROP remains open, as does proving behavior when the maintenance connection dies while a callback continues running.
+
+2026-10-02 unbound-allocation progress: Disposable-cluster socket and TCP tests kill a worker with a committed Allocating record while `CREATE DATABASE` is blocked, and after `CREATE DATABASE` completes while `COMMENT ON DATABASE` is blocked. Both records remain Ambiguous after the worker and its server backend exit. Explicit orphan cleanup refuses the unbound identity and does not delete a database; the second case verifies the newly created database remains. Marker binding, seal, publication, and DROP process-kill boundaries remain open.
 
 2026-10-02 warm-concurrency progress: Eight simultaneous direct lease callers now reach their callbacks with eight distinct writable databases while the observer holds a compatible shared generation lock. All eight release cleanly. This proves Hinagata does not require an exclusive generation lock for warm allocation; a measured overlap of the PostgreSQL CREATE DATABASE statements themselves remains open.
 
 
 ## Surprises & Discoveries
+
+2026-10-02: Killing a client blocked during `CREATE DATABASE` does not prove the server canceled the statement. Releasing the blocking catalog lock let that backend complete the CREATE before it exited. The fault test waits for backend termination before comparing database existence; recovery continues to treat the unbound allocation as ambiguous even when the intended name now exists.
 
 
 ## Decision Log
