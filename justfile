@@ -6,6 +6,10 @@ core-test:
 postgres-test:
     cabal test hinagata-postgres-test --test-show-details=direct
 
+test-cli:
+    cabal build hinagata-cli
+    bash scripts/test-cli.sh
+
 test-postgres:
     bash scripts/test-postgres.sh
 
@@ -24,7 +28,8 @@ check-conventions:
 fmt-check:
     nix fmt -- --ci
 
-check: check-conventions core-test postgres-test fmt-check
+check: check-conventions core-test postgres-test test-cli fmt-check
     cabal sdist hinagata-core
     cabal sdist hinagata-postgres
+    cabal sdist hinagata-cli
     nix flake check

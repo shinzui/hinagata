@@ -74,7 +74,7 @@ No relevant local ADR existed initially; `mori show --full` confirms there is no
 | 1 | Compile deterministic fixture plans and typed configuration | [1-compile-deterministic-fixture-plans-and-typed-configuration.md](../plans/1-compile-deterministic-fixture-plans-and-typed-configuration.md) | None | None | Complete |
 | 2 | Load SQL fixtures atomically into existing PostgreSQL databases | [2-load-sql-fixtures-atomically-into-existing-postgresql-databases.md](../plans/2-load-sql-fixtures-atomically-into-existing-postgresql-databases.md) | EP-1 | None | Complete |
 | 3 | Manage reusable baselines and isolated database leases | [3-manage-reusable-baselines-and-isolated-database-leases.md](../plans/3-manage-reusable-baselines-and-isolated-database-leases.md) | EP-2 | None | Complete |
-| 4 | Expose fixture commands and hurl-workbench handoff | [4-expose-fixture-commands-and-hurl-workbench-handoff.md](../plans/4-expose-fixture-commands-and-hurl-workbench-handoff.md) | EP-3 | None | Not Started |
+| 4 | Expose fixture commands and hurl-workbench handoff | [4-expose-fixture-commands-and-hurl-workbench-handoff.md](../plans/4-expose-fixture-commands-and-hurl-workbench-handoff.md) | EP-3 | None | In Progress |
 | 5 | Prove Keiro service integration and performance | [5-prove-keiro-service-integration-and-performance.md](../plans/5-prove-keiro-service-integration-and-performance.md) | EP-4 | None | Not Started |
 
 Status values are Not Started, In Progress, Complete, or Cancelled. The registry is authoritative for child status.
@@ -114,7 +114,7 @@ The [Haskell standards audit](../research/haskell-standards-audit.md) owns the a
 
 ## Progress
 
-Planning complete and architecture-reviewed on 2026-09-30, with the review's shared-contract refinements applied. EP-1 is complete: Seihou's `nix-haskell-flake` bootstrapped the development environment, and the core package passes its tests, source-distribution, formatter, Nix package and flake checks, and the CSV capture residency probe. EP-2 is complete: the private libpq loader passes socket-only and TCP integration suites, source distribution, Haddock, local Nix checks, and a 100k/1m-row bounded-residency benchmark. EP-3 is complete: sealed baseline reuse, concurrent isolated leases, ownership-aware recovery, catalog upgrades, and a million-row prepared baseline pass disposable socket/TCP and bulk acceptance runs. 3 of 5 child plans are complete. CLI/process handoff is next; full service integration/performance/release gates remain assigned to the fifth child.
+Planning complete and architecture-reviewed on 2026-09-30, with the review's shared-contract refinements applied. EP-1 is complete: Seihou's `nix-haskell-flake` bootstrapped the development environment, and the core package passes its tests, source-distribution, formatter, Nix package and flake checks, and the CSV capture residency probe. EP-2 is complete: the private libpq loader passes socket-only and TCP integration suites, source distribution, Haddock, local Nix checks, and a 100k/1m-row bounded-residency benchmark. EP-3 is complete: sealed baseline reuse, concurrent isolated leases, ownership-aware recovery, catalog upgrades, and a million-row prepared baseline pass disposable socket/TCP and bulk acceptance runs. 3 of 5 child plans are complete. EP-4 has started on CLI/process handoff; full service integration/performance/release gates remain assigned to the fifth child.
 
 
 ## Surprises & Discoveries

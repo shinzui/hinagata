@@ -1,0 +1,43 @@
+cabal-version: 3.12
+name: hinagata-cli
+version: 0.1.0.0
+synopsis: Fixture planning and PostgreSQL lease commands for Hinagata
+category: Testing
+license: BSD-3-Clause
+license-file: LICENSE
+build-type: Simple
+
+common common
+  default-language: GHC2024
+  default-extensions:
+    DeriveAnyClass
+    DuplicateRecordFields
+    OverloadedLabels
+    OverloadedStrings
+
+  ghc-options: -Wall
+
+executable hinagata
+  import: common
+  hs-source-dirs:
+    app
+    src
+
+  main-is: Main.hs
+  other-modules:
+    Hinagata.Cli.Config
+    Hinagata.Cli.Options
+    Hinagata.Cli.Output
+    Paths_hinagata_cli
+
+  build-depends:
+    aeson >=2.2 && <2.4,
+    base >=4.21 && <5,
+    bytestring >=0.12 && <0.14,
+    hinagata-core,
+    optparse-applicative >=0.19 && <0.20,
+    settei >=0.2 && <0.3,
+    settei-env >=0.2 && <0.3,
+    settei-optparse-applicative >=0.2 && <0.3,
+    settei-yaml >=0.2 && <0.3,
+    text >=2.1 && <2.3,

@@ -27,6 +27,11 @@ provenance:
       at: 2026-10-01T00:30:12Z
       mode: "update"
       note: "Fix child env overlay to PG* plus run/lease IDs, PGPASSFILE password channel, explicit child stdin"
+    - model: "gpt-6-sol"
+      harness: "codex-cli"
+      at: 2026-10-02T12:05:37Z
+      mode: "implement"
+      note: "Begin CLI and process handoff implementation"
   reviews:
     - model: "claude-fable-5-1"
       harness: "claude-code"
@@ -50,6 +55,8 @@ Developers can inspect fixture plans, load an existing socket database, validate
 - [ ] Thin CLI exposes Settei diagnostics, fixture planning/loading, and stable JSON errors.
 - [ ] Database lifecycle commands and generic command handoff preserve lease/process lifetimes.
 - [ ] A runnable hurl-workbench example passes and failure/cancellation leaves the expected resources.
+
+2026-10-02 CLI bootstrap progress: The new `hinagata-cli` package is wired into `cabal.project`, the unmanaged `flake.module.nix`, and `just check`. Its first offline slice uses Settei's strict YAML, environment, and repeated override sources for schema, check, explanation, and `fixture plan` commands. The plan command emits format-version-1 JSON or text without connecting to PostgreSQL; the CLI also provides help, version fallback, and parser-derived shell completion scripts before configuration resolution. `just test-cli` checks absent-file help/schema behavior, nested completion, a no-server plan, and secret redaction on a typed resolution failure. `nix develop -c just check` passes including the new Nix package and source distribution. Loading, validation, database commands, build-revision injection, and workbench handoff remain open.
 
 
 ## Surprises & Discoveries

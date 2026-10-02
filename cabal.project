@@ -1,4 +1,4 @@
-packages: hinagata-core hinagata-postgres
+packages: hinagata-core hinagata-postgres hinagata-cli
 tests: True
 benchmarks: True
 write-ghc-environment-files: never

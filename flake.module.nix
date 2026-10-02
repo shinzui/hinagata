@@ -10,14 +10,17 @@
           (hself: _hsuper: {
             hinagata-core = hself.callCabal2nix "hinagata-core" ./hinagata-core { };
             hinagata-postgres = hself.callCabal2nix "hinagata-postgres" ./hinagata-postgres { };
+            hinagata-cli = hself.callCabal2nix "hinagata-cli" ./hinagata-cli { };
           });
       };
     in
     {
       packages.hinagata-core = haskellPackages.hinagata-core;
       packages.hinagata-postgres = haskellPackages.hinagata-postgres;
-      packages.default = haskellPackages.hinagata-postgres;
+      packages.hinagata-cli = haskellPackages.hinagata-cli;
+      packages.default = haskellPackages.hinagata-cli;
       checks.hinagata-core = haskellPackages.hinagata-core;
       checks.hinagata-postgres = haskellPackages.hinagata-postgres;
+      checks.hinagata-cli = haskellPackages.hinagata-cli;
     };
 }
