@@ -14,6 +14,11 @@ test-cli-postgres:
     cabal build hinagata-cli
     bash scripts/test-postgres.sh --cli
 
+example-workbench:
+    cabal build hinagata-cli hinagata-workbench-example
+    hurlfmt --check examples/workbench/hurl/health.hurl examples/workbench/hurl/members.hurl examples/workbench/hurl/intentional-failure.hurl examples/workbench/hurl/slow.hurl
+    bash scripts/test-postgres.sh --example
+
 test-postgres:
     bash scripts/test-postgres.sh
 
@@ -36,4 +41,5 @@ check: check-conventions core-test postgres-test test-cli fmt-check
     cabal sdist hinagata-core
     cabal sdist hinagata-postgres
     cabal sdist hinagata-cli
+    cabal sdist hinagata-workbench-example
     nix flake check

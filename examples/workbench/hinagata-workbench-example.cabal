@@ -1,0 +1,35 @@
+cabal-version: 3.12
+name: hinagata-workbench-example
+version: 0.1.0.0
+synopsis: Test-only database-backed service for the Hinagata workbench handoff
+category: Testing
+license: BSD-3-Clause
+license-file: LICENSE
+build-type: Simple
+
+common common
+  default-language: GHC2024
+  default-extensions:
+    DeriveAnyClass
+    DuplicateRecordFields
+    OverloadedLabels
+    OverloadedStrings
+
+  ghc-options: -Wall
+
+executable hinagata-workbench-service
+  import: common
+  hs-source-dirs: service
+  main-is: Main.hs
+  ghc-options: -threaded
+  build-depends:
+    base >=4.21 && <5,
+    bytestring >=0.12 && <0.14,
+    hinagata-core,
+    http-types >=0.12.4 && <0.13,
+    postgresql-libpq >=0.11.0.0 && <0.12,
+    settei >=0.2 && <0.3,
+    settei-env >=0.2 && <0.3,
+    text >=2.1 && <2.3,
+    wai >=3.2.4 && <3.3,
+    warp >=3.4.9 && <3.5,

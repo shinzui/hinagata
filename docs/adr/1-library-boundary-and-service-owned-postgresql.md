@@ -18,6 +18,8 @@ Development tooling is bootstrapped by `mori://shinzui/seihou-modules/templates/
 
 Administration, setup, and application endpoints have explicit roles. Application handoff never implicitly uses administrative credentials. Suite-scoped resource limits and result classification belong to the library; adapters may map test-framework outcomes without introducing a framework dependency. Service bootstrap retains global-role ownership.
 
+The CLI adapts executable migration and verification commands into the library's setup-endpoint hooks. Each command has an explicit revision and deadline; a command path without a revision cannot authorize persistent baseline reuse. `db with` passes only the application endpoint through a fixed PostgreSQL environment overlay and, when needed, a private password file. It owns a generic child process group, forwards cancellation, reaps descendants before lease release, and retains the lease if process cleanup is uncertain. Workbench retains ownership of readiness, Hurl execution, and its nested service process group.
+
 The [standards applicability audit](../research/haskell-standards-audit.md) defines the cross-package Haskell baseline and selected CLI patterns. Informational CLI paths are offline; Hurl standards apply to example services through workbench. Public module boundaries also prevent transitive generic-lens orphan exposure to consumers.
 
 ## Consequences

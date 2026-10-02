@@ -1,0 +1,11 @@
+# Database-backed workbench suite
+
+Run `nix develop -c just example-workbench` from the repository root. The command builds the test-only Haskell service, starts a disposable PostgreSQL socket cluster, checks the Hurl sources with `hurlfmt`, and runs the pinned `mori://shinzui/hurl-workbench` executable at immutable commit `a29d26ad5e90aa762de88be18f06fddf67b6d02f`. No developer checkout path is stored in the manifest or script.
+
+The checked-in [Hinagata YAML](hinagata.yaml) declares the `member-schema` baseline and hook revisions. The script supplies the absolute fixture/bundle paths, socket, port, maintenance database, and test roles through explicit Settei environment bindings. `seeded-member` adds exactly two rows, IDs 1 and 2, named Ada and Grace. Each `db with --fixture seeded-member` invocation clones the baseline, commits those rows, and passes only the application endpoint to workbench. The service wrapper maps the lease's PG fields to its own `SERVICE_*` Settei settings before starting the HTTP process. `/health` queries the clone, so workbench readiness also proves the database is reachable.
+
+The ordinary `default` suite explicitly runs the independent `health.hurl` and `members.hurl` files. Every request asserts its status, and every body-bearing response asserts JSON media type and stable fields. `members.hurl` checks two committed rows and a missing-member 404. The script invokes this suite twice on distinct ports and leases and confirms the service and database are gone afterward. A workbench matrix over one managed service shares one database; use separate `db with` suite invocations when each suite needs isolation.
+
+Two test-only suites are opt-in. `intentional-failure` uses a wrong expected member name to prove that workbench's failing status is preserved and `--preserve-on-failure` leaves an inspectable database, which the script then releases. `cancellation` holds a slow request open so the script can signal the outer command after service readiness; it confirms the service process stops and the lease is released. Neither suite belongs to the default file list.
+
+For individual CLI commands, see [the CLI guide](../../docs/cli.md). The service is only an integration example; Hinagata does not start PostgreSQL or implement HTTP readiness itself.

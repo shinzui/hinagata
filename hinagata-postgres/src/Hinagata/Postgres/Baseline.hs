@@ -5,6 +5,7 @@ module Hinagata.Postgres.Baseline
     baselineDatabase,
     PreparationKind (..),
     FingerprintComponent (..),
+    fingerprintComponents,
     FingerprintComparison (..),
     PreparationReport (..),
     BaselineError (..),

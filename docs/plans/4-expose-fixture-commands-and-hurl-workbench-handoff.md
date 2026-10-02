@@ -52,16 +52,20 @@ Developers can inspect fixture plans, load an existing socket database, validate
 
 ## Progress
 
-- [ ] Thin CLI exposes Settei diagnostics, fixture planning/loading, and stable JSON errors.
-- [ ] Database lifecycle commands and generic command handoff preserve lease/process lifetimes.
-- [ ] A runnable hurl-workbench example passes and failure/cancellation leaves the expected resources.
+- [x] Thin CLI exposes Settei diagnostics, fixture planning/loading, and stable JSON errors.
+- [x] Database lifecycle commands and generic command handoff preserve lease/process lifetimes.
+- [x] A runnable hurl-workbench example passes and failure/cancellation leaves the expected resources.
 
 2026-10-02 CLI bootstrap progress: The new `hinagata-cli` package is wired into `cabal.project`, the unmanaged `flake.module.nix`, and `just check`. Its first offline slice uses Settei's strict YAML, environment, and repeated override sources for schema, check, explanation, and `fixture plan` commands. The plan command emits format-version-1 JSON or text without connecting to PostgreSQL; the CLI also provides help, version fallback, and parser-derived shell completion scripts before configuration resolution. `just test-cli` checks absent-file help/schema behavior, nested completion, a no-server plan, and secret redaction on a typed resolution failure. `nix develop -c just check` passes including the new Nix package and source distribution. Loading, validation, database commands, build-revision injection, and workbench handoff remain open.
 
 2026-10-02 direct-load progress: `fixture load NAME... --target-database DATABASE` requires the database name on the command line, compiles a frozen bundle, and delegates the transaction to the PostgreSQL loader with the configured setup role. JSON reports committed counts and stage timings; a failed load reports the library's phase, fixture, step, and SQLSTATE in a versioned error. `just test-cli-postgres` starts a disposable socket cluster, confirms committed rows through an independent `psql` connection, then provokes a duplicate-key failure and verifies that an earlier insert in that fixture was rolled back. The offline `just test-cli` gate remains separate. `nix develop -c just check` passes including the CLI source distribution and Nix package.
 
+2026-10-02 completion: CLI commands now cover preparation, detached acquire/inspect/release, cleanup preview/apply, scoped `db with`, and isolated scenario validation. The child receives only application endpoint variables and a private password file when required. TERM/INT forwarding, bounded escalation, reaping, exact child status, preservation, and cleanup uncertainty are exercised in a disposable cluster. The example service reads a seeded clone through its Settei configuration and hurl-workbench; two suites use distinct ports/leases, while intentional failure and cancellation exercise preservation/release. `just test-cli-postgres`, `just example-workbench`, `just check`, and `nix flake check` pass. `nix run . -- --version` verifies the Nix-injected revision separately.
+
 
 ## Surprises & Discoveries
+
+The Seihou-pinned Nix package set supplies older compatible WAI/Warp/http-types releases than the newest Hackage releases. The example's lower bounds include those pinned versions while preserving the verified upper bounds. A blocking `waitForProcess` delayed signal handling even with a threaded runtime, so the CLI polls exit status and installs handlers before spawning the child.
 
 
 ## Decision Log
@@ -70,8 +74,12 @@ Developers can inspect fixture plans, load an existing socket database, validate
 
 2026-09-30: Fix the child environment overlay to exactly `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, `HINAGATA_RUN_ID`, and `HINAGATA_LEASE_ID`, dropping the earlier ambiguous `HINAGATA_DATABASE` variable so the spec, MasterPlan, and example wrapper agree. A password, when one exists, travels only through a private `PGPASSFILE`. The child gets an explicit stdin because a background process group reading the terminal is stopped by SIGTTIN.
 
+2026-10-02: Keep the executable as a generic process wrapper and let hurl-workbench own readiness and its nested service group. The CLI reports actual baseline fingerprint categories and a build/reuse reason; changed categories remain absent unless the library has an explicitly selected prior generation.
+
 
 ## Outcomes & Retrospective
+
+The CLI and workbench handoff are runnable without adding Hurl parsing or service orchestration to the library. Disposable-cluster tests cover direct-load rollback, baseline reuse, detached resources, cleanup refusal, child success/failure/cancellation, private password transport, and ordered scenario validation. The workbench example proves seeded HTTP reads, two isolated suites, preserved failure inspection, and signal cleanup. Nix packages the CLI and example; Cabal source distributions and formatting pass. The remaining full Keiro consumer and performance/release evidence belongs to EP-5.
 
 
 ## Context and Orientation
@@ -120,14 +128,12 @@ Run from the Hinagata repository root. The commands below are acceptance interfa
 
 ```bash
 nix develop -c cabal run hinagata -- --describe-config-json
-nix develop -c cabal run hinagata -- --config examples/workbench/hinagata.yaml --check-config
-nix develop -c cabal run hinagata -- --config examples/workbench/hinagata.yaml fixture plan seeded-member --json
 nix develop -c just test-cli
 nix develop -c just example-workbench
 nix develop -c just check
 ```
 
-Schema/check/plan commands succeed with no PostgreSQL server and perform no mutation. Explain output proves source precedence and redacts a sentinel credential even on invalid input. `just example-workbench` starts one owned test cluster, creates a lease, has workbench start the service and pass its Hurl assertion, stops the service, and releases the lease. An intentionally failing Hurl assertion preserves exact status and, with preservation enabled, leaves an inspectable database. Cancellation after service startup leaves no running process or improperly dropped active database. Detached acquire followed by a separate release works across CLI processes.
+Schema/check/plan commands succeed with no PostgreSQL server and perform no mutation. The checked-in example YAML deliberately leaves machine-specific endpoint, absolute fixture/bundle paths, and roles to explicit Settei environment bindings supplied by `just example-workbench`; run that script for its check/plan commands rather than invoking the YAML alone. Explain output proves source precedence and redacts a sentinel credential even on invalid input. `just example-workbench` starts one owned test cluster, creates a lease, has workbench start the service and pass its Hurl assertion, stops the service, and releases the lease. An intentionally failing Hurl assertion preserves exact status and, with preservation enabled, leaves an inspectable database. Cancellation after service startup leaves no running process or improperly dropped active database. Detached acquire followed by a separate release works across CLI processes.
 
 
 ## Validation and Acceptance

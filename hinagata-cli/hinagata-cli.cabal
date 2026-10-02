@@ -19,26 +19,37 @@ common common
 
 executable hinagata
   import: common
+  ghc-options:
+    -threaded
+    -rtsopts
+
   hs-source-dirs:
     app
     src
 
   main-is: Main.hs
   other-modules:
+    Hinagata.Cli.Command
     Hinagata.Cli.Config
     Hinagata.Cli.Options
     Hinagata.Cli.Output
+    Hinagata.Cli.Process
     Paths_hinagata_cli
 
   build-depends:
     aeson >=2.2 && <2.4,
+    async >=2.2.6 && <2.3,
     base >=4.21 && <5,
     bytestring >=0.12 && <0.14,
+    directory >=1.3 && <1.4,
+    filepath >=1.4 && <1.6,
     hinagata-core,
     hinagata-postgres,
     optparse-applicative >=0.19 && <0.20,
+    process >=1.6.26 && <1.7,
     settei >=0.2 && <0.3,
     settei-env >=0.2 && <0.3,
     settei-optparse-applicative >=0.2 && <0.3,
     settei-yaml >=0.2 && <0.3,
     text >=2.1 && <2.3,
+    unix >=2.8 && <2.9,

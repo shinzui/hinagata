@@ -1,0 +1,10 @@
+project:
+  id: workbench-example
+baseline:
+  fixtures: [member-schema]
+migration:
+  executable: cat
+  revision: example-noop-migration-v1
+verification:
+  executable: cat
+  revision: example-noop-verification-v1

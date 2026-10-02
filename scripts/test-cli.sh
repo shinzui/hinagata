@@ -34,6 +34,8 @@ EOF
 
 "$binary" --config "$workspace/absent.yaml" --describe-config-json > "$workspace/schema.json"
 "$binary" --config "$workspace/absent.yaml" --help > "$workspace/help.txt"
+"$binary" --config "$workspace/absent.yaml" db --help > "$workspace/db-help.txt"
+"$binary" --config "$workspace/absent.yaml" clean --help > "$workspace/clean-help.txt"
 "$binary" --config "$workspace/absent.yaml" --version > "$workspace/version.txt"
 "$binary" --config "$workspace/base.yaml" --check-config > "$workspace/check.txt"
 "$binary" --config "$workspace/base.yaml" fixture plan seeded-member --json > "$workspace/plan.json"
@@ -55,9 +57,27 @@ assert [fixture["name"] for fixture in plan["fixtures"]] == ["seeded-member"]
 assert plan["fixtures"][0]["steps"][0]["type"] == "sql"
 assert (workspace / "check.txt").read_text().strip() == "configuration valid"
 assert "fixture" in (workspace / "help.txt").read_text()
+assert "release" in (workspace / "db-help.txt").read_text()
+assert "--include-retained" in (workspace / "clean-help.txt").read_text()
 assert "revision unavailable" in (workspace / "version.txt").read_text()
 assert "--bash-completion-word" in (workspace / "bash-completion").read_text()
 assert "plan" in (workspace / "nested-completion").read_text().splitlines()
+PY
+
+if "$binary" --config "$workspace/base.yaml" clean --apply --json > "$workspace/clean-error.json" 2> "$workspace/clean-error.err"; then
+  echo "cleanup without an explicit selection unexpectedly succeeded" >&2
+  exit 1
+else
+  status=$?
+  test "$status" -eq 2
+fi
+python3 - "$workspace/clean-error.json" <<'PY'
+import json
+import pathlib
+import sys
+
+failure = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert failure["error"]["code"] == "clean_selection_required"
 PY
 
 if "$binary" --config "$workspace/base.yaml" --set administration.password=sentinel-secret --set endpoint.port=0 --explain-config-json fixture plan seeded-member --json > "$workspace/invalid.json" 2> "$workspace/invalid.err"; then
