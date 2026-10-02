@@ -27,6 +27,11 @@ provenance:
       at: 2026-10-01T00:30:12Z
       mode: "update"
       note: "House the first load benchmark in a hinagata-postgres benchmark component"
+    - model: "gpt-6-sol"
+      harness: "codex-cli"
+      at: 2026-10-02T05:59:39Z
+      mode: "implement"
+      note: "Begin EP-2 native PostgreSQL loader implementation"
   reviews:
     - model: "claude-fable-5-1"
       harness: "claude-code"
@@ -47,12 +52,16 @@ A caller can load a compiled fixture plan into its existing migrated PostgreSQL 
 
 ## Progress
 
-- [ ] SQL closures load and roll back as one transaction over socket and TCP connections.
-- [ ] CSV COPY shares the transaction, streams with bounded memory, and reports final-result failures.
-- [ ] Reused sessions recover or retire correctly after failure/cancellation, with measured direct-load costs.
+- [x] 2026-10-01: SQL closures load and roll back as one transaction over socket and explicit TCP connections. The disposable socket-only suite proves a late SQL error leaves the original sentinel and no partial writes; a missing socket does not fall back to TCP. `just test-postgres` and `just test-postgres-tcp` pass.
+- [x] 2026-10-01: CSV COPY shares the transaction, streams 64 KiB chunks, and reports final-result failures. Mixed SQL/COPY/SQL, late duplicate rows, a trigger failure after all COPY bytes, deferred COMMIT failure, and a changed bundle are covered by the integration suite.
+- [x] 2026-10-01: Session reuse, retirement, cancellation, and direct-load costs are verified. The suite covers clean reuse after rollback, concurrent/closed use refusal, server disconnect, and interrupted COPY with no active loader after cleanup. The 100k/1m-row benchmark measured 150/1791 ms load time and 220,936/220,832 bytes maximum GHC heap residency on aarch64-darwin with GHC 9.12.4 and PostgreSQL 18.6.
 
 
 ## Surprises & Discoveries
+
+`postgresql-libpq` was absent from the local Mori registry. Hackage's current 0.11.0.0 revision and the upstream `v0.11.0.0` release tag agreed, so the package bounds use `>=0.11 && <0.12`; the released source was inspected before adapting its nonblocking query/COPY calls. Multi-result SQL can otherwise retain a large SELECT result even when the caller discards it, so the adapter requests single-row mode immediately after dispatch and drains each result. Bundle verification before mutation is supplemented by a second SQL digest check immediately before dispatch and an incremental CSV digest check during transfer.
+
+Haddock builds the public library HTML with 100% symbol coverage for the exposed PostgreSQL modules. The core package's separate Haddock coverage remains an improvement opportunity.
 
 
 ## Decision Log
@@ -63,6 +72,8 @@ A caller can load a compiled fixture plan into its existing migrated PostgreSQL 
 
 
 ## Outcomes & Retrospective
+
+The `hinagata-postgres` package loads a frozen plan into an existing migrated database through one exclusive, nonblocking native connection and one transaction. It returns secret-safe staged failures, retires ambiguous sessions, and reports verified bytes and stage timings. `just check` passed core and PostgreSQL package tests, formatting, both source distributions, and local aarch64-darwin Nix checks; `cabal haddock hinagata-postgres --haddock-internal` generated HTML. The socket-only and explicit TCP integration suites passed separately. The benchmark results above are an initial local baseline, not a cross-machine performance target. Mori registration now lists `mori://shinzui/hinagata/packages/hinagata-postgres`.
 
 
 ## Context and Orientation

@@ -24,5 +24,12 @@ in  Schema.Project::{
         , path = Some "hinagata-core"
         , description = Some "Pure fixture planning, validated identifiers, and connection descriptions"
         }
+      , Schema.Package::{
+        , name = "hinagata-postgres"
+        , type = Schema.PackageType.Library
+        , language = Schema.Language.Haskell
+        , path = Some "hinagata-postgres"
+        , description = Some "Atomic fixture loading over private PostgreSQL sessions"
+        }
       ]
     }

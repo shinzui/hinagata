@@ -15,6 +15,7 @@ data SqlPolicyError
   = ForbiddenStatement !Text
   | PsqlCommand
   | UnterminatedSqlLiteral !Text
+  | SqlContainsNul
   deriving stock (Eq, Show)
 
 data Prefix = AfterStart | AfterPrepare
@@ -23,7 +24,9 @@ data Prefix = AfterStart | AfterPrepare
 -- | A lexical policy check for trusted SQL, not a PostgreSQL parser. The
 -- caller executes the original bytes unchanged after this preflight.
 checkSqlPolicy :: ByteString -> Either SqlPolicyError ()
-checkSqlPolicy = scan True True Nothing . ByteString.unpack
+checkSqlPolicy bytes
+  | ByteString.elem '\0' bytes = Left SqlContainsNul
+  | otherwise = scan True True Nothing (ByteString.unpack bytes)
 
 scan :: Bool -> Bool -> Maybe Prefix -> String -> Either SqlPolicyError ()
 scan _ _ _ [] = Right ()

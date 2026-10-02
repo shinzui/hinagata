@@ -10,7 +10,7 @@ Small scenarios and large bulk datasets both matter. Per-row INSERTs, subprocess
 
 ## Decision
 
-Compile deterministic graphs into immutable local bundles. Execute SQL and explicit CSV COPY in order within one transaction on one exclusive native connection. Use `postgresql-libpq` behind a private adapter with Hinagata-owned public endpoint types. Bound buffers and SQL step size, drain results, discard uncertain connections, and prevent handles escaping their resource lifetime.
+Compile deterministic graphs into immutable local bundles. Execute SQL and explicit CSV COPY in order within one transaction on one exclusive native connection. Use `postgresql-libpq` behind a private adapter with Hinagata-owned public endpoint types. Bound buffers and SQL step size, request single-row results for SQL commands, drain every result including the final COPY and COMMIT results, discard uncertain connections, and prevent handles escaping their resource lifetime. Keep all protocol operations under one session gate. Cancellation requests are best-effort and bounded; closing an interrupted connection forces PostgreSQL to roll back the uncommitted transaction. A failed ROLLBACK or ambiguous COMMIT retires the session.
 
 ## Consequences
 

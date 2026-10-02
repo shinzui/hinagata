@@ -7,6 +7,7 @@ module Hinagata.Fixture.Bundle
     planDigest,
     planDirectory,
     planFixtures,
+    verifyPlan,
     compileFixtures,
     CompositionError (..),
     CapturedFixtureRef (..),
@@ -107,6 +108,12 @@ planDirectory FixturePlan {directory} = directory
 
 planFixtures :: FixturePlan -> [CapturedFixture]
 planFixtures FixturePlan {fixtures} = fixtures
+
+-- | Recheck a frozen bundle before a database load uses it. A cached plan is
+-- reusable in process, but on-disk bundle bytes may have changed meanwhile.
+verifyPlan :: FixturePlan -> IO Bool
+verifyPlan FixturePlan {directory, digest, fixtures} =
+  verifyBundle directory (strictBuilder (manifestEncoding digest fixtures)) fixtures
 
 data CompositionError = ConflictingFixture !FixtureName
   deriving stock (Eq, Show)

@@ -91,6 +91,7 @@ regressionTests = do
   assert "dollar function body is opaque" (checkSqlPolicy (ByteString.pack "CREATE FUNCTION f() RETURNS void AS $$ BEGIN; COPY x FROM STDIN; END; $$ LANGUAGE plpgsql;") == Right ())
   assert "escape string is opaque" (checkSqlPolicy (ByteString.pack "SELECT E'abc\\'; COPY x FROM STDIN';") == Right ())
   assert "psql command rejected" (checkSqlPolicy (ByteString.pack "  \\i fixture.sql") == Left PsqlCommand)
+  assert "NUL SQL rejected before libpq truncation" (checkSqlPolicy (ByteString.pack "SELECT 1;\0DELETE FROM users") == Left SqlContainsNul)
   assert "PREPARE TRANSACTION rejected" (checkSqlPolicy (ByteString.pack "PREPARE TRANSACTION 'x'") == Left (ForbiddenStatement "TRANSACTION"))
   assert "SQL PREPARE remains allowed" (checkSqlPolicy (ByteString.pack "PREPARE q AS SELECT 1") == Right ())
   assert
