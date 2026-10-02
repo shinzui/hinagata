@@ -269,6 +269,7 @@ crashLeaseWorker fixtureRoot bundleRoot mode readyFile = do
       fail "crash worker reached normal baseline completion"
     "intent" -> runLease specification bundleConfig
     "created" -> runLease specification bundleConfig
+    "binding" -> runLease specification bundleConfig
     "drop" -> runLease specification bundleConfig
     "handoff" -> runLease specification bundleConfig
     "loading" -> runLease specification bundleConfig
@@ -695,9 +696,67 @@ processCrashTests configuration baselineSpec connection fixtureRoot bundleRoot =
   runBuilderCase executable
   runUnboundCase executable "intent" "LOCK TABLE pg_database IN SHARE ROW EXCLUSIVE MODE" "CREATE DATABASE %" False
   runUnboundCase executable "created" "LOCK TABLE pg_shdescription IN SHARE ROW EXCLUSIVE MODE" "COMMENT ON DATABASE %" True
+  runBindingCase executable
   runDropCase executable
   mapM_ (runCase executable) ["loading", "handoff"]
   where
+    runBindingCase executable = do
+      before <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations"
+      let command = proc executable ["--crash-lease-worker", fixtureRoot, bundleRoot, "binding", bundleRoot </> "crash-binding.ready"]
+      bracket
+        ( do
+            execCheck connection "CREATE FUNCTION hinagata_test.pause_clone_binding() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(30); RETURN NEW; END $$"
+            execCheck connection "CREATE TRIGGER pause_clone_binding BEFORE UPDATE ON hinagata_test.allocations FOR EACH ROW WHEN (OLD.state = 'Allocating' AND NEW.state = 'Loading') EXECUTE FUNCTION hinagata_test.pause_clone_binding()"
+        )
+        ( \_ -> do
+            execCheck connection "DROP TRIGGER pause_clone_binding ON hinagata_test.allocations"
+            execCheck connection "DROP FUNCTION hinagata_test.pause_clone_binding()"
+        )
+        ( \_ -> withCreateProcess command $ \_ _ _ child -> do
+            (identifier, database, serverPid) <- waitForChild child $ do
+              count <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations"
+              if count <= before
+                then pure Nothing
+                else do
+                  identifierBytes <- queryText connection "SELECT id FROM hinagata_test.allocations ORDER BY created_at DESC LIMIT 1"
+                  let identifier = Encoding.decodeUtf8 identifierBytes
+                      allocationSql suffix = Encoding.encodeUtf8 ("SELECT " <> suffix <> " FROM hinagata_test.allocations WHERE id = '" <> identifier <> "'")
+                  state <- queryText connection (allocationSql "state")
+                  marker <- queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database d JOIN pg_shdescription s ON s.objoid = d.oid AND s.classoid = 'pg_database'::regclass JOIN hinagata_test.allocations a ON a.database_name = d.datname WHERE a.id = '" <> identifier <> "' AND s.description = 'hinagata:v1:' || (SELECT cluster_uuid::text FROM hinagata_test.meta) || ':' || a.ownership_token::text"))
+                  if state /= "Allocating" || marker /= 1
+                    then pure Nothing
+                    else do
+                      generation <- queryText connection (allocationSql "generation_id")
+                      let key = "generation:" <> Encoding.decodeUtf8 generation
+                          backendSql prefix = Encoding.encodeUtf8 ("SELECT " <> prefix <> " FROM pg_locks WHERE locktype = 'advisory' AND classid = 1212761905::oid AND objid = hashtext('" <> key <> "')::oid AND granted AND pid <> pg_backend_pid()")
+                      holders <- queryInt connection (backendSql "count(*)")
+                      if holders == 0
+                        then pure Nothing
+                        else do
+                          serverPid <- queryInt connection (backendSql "pid" <> " LIMIT 1")
+                          sleeping <- queryInt connection (ByteString.pack ("SELECT count(*) FROM pg_stat_activity WHERE pid = " ++ show serverPid ++ " AND wait_event = 'PgSleep'"))
+                          if sleeping == 1
+                            then do
+                              database <- Encoding.decodeUtf8 <$> queryText connection (allocationSql "database_name::text")
+                              pure (Just (identifier, database, serverPid))
+                            else pure Nothing
+            processId <- maybe (fail "binding worker has no process ID") pure =<< getPid child
+            signalProcess sigKILL processId
+            ended <- timeout 10000000 (waitForProcess child)
+            assert "killed marker-binding worker exits abnormally" (case ended of Just ExitSuccess -> False; Just (ExitFailure _) -> True; Nothing -> False)
+            activeBackend <- queryInt connection (ByteString.pack ("SELECT count(*) FROM pg_stat_activity WHERE pid = " ++ show serverPid))
+            when (activeBackend > 0) (void (queryText connection (ByteString.pack ("SELECT pg_terminate_backend(" ++ show serverPid ++ ")::text"))))
+            waitForBackendGone "binding" serverPid
+            candidates <- orFail =<< planCleanup configuration
+            candidate <- maybe (fail "marker-bound allocation is absent from cleanup preview") pure (find (\item -> allocationId item == identifier) candidates)
+            assert "marker exists but catalog identity remains unbound" (state candidate == "Allocating" && disposition candidate == Ambiguous)
+            assert "marker-binding crash leaves its OID unbound" =<< ((== 1) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM hinagata_test.allocations WHERE id = '" <> identifier <> "' AND database_oid IS NULL")))
+            assert "marker-bound database survives worker death" =<< ((== 1) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> database <> "'")))
+            refused <- applyCleanup configuration OrphansOnly [identifier]
+            assert "cleanup refuses a marker-only allocation without an OID" (refused == Right [Refused identifier "allocation has no bound database OID"])
+            assert "refused marker-only cleanup leaves the database present" =<< ((== 1) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> database <> "'")))
+        )
+
     runDropCase executable = do
       let readyFile = bundleRoot </> "crash-drop.ready"
           command = proc executable ["--crash-lease-worker", fixtureRoot, bundleRoot, "drop", readyFile]
