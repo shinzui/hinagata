@@ -43,7 +43,7 @@ if [[ "$mode" == --tcp ]]; then
   listen_addresses=127.0.0.1
   export HINAGATA_TEST_TCP=1
 fi
-pg_ctl -D "$root/data" -l "$root/postgres.log" -o "-k '$socket' -p $port -c listen_addresses='$listen_addresses'" -w start >/dev/null
+pg_ctl -D "$root/data" -l "$root/postgres.log" -o "-k '$socket' -p $port -c listen_addresses='$listen_addresses' -c max_prepared_transactions=10" -w start >/dev/null
 createdb -h "$socket" -p "$port" hinagata_test
 
 export HINAGATA_TEST_PGHOST="$socket"

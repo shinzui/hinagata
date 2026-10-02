@@ -879,6 +879,23 @@ retentionLifecycleTests lifecycleConfig firstRef scenarioPlan connection catalog
   assert "released lease remains inspectable by ID" (case releasedInspection of Right (Just CleanupCandidate {state = "Released", disposition = Missing}) -> True; _ -> False)
   detachedReRelease <- releaseLease lifecycleConfig detachedId
   assert "detached release by lease ID is idempotent" (case detachedReRelease of Right (AlreadyReleased _) -> True; _ -> False)
+  dropBlockedInfo <- orFail =<< acquireDetached lifecycleConfig firstRef scenarioPlan
+  let LeaseInfo {leaseId = dropBlockedId, applicationTarget = dropBlockedTarget} = dropBlockedInfo
+      preparedGid = "hinagata-drop-" <> dropBlockedId
+      preparedConnectionString = Encoding.encodeUtf8 (connectionStringText (renderConnectionString dropBlockedTarget))
+      dropBlockedDatabase = databaseNameText (connectionDatabase dropBlockedTarget)
+  bracket (PQ.connectdb preparedConnectionString) PQ.finish $ \preparedConnection -> do
+    execCheck preparedConnection "BEGIN"
+    execCheck preparedConnection "INSERT INTO items (id, note) VALUES (123456, 'prepared drop blocker')"
+    execCheck preparedConnection (Encoding.encodeUtf8 ("PREPARE TRANSACTION '" <> preparedGid <> "'"))
+  blockedRelease <- releaseLease lifecycleConfig dropBlockedId
+  assert "prepared transaction makes force drop fail" (case blockedRelease of Left _ -> True; _ -> False)
+  assert "failed drop retains its database" =<< ((== 1) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> dropBlockedDatabase <> "'")))
+  assert "failed drop records state and diagnostic" =<< ((== 1) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM hinagata_test.allocations a JOIN hinagata_test.leases l ON l.allocation_id = a.id WHERE l.id = '" <> dropBlockedId <> "' AND a.state = 'CleanupFailed' AND l.state = 'CleanupFailed' AND length(a.last_error) > 0")))
+  bracket (PQ.connectdb preparedConnectionString) PQ.finish $ \preparedConnection ->
+    execCheck preparedConnection (Encoding.encodeUtf8 ("ROLLBACK PREPARED '" <> preparedGid <> "'"))
+  retriedRelease <- releaseLease lifecycleConfig dropBlockedId
+  assert "failed drop can be retried after its blocker is cleared" (case retriedRelease of Right (Released _) -> True; _ -> False)
   thrownInfo <- newEmptyMVar
   classifiedThrown <- try @SomeException (withDatabaseClassified lifecycleConfig firstRef scenarioPlan PreserveFailures (const False) (\info -> putMVar thrownInfo info >> fail "intentional classified exception"))
   assert "classified callback exception keeps its original exception" (case classifiedThrown of Left _ -> True; Right _ -> False)

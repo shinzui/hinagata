@@ -97,6 +97,8 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 2026-10-02 unbound-allocation progress: Disposable-cluster socket and TCP tests kill a worker with a committed Allocating record while `CREATE DATABASE` is blocked, and after `CREATE DATABASE` completes while `COMMENT ON DATABASE` is blocked. Both records remain Ambiguous after the worker and its server backend exit. Explicit orphan cleanup refuses the unbound identity and does not delete a database; the second case verifies the newly created database remains. Marker binding, seal, publication, and DROP process-kill boundaries remain open.
 
+2026-10-02 drop-failure progress: The disposable PostgreSQL test cluster enables prepared transactions solely for fault injection. A prepared transaction in a detached clone makes `releaseLease` fail at `DROP DATABASE ... WITH (FORCE)`; the clone remains present and its allocation and lease become CleanupFailed with a stored diagnostic. Rolling back the prepared transaction permits an explicit release retry. The socket and TCP suites and `just check` pass.
+
 2026-10-02 warm-concurrency progress: Eight simultaneous direct lease callers now reach their callbacks with eight distinct writable databases while the observer holds a compatible shared generation lock. All eight release cleanly. This proves Hinagata does not require an exclusive generation lock for warm allocation; a measured overlap of the PostgreSQL CREATE DATABASE statements themselves remains open.
 
 
