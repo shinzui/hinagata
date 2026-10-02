@@ -267,6 +267,8 @@ crashLeaseWorker fixtureRoot bundleRoot mode readyFile = do
       let blockedHook _ = writeReady readyFile "building" >> threadDelay 60000000 >> pure (Right ())
       _ <- ensureBaseline specification {migrationRevision = Just "migration-process-crash", migrationHook = blockedHook}
       fail "crash worker reached normal baseline completion"
+    "sealing" -> buildAtPublication specification "migration-seal-crash" False
+    "published" -> buildAtPublication specification "migration-published-crash" True
     "intent" -> runLease specification bundleConfig
     "created" -> runLease specification bundleConfig
     "binding" -> runLease specification bundleConfig
@@ -275,6 +277,23 @@ crashLeaseWorker fixtureRoot bundleRoot mode readyFile = do
     "loading" -> runLease specification bundleConfig
     _ -> fail "unknown crash-worker phase"
   where
+    buildAtPublication specification revision reportReady = do
+      let migrate target = do
+            migrated <- PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString target)))
+            execCheck migrated "CREATE TABLE items (id integer PRIMARY KEY, note text NOT NULL)"
+            execCheck migrated "GRANT SELECT, INSERT ON items TO hinagata_app"
+            PQ.finish migrated
+            pure (Right ())
+          verify target = do
+            verified <- PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString target)))
+            count <- queryInt verified "SELECT count(*) FROM items"
+            PQ.finish verified
+            pure (if count == 2 then Right () else Left "unexpected baseline rows")
+      (baseline, report) <- orFail =<< ensureBaseline specification {migrationRevision = Just revision, migrationHook = migrate, verificationHook = verify}
+      assert "publication worker built a new baseline" (kind report == Built)
+      when reportReady (writeReady readyFile (Encoding.encodeUtf8 (databaseNameText (baselineDatabase baseline))))
+      threadDelay 60000000
+
     runLease specification bundleConfig = do
       (baseline, report) <- orFail =<< ensureBaseline specification
       assert "crash worker reuses the existing sealed baseline" (kind report == Reused)
@@ -694,12 +713,80 @@ processCrashTests configuration baselineSpec connection fixtureRoot bundleRoot =
   ByteString.writeFile (slowDirectory </> "fixture.sql") "SELECT pg_sleep(30);"
   executable <- getExecutablePath
   runBuilderCase executable
+  runSealCase executable
+  runPublishedCase executable
   runUnboundCase executable "intent" "LOCK TABLE pg_database IN SHARE ROW EXCLUSIVE MODE" "CREATE DATABASE %" False
   runUnboundCase executable "created" "LOCK TABLE pg_shdescription IN SHARE ROW EXCLUSIVE MODE" "COMMENT ON DATABASE %" True
   runBindingCase executable
   runDropCase executable
   mapM_ (runCase executable) ["loading", "handoff"]
   where
+    runSealCase executable = do
+      let revision = "migration-seal-crash"
+          readyFile = bundleRoot </> "crash-sealing.ready"
+          command = proc executable ["--crash-lease-worker", fixtureRoot, bundleRoot, "sealing", readyFile]
+          generationSql prefix = Encoding.encodeUtf8 ("SELECT " <> prefix <> " FROM hinagata_test.generations WHERE fingerprint_manifest->>'manifest' LIKE '%" <> revision <> "%' ORDER BY created_at DESC LIMIT 1")
+      crashedDatabase <-
+        bracket
+          ( do
+              execCheck connection "CREATE FUNCTION hinagata_test.pause_generation_publication() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(30); RETURN NEW; END $$"
+              execCheck connection "CREATE TRIGGER pause_generation_publication BEFORE UPDATE ON hinagata_test.generations FOR EACH ROW WHEN (OLD.state = 'Building' AND NEW.state = 'Ready') EXECUTE FUNCTION hinagata_test.pause_generation_publication()"
+          )
+          ( \_ -> do
+              execCheck connection "DROP TRIGGER pause_generation_publication ON hinagata_test.generations"
+              execCheck connection "DROP FUNCTION hinagata_test.pause_generation_publication()"
+          )
+          ( \_ -> withCreateProcess command $ \_ _ _ child -> do
+              (database, serverPid) <- waitForChild child $ do
+                rows <- queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM hinagata_test.generations WHERE fingerprint_manifest->>'manifest' LIKE '%" <> revision <> "%'"))
+                if rows == 0
+                  then pure Nothing
+                  else do
+                    state <- queryText connection (generationSql "state")
+                    database <- Encoding.decodeUtf8 <$> queryText connection (generationSql "database_name::text")
+                    sealed <- queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> database <> "' AND NOT datallowconn"))
+                    sleeping <- queryInt connection "SELECT count(*) FROM pg_stat_activity WHERE query LIKE 'UPDATE %generations%' AND wait_event = 'PgSleep' AND pid <> pg_backend_pid()"
+                    if state == "Building" && sealed == 1 && sleeping == 1
+                      then do
+                        serverPid <- queryInt connection "SELECT pid FROM pg_stat_activity WHERE query LIKE 'UPDATE %generations%' AND wait_event = 'PgSleep' AND pid <> pg_backend_pid() LIMIT 1"
+                        pure (Just (database, serverPid))
+                      else pure Nothing
+              processId <- maybe (fail "sealing worker has no process ID") pure =<< getPid child
+              signalProcess sigKILL processId
+              ended <- timeout 10000000 (waitForProcess child)
+              assert "killed sealing worker exits abnormally" (case ended of Just ExitSuccess -> False; Just (ExitFailure _) -> True; Nothing -> False)
+              activeBackend <- queryInt connection (ByteString.pack ("SELECT count(*) FROM pg_stat_activity WHERE pid = " ++ show serverPid))
+              when (activeBackend > 0) (void (queryText connection (ByteString.pack ("SELECT pg_terminate_backend(" ++ show serverPid ++ ")::text"))))
+              waitForBackendGone "sealing" serverPid
+              pure database
+          )
+      interrupted <- queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM hinagata_test.generations WHERE fingerprint_manifest->>'manifest' LIKE '%" <> revision <> "%' AND state = 'Building'"))
+      assert "sealed generation remains unpublished after process death" (interrupted == 1)
+      rebuilt <- ensureBaseline baselineSpec {migrationRevision = Just revision}
+      assert "caller rebuilds after seal-to-publication crash" (case rebuilt of Right (_, report) -> kind report == Built; Left _ -> False)
+      failed <- queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM hinagata_test.generations WHERE fingerprint_manifest->>'manifest' LIKE '%" <> revision <> "%' AND state = 'Failed'"))
+      ready <- queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM hinagata_test.generations WHERE fingerprint_manifest->>'manifest' LIKE '%" <> revision <> "%' AND state = 'Ready'"))
+      oldSealed <- queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> crashedDatabase <> "' AND NOT datallowconn"))
+      assert "interrupted sealed database remains inspectable while one replacement is ready" (failed == 1 && ready == 1 && oldSealed == 1)
+
+    runPublishedCase executable = do
+      let revision = "migration-published-crash"
+          readyFile = bundleRoot </> "crash-published.ready"
+          command = proc executable ["--crash-lease-worker", fixtureRoot, bundleRoot, "published", readyFile]
+      withCreateProcess command $ \_ _ _ child -> do
+        database <- waitForChild child $ do
+          exists <- doesFileExist readyFile
+          if exists then Just . Encoding.decodeUtf8 <$> ByteString.readFile readyFile else pure Nothing
+        ready <- queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM hinagata_test.generations WHERE database_name = '" <> database <> "' AND state = 'Ready'"))
+        sealed <- queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> database <> "' AND NOT datallowconn"))
+        assert "published worker left one sealed ready generation" (ready == 1 && sealed == 1)
+        processId <- maybe (fail "published worker has no process ID") pure =<< getPid child
+        signalProcess sigKILL processId
+        ended <- timeout 10000000 (waitForProcess child)
+        assert "killed published worker exits abnormally" (case ended of Just ExitSuccess -> False; Just (ExitFailure _) -> True; Nothing -> False)
+        reused <- ensureBaseline baselineSpec {migrationRevision = Just revision}
+        assert "ready generation survives publisher process death and is reused" (case reused of Right (baseline, report) -> kind report == Reused && databaseNameText (baselineDatabase baseline) == database; Left _ -> False)
+
     runBindingCase executable = do
       before <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations"
       let command = proc executable ["--crash-lease-worker", fixtureRoot, bundleRoot, "binding", bundleRoot </> "crash-binding.ready"]
