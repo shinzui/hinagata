@@ -107,6 +107,8 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 2026-10-02 bulk-baseline progress: `nix develop -c just test-postgres-bulk` runs a disposable socket-cluster acceptance case in addition to the normal integration suite. It streams a million-row CSV into one sealed baseline, verifies a second ensure call reuses that generation without rerunning migration, and acquires two clones with the full row count. The source fixture has a primary key, so replaying COPY into either clone would fail. Eight concurrent acquisitions of that baseline finish with distinct databases and explicit release; this run observed `max_active_create=8`. Changing the first CSV payload selects a distinct generation with a BaseFixtures explanation, runs migration once more, and exposes the changed value in a new clone. The dedicated run, normal TCP suite, and `just check` pass.
 
+2026-10-02 CREATEDB diagnostic progress: In the disposable cluster, a login role with maintenance-database CONNECT/CREATE rights but no CREATEDB privilege initializes its own catalog, then receives a typed baseline error with SQLSTATE 42501 when `CREATE DATABASE` is attempted. Its generation is recorded Failed with a bounded diagnostic, no bound OID, and no database. Socket and TCP integration suites and `just check` pass.
+
 
 ## Surprises & Discoveries
 

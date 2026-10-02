@@ -549,7 +549,19 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   retentionLifecycleTests lifecycleConfig firstRef scenarioPlan connection catalog
   bulkRequested <- (== Just "1") <$> lookupEnv "HINAGATA_TEST_BULK_BASELINE"
   when bulkRequested (bulkBaselineTests lifecycleConfig fixtureRoot bundleRoot connection)
+  missingCreatedbTests lifecycleConfig baselineSpec connection database
   generationLifecycleTests lifecycleConfig baselineSpec firstRef scenarioPlan fixtureRoot bundleRoot connection migrationCalls messageSetting target catalogSchema
+
+missingCreatedbTests :: HinagataConfig -> BaselineSpec -> PQ.Connection -> DatabaseName -> IO ()
+missingCreatedbTests configuration specification observer database = do
+  execCheck observer "CREATE ROLE hinagata_no_createdb LOGIN NOCREATEDB"
+  execCheck observer (Encoding.encodeUtf8 ("GRANT CONNECT, CREATE ON DATABASE \"" <> databaseNameText database <> "\" TO hinagata_no_createdb"))
+  schema <- orFail (mkSqlIdentifier "hinagata_no_createdb_test")
+  projectId <- orFail (mkProjectId "no-createdb-test")
+  let noCreatedbConfig = configuration {maintenanceSchema = schema, project = projectId, administration = AccessConfig "hinagata_no_createdb" database Nothing}
+  denied <- ensureBaseline specification {configuration = noCreatedbConfig, migrationRevision = Just "migration-no-createdb"}
+  assert "administration role without CREATEDB gets a typed permission diagnostic" (case denied of Left BaselineError {cause = "administration role lacks CREATEDB or template access", sqlState = Just "42501"} -> True; _ -> False)
+  assert "denied baseline remains Failed with no created database" =<< ((== 1) <$> queryInt observer "SELECT count(*) FROM hinagata_no_createdb_test.generations g LEFT JOIN pg_database d ON d.datname = g.database_name WHERE g.state = 'Failed' AND g.database_oid IS NULL AND d.oid IS NULL AND g.last_error = 'administration role lacks CREATEDB or template access'")
 
 bulkBaselineTests :: HinagataConfig -> FilePath -> FilePath -> PQ.Connection -> IO ()
 bulkBaselineTests configuration fixtureRoot bundleRoot observer = do
