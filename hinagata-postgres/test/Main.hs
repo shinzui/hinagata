@@ -530,6 +530,19 @@ cleanupLifecycleTests lifecycleConfig catalog firstRef scenarioPlan connection d
   putMVar releaseLive ()
   liveResult <- timeout 10000000 (takeMVar liveFinished)
   assert "live callback releases normally after cleanup skips it" (case liveResult of Just (Right (Right _)) -> True; _ -> False)
+  lostOwner <- withDatabase lifecycleConfig firstRef scenarioPlan $ \info@LeaseInfo {leaseId = lostLease} -> do
+    let key = "lease:" <> lostLease
+        statement = Encoding.encodeUtf8 ("SELECT pg_terminate_backend(pid)::text FROM pg_locks WHERE locktype = 'advisory' AND classid = 1212761905::oid AND objid = hashtext('" <> key <> "')::oid AND granted AND pid <> pg_backend_pid()")
+    terminated <- queryText connection statement
+    assert "lost-owner test terminates the held maintenance lock" (terminated == "true")
+    pure info
+  assert "lease scope reports loss of its owning maintenance session" (case lostOwner of Left _ -> True; Right _ -> False)
+  lostCandidates <- orFail =<< planCleanup lifecycleConfig
+  lostCandidate <- case [candidate | candidate@CleanupCandidate {state = "Active", disposition = Orphaned} <- lostCandidates] of
+    [candidate] -> pure candidate
+    _ -> fail "lost-owner allocation was not classified orphaned"
+  recoveredOwner <- applyCleanup lifecycleConfig OrphansOnly [allocationId lostCandidate]
+  assert "lost-owner clone requires explicit ownership-checked release" (recoveredOwner == Right [Released (allocationId lostCandidate)])
   let retainedId = "44444444-4444-4444-8444-444444444444"
       retainedLease = "55555555-5555-4555-8555-555555555555"
       retainedDatabase = "hinagata_cleanup_retained"

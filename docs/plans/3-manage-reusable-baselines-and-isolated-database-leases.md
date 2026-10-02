@@ -89,6 +89,8 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 2026-10-02 catalog upgrade progress: New catalogs use format 2 with nullable generation/allocation failure diagnostics. `ensureCatalog` upgrades an owned format-1 schema under the existing bootstrap transaction and advisory lock, preserving its UUID and records; `inspectCatalog` asks the caller to perform the upgrade while remaining read-only. Disposable-cluster socket and TCP tests create a real format-1 schema, verify refusal before upgrade, then verify format-2 identity and columns afterward. A deliberately failing second upgrade statement proves that the first DDL change rolls back and the catalog remains at format 1. Failed generation builds, interrupted builders, and failed clone drops now retain generic diagnostics. Allocation-boundary process kills remain in the third milestone.
 
+2026-10-02 lost-session evidence: A disposable-cluster test terminates the maintenance backend holding a handed-off lease lock. Callback completion reports failure instead of claiming release; the allocation remains inspectable as an orphan and requires explicit ownership-checked apply. This covers detection at completion, not immediate interruption of a still-running callback. Process-kill tests at allocation boundaries and loss detection during callback execution remain open.
+
 
 ## Surprises & Discoveries
 
