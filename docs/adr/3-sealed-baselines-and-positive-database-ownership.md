@@ -10,6 +10,8 @@ Amended: 2026-10-02 (role-owned database settings during generation preparation)
 
 Amended: 2026-10-02 (read-only cleanup inspection and per-ID locked revalidation)
 
+Amended: 2026-10-02 (classified callback outcomes and explicit retained release)
+
 ## Context
 
 Reuse must not silently test stale migrations or share scenario state. CREATE/DROP DATABASE are nontransactional, and copying a template requires no connected sessions.
@@ -24,6 +26,8 @@ Only positively identified owned databases may be removed. Borrowed/protected ta
 
 Cleanup preview validates an existing catalog without creating one and reads candidates in bounded pages. Apply selects concrete allocation IDs, takes their generation lock exclusively, then checks the lease lock and current database identity again; preview results are never deletion authority. A missing bound database can be marked released idempotently, while an allocation without a bound OID remains ambiguous even if its name exists.
 PostgreSQL's [`DROP DATABASE` reference](https://www.postgresql.org/docs/18/sql-dropdatabase.html) limits `FORCE`: prepared transactions, active logical replication slots, and subscriptions can still block removal. Hinagata leaves such records inspectable as cleanup failures.
+
+A caller-supplied classifier identifies failure values without changing them. The policy may preserve those values or thrown callback failures; detached acquisition records a retained clone after setup. Both are released by explicit lease ID, with the same lock and positive-ownership checks as orphan cleanup. Cleanup diagnostics accompany returned values separately, while a thrown callback keeps its original exception.
 
 ## Consequences
 

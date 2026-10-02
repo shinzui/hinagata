@@ -4,6 +4,8 @@ module Hinagata.Postgres.Manager
     DatabaseRequest (..),
     withManager,
     withManagedDatabase,
+    withManagedDatabaseClassified,
+    acquireManagedDetached,
     withDatabases,
   )
 where
@@ -20,7 +22,7 @@ import GHC.Clock (getMonotonicTimeNSec)
 import Hinagata.Config
 import Hinagata.Fixture.Bundle (FixturePlan)
 import Hinagata.Postgres.Baseline (BaselineRef)
-import Hinagata.Postgres.Lease (LeaseError (..), LeaseInfo, withDatabase)
+import Hinagata.Postgres.Lease (LeaseError (..), LeaseInfo, LeaseOutcome (..), RetentionPolicy (..), withDatabase, withDatabaseClassified)
 import Hinagata.Prelude
 import Hinagata.Types (mkPositive, positiveValue)
 import System.Timeout (timeout)
@@ -79,6 +81,23 @@ withManagedDatabase manager baseline scenario callback = do
   expiry <- acquisitionExpiry manager
   withPermitUntil (activeGate manager) 1 expiry (withSetupUntil manager expiry baseline scenario callback)
 
+-- | Apply the same admission limits to a result-classified callback.
+withManagedDatabaseClassified :: Manager -> BaselineRef -> FixturePlan -> RetentionPolicy -> (a -> Bool) -> (LeaseInfo -> IO a) -> IO (Either LeaseError (LeaseOutcome a))
+withManagedDatabaseClassified manager baseline scenario policy classifyResult callback = do
+  expiry <- acquisitionExpiry manager
+  withPermitUntil (activeGate manager) 1 expiry $
+    withSetupUsing manager expiry (\configuration handoff -> withDatabaseClassified configuration baseline scenario policy classifyResult handoff) callback
+
+-- | Acquire a detached clone through manager admission, freeing active
+-- capacity once its retained identity has been recorded.
+acquireManagedDetached :: Manager -> BaselineRef -> FixturePlan -> IO (Either LeaseError LeaseInfo)
+acquireManagedDetached manager baseline scenario = do
+  completed <- withManagedDatabaseClassified manager baseline scenario DetachAlways (const False) pure
+  pure $ case completed of
+    Left problem -> Left problem
+    Right LeaseOutcome {cleanupDiagnostic = Just problem} -> Left problem
+    Right LeaseOutcome {leaseInfo} -> Right leaseInfo
+
 -- | Reserve capacity for the whole named set, acquire in name order, and
 -- unwind earlier clones if any later acquisition fails. The callback receives
 -- names paired with application endpoints in that same stable order.
@@ -101,7 +120,11 @@ withDatabases manager requests callback = do
     duplicateNames _ = False
 
 withSetupUntil :: Manager -> Word64 -> BaselineRef -> FixturePlan -> (LeaseInfo -> IO a) -> IO (Either LeaseError a)
-withSetupUntil Manager {configuration, setupGate} expiry baseline scenario callback = mask $ \restore -> do
+withSetupUntil manager expiry baseline scenario =
+  withSetupUsing manager expiry (\configuration handoff -> withDatabase configuration baseline scenario handoff)
+
+withSetupUsing :: Manager -> Word64 -> (HinagataConfig -> (LeaseInfo -> IO a) -> IO (Either LeaseError b)) -> (LeaseInfo -> IO a) -> IO (Either LeaseError b)
+withSetupUsing Manager {configuration, setupGate} expiry runner callback = mask $ \restore -> do
   admitted <- acquireUntil setupGate 1 expiry
   case admitted of
     Left problem -> pure (Left problem)
@@ -116,7 +139,7 @@ withSetupUntil Manager {configuration, setupGate} expiry baseline scenario callb
         Just milliseconds -> case mkPositive "acquisition deadline" milliseconds of
           Left _ -> releaseOnce >> pure (Left (admissionError "acquisition deadline is invalid"))
           Right budget ->
-            restore (withDatabase configuration {acquisitionDeadlineMs = budget} baseline scenario (\info -> releaseOnce >> callback info)) `finally` releaseOnce
+            restore (runner (configuration {acquisitionDeadlineMs = budget}) (\info -> releaseOnce >> callback info)) `finally` releaseOnce
 
 withPermitUntil :: Gate -> Int -> Word64 -> IO (Either LeaseError a) -> IO (Either LeaseError a)
 withPermitUntil gate amount expiry action = mask $ \restore -> do

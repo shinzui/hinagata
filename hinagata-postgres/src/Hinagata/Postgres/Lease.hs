@@ -2,11 +2,16 @@
 module Hinagata.Postgres.Lease
   ( LeaseInfo (..),
     LeaseError (..),
+    RetentionPolicy (..),
+    LeaseDisposition (..),
+    LeaseOutcome (..),
     withDatabase,
+    withDatabaseClassified,
+    acquireDetached,
   )
 where
 
-import Control.Exception (IOException, SomeException, mask, throwIO, try)
+import Control.Exception (IOException, SomeException, evaluate, mask, throwIO, try)
 import Data.Bifunctor (first)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Encoding
@@ -41,6 +46,25 @@ data LeaseError = LeaseError
   }
   deriving stock (Eq, Show)
 
+-- | What to do after the consumer returns a classified failure or throws.
+-- A detached acquisition always keeps its clone until explicit release.
+data RetentionPolicy = ReleaseAlways | PreserveFailures | DetachAlways
+  deriving stock (Eq, Show)
+
+-- | Catalog state after the callback scope exits.
+data LeaseDisposition = LeaseReleased | LeasePreserved | LeaseDetached | LeaseCleanupFailed
+  deriving stock (Eq, Show)
+
+-- | Keep the callback value unchanged while reporting release or retention
+-- separately. Setup failures still return 'Left' before a callback runs.
+data LeaseOutcome a = LeaseOutcome
+  { callbackValue :: !a,
+    leaseInfo :: !LeaseInfo,
+    leaseDisposition :: !LeaseDisposition,
+    cleanupDiagnostic :: !(Maybe LeaseError)
+  }
+  deriving stock (Eq, Show)
+
 data Clone = Clone
   { allocationId :: !Text,
     cloneLeaseId :: !Text,
@@ -54,6 +78,17 @@ data Clone = Clone
 -- allocations remain in the catalog for explicit recovery.
 withDatabase :: HinagataConfig -> BaselineRef -> FixturePlan -> (LeaseInfo -> IO a) -> IO (Either LeaseError a)
 withDatabase configuration baseline scenario callback = do
+  completed <- withDatabaseClassified configuration baseline scenario ReleaseAlways (const False) callback
+  pure $ case completed of
+    Left problem -> Left problem
+    Right LeaseOutcome {cleanupDiagnostic = Just problem} -> Left problem
+    Right LeaseOutcome {callbackValue} -> Right callbackValue
+
+-- | Classify a returned value without changing it. A classified failure is
+-- preserved only under 'PreserveFailures'; thrown callback exceptions retain
+-- their original identity after bounded release or preservation is attempted.
+withDatabaseClassified :: HinagataConfig -> BaselineRef -> FixturePlan -> RetentionPolicy -> (a -> Bool) -> (LeaseInfo -> IO a) -> IO (Either LeaseError (LeaseOutcome a))
+withDatabaseClassified configuration baseline scenario policy classifyResult callback = do
   case composePlans (baselinePlan baseline) scenario of
     Left _ -> pure (Left (failure "scenario conflicts with the frozen baseline"))
     Right composed -> do
@@ -80,16 +115,52 @@ withDatabase configuration baseline scenario callback = do
                   case acquired of
                     Left problem -> pure (Left problem)
                     Right clone -> do
-                      outcome <- try @SomeException (restore (prepareAndUse session clone composed))
-                      cleaned <- try @SomeException (release configuration session target options identity clone)
-                      case outcome of
-                        Left exception -> throwIO exception
-                        Right result -> pure (mergeCleanup result cleaned)
+                      prepared <- try @SomeException (restore (prepareClone session clone composed))
+                      case prepared of
+                        Left exception -> do
+                          _ <- try @SomeException (release configuration session target options identity clone)
+                          throwIO exception
+                        Right (Left problem) -> do
+                          cleaned <- try @SomeException (release configuration session target options identity clone)
+                          pure (mergeCleanup (Left problem) cleaned)
+                        Right (Right info) -> do
+                          returned <-
+                            try @SomeException
+                              ( restore
+                                  ( do
+                                      value <- callback info
+                                      failed <- if policy == DetachAlways then pure False else evaluate (classifyResult value)
+                                      pure (value, failed)
+                                  )
+                              )
+                          case returned of
+                            Left exception -> do
+                              _ <- try @SomeException (completeFailure session target identity clone)
+                              throwIO exception
+                            Right (value, failed) -> do
+                              finished <- try @SomeException (completeValue session target identity clone failed)
+                              pure (Right (outcomeFor info value finished))
                 pure $ case opened of
                   Left problem -> Left (sessionFailure problem)
                   Right result -> result
 
-    prepareAndUse session clone composed = do
+    completeFailure session target identity clone =
+      case policy of
+        ReleaseAlways -> release configuration session target options identity clone
+        PreserveFailures -> markState configuration session clone "Preserved"
+        DetachAlways -> markState configuration session clone "Detached"
+
+    completeValue session target identity clone failed
+      | policy == DetachAlways = fmap (\result -> (LeaseDetached, result)) (markState configuration session clone "Detached")
+      | policy == PreserveFailures && failed = fmap (\result -> (LeasePreserved, result)) (markState configuration session clone "Preserved")
+      | otherwise = fmap (\result -> (LeaseReleased, result)) (release configuration session target options identity clone)
+
+    outcomeFor info value = \case
+      Left _ -> LeaseOutcome value info LeaseCleanupFailed (Just (failure "lease completion raised an exception"))
+      Right (_, Left problem) -> LeaseOutcome value info LeaseCleanupFailed (Just problem)
+      Right (disposition, Right ()) -> LeaseOutcome value info disposition Nothing
+
+    prepareClone session clone composed = do
       let OwnedDatabase {name = database} = owned clone
       prepared <- runExclusive session $ \connection sessionOptions -> do
         deadline <- deadlineAfter (operationDeadlineMs sessionOptions)
@@ -110,7 +181,17 @@ withDatabase configuration baseline scenario callback = do
                   Left problem -> pure (Left problem)
                   Right () -> case first accessFailure (Access.accessToTarget configuration (application configuration) database) of
                     Left problem -> pure (Left problem)
-                    Right appTarget -> Right <$> callback LeaseInfo {leaseId = cloneLeaseId clone, runId = cloneRunId clone, applicationTarget = appTarget}
+                    Right appTarget -> pure (Right LeaseInfo {leaseId = cloneLeaseId clone, runId = cloneRunId clone, applicationTarget = appTarget})
+
+-- | Acquire and retain a clone without a callback scope. It is recorded as
+-- Detached and needs an explicit release by lease ID through cleanup.
+acquireDetached :: HinagataConfig -> BaselineRef -> FixturePlan -> IO (Either LeaseError LeaseInfo)
+acquireDetached configuration baseline scenario = do
+  completed <- withDatabaseClassified configuration baseline scenario DetachAlways (const False) pure
+  pure $ case completed of
+    Left problem -> Left problem
+    Right LeaseOutcome {cleanupDiagnostic = Just problem} -> Left problem
+    Right LeaseOutcome {leaseInfo} -> Right leaseInfo
 
 allocate :: HinagataConfig -> BaselineRef -> Session -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> IO (Either LeaseError Clone)
 allocate configuration baseline session maintenance options identity = do

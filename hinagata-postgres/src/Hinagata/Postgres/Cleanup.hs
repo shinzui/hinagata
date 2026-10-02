@@ -7,6 +7,7 @@ module Hinagata.Postgres.Cleanup
     CleanupError (..),
     planCleanup,
     applyCleanup,
+    releaseLease,
   )
 where
 
@@ -84,6 +85,36 @@ planCleanup configuration = withCatalog configuration $ \maintenance options ide
 applyCleanup :: HinagataConfig -> CleanupSelection -> [Text] -> IO (Either CleanupError [CleanupResult])
 applyCleanup configuration selection identifiers = withCatalog configuration $ \maintenance options identity ->
   sequence <$> traverse (applyOne configuration selection maintenance options identity) identifiers
+
+-- | Explicitly release one retained lease by its public lease ID. The ID is
+-- resolved in the project catalog, then apply repeats every ownership check.
+releaseLease :: HinagataConfig -> Text -> IO (Either CleanupError CleanupResult)
+releaseLease configuration identifier = withCatalog configuration $ \maintenance options _ -> do
+  opened <- withSession maintenance options $ \session ->
+    runExclusive session $ \connection sessionOptions -> do
+      deadline <- deadlineAfter (operationDeadlineMs sessionOptions)
+      let schema = quoteSqlIdentifier (maintenanceSchema configuration)
+          statement = Encoding.encodeUtf8 ("SELECT a.id FROM " <> schema <> ".\"leases\" l JOIN " <> schema <> ".\"allocations\" a ON a.id = l.allocation_id WHERE l.id = $1 AND a.project_id = $2")
+          args = map (Just . Encoding.encodeUtf8) [identifier, projectIdText (project configuration)]
+      rows <- queryParamRows connection deadline Sql statement args 1
+      pure
+        ( Keep
+            ( case rows of
+                Left problem -> Left (nativeFailure problem)
+                Right [[Just allocationId]] -> Right (Just (Encoding.decodeUtf8 allocationId))
+                Right [] -> Right Nothing
+                Right _ -> Left (failure "lease identity is ambiguous")
+            )
+        )
+  case flatten opened of
+    Left problem -> pure (Left problem)
+    Right Nothing -> pure (Right (Refused identifier "lease ID was not found in this project"))
+    Right (Just allocationId) -> do
+      released <- applyCleanup configuration IncludeRetained [allocationId]
+      pure $ case released of
+        Left problem -> Left problem
+        Right [result] -> Right result
+        Right _ -> Left (failure "lease release returned an invalid result")
 
 withCatalog :: HinagataConfig -> (ConnectionTarget -> SessionOptions -> Own.CatalogIdentity -> IO (Either CleanupError a)) -> IO (Either CleanupError a)
 withCatalog configuration action =

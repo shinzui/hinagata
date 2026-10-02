@@ -354,6 +354,17 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
     partial <- withDatabases manager (DatabaseRequest "alpha" firstRef scenarioPlan :| [DatabaseRequest "zeta" firstRef badScenario]) (\_ -> pure ())
     afterPartial <- queryInt connection "SELECT count(*) FROM hinagata_test.leases WHERE state = 'Released'"
     assert "later collection failure unwinds earlier clones" (case partial of Left _ -> afterPartial == beforePartial + 2; Right _ -> False)
+    managedFailure <- withManagedDatabaseClassified manager firstRef scenarioPlan PreserveFailures not (\_ -> pure False)
+    managedInfo <- case managedFailure of
+      Right LeaseOutcome {callbackValue = False, leaseDisposition = LeasePreserved, leaseInfo} -> pure leaseInfo
+      _ -> fail "managed classified failure was not retained"
+    let LeaseInfo {leaseId = managedId} = managedInfo
+    managedRelease <- releaseLease lifecycleConfig managedId
+    assert "managed preserved lease releases by ID" (case managedRelease of Right (Released _) -> True; _ -> False)
+    managedDetached <- orFail =<< acquireManagedDetached manager firstRef scenarioPlan
+    let LeaseInfo {leaseId = managedDetachedId} = managedDetached
+    managedDetachedRelease <- releaseLease lifecycleConfig managedDetachedId
+    assert "manager capacity is released after detached acquisition" (case managedDetachedRelease of Right (Released _) -> True; _ -> False)
   let tightConfig = lifecycleConfig {activeLeases = positive 1, pendingRequests = positive 1, setupWorkers = positive 1}
   withManager tightConfig $ \manager -> do
     allocationsBeforeOversize <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations"
@@ -474,6 +485,35 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   execCheck connection (Encoding.encodeUtf8 ("INSERT INTO hinagata_test.allocations (id, project_id, generation_id, run_id, database_name, ownership_token, state) VALUES ('" <> protectedId <> "', 'baseline-test', '" <> generationText <> "', 'recovery-run', '" <> databaseNameText database <> "', '" <> ambiguousToken <> "', 'Allocating')"))
   protectedApply <- applyCleanup lifecycleConfig IncludeRetained [protectedId]
   assert "maintenance database is protected even with a catalog allocation" (case protectedApply of Right [Refused identifier _] -> identifier == protectedId; _ -> False)
+  classifiedSuccess <- withDatabaseClassified lifecycleConfig firstRef scenarioPlan PreserveFailures not (\_ -> pure True)
+  assert "successful classified value is returned unchanged and released" (case classifiedSuccess of Right LeaseOutcome {callbackValue = True, leaseDisposition = LeaseReleased, cleanupDiagnostic = Nothing} -> True; _ -> False)
+  classifiedFailure <- withDatabaseClassified lifecycleConfig firstRef scenarioPlan PreserveFailures not (\_ -> pure False)
+  preservedInfo <- case classifiedFailure of
+    Right LeaseOutcome {callbackValue = False, leaseDisposition = LeasePreserved, cleanupDiagnostic = Nothing, leaseInfo} -> pure leaseInfo
+    _ -> fail "classified failure did not preserve its clone"
+  preservedConnection <- PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString (applicationTarget preservedInfo))))
+  preservedRows <- queryInt preservedConnection "SELECT count(*) FROM items"
+  PQ.finish preservedConnection
+  assert "preserved callback value leaves its scenario rows inspectable" (preservedRows == 3)
+  let LeaseInfo {leaseId = preservedId} = preservedInfo
+  preservedRelease <- releaseLease lifecycleConfig preservedId
+  assert "classified failure remains explicitly releasable by lease ID" (case preservedRelease of Right (Released _) -> True; _ -> False)
+  detachedInfo <- orFail =<< acquireDetached lifecycleConfig firstRef scenarioPlan
+  let LeaseInfo {leaseId = detachedId} = detachedInfo
+  detachedPreview <- orFail =<< planCleanup lifecycleConfig
+  assert "detached acquisition is retained without an active callback slot" (case [disposition candidate | candidate@CleanupCandidate {leaseId = Just identifier} <- detachedPreview, identifier == detachedId] of [Retained] -> True; _ -> False)
+  detachedRelease <- releaseLease lifecycleConfig detachedId
+  assert "detached lease releases by explicit ID" (case detachedRelease of Right (Released _) -> True; _ -> False)
+  detachedReRelease <- releaseLease lifecycleConfig detachedId
+  assert "detached release by lease ID is idempotent" (case detachedReRelease of Right (AlreadyReleased _) -> True; _ -> False)
+  thrownInfo <- newEmptyMVar
+  classifiedThrown <- try @SomeException (withDatabaseClassified lifecycleConfig firstRef scenarioPlan PreserveFailures (const False) (\info -> putMVar thrownInfo info >> fail "intentional classified exception"))
+  assert "classified callback exception keeps its original exception" (case classifiedThrown of Left _ -> True; Right _ -> False)
+  LeaseInfo {leaseId = thrownId} <- takeMVar thrownInfo
+  thrownPreview <- orFail =<< planCleanup lifecycleConfig
+  assert "thrown callback preserves its clone under policy" (case [disposition candidate | candidate@CleanupCandidate {leaseId = Just identifier} <- thrownPreview, identifier == thrownId] of [Retained] -> True; _ -> False)
+  thrownRelease <- releaseLease lifecycleConfig thrownId
+  assert "exception-preserved lease releases by explicit ID" (case thrownRelease of Right (Released _) -> True; _ -> False)
   changed <- ensureBaseline baselineSpec {migrationRevision = Just "migration-v2"}
   (changedRef, changedReport) <- orFail changed
   changedCalls <- readIORef migrationCalls
