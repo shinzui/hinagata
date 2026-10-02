@@ -27,6 +27,11 @@ provenance:
       at: 2026-10-01T00:30:12Z
       mode: "update"
       note: "Add clone strategy comparison and concurrent-allocation overlap evidence"
+    - model: "gpt-6-sol"
+      harness: "codex-cli"
+      at: 2026-10-02T13:52:26Z
+      mode: "implement"
+      note: "Begin archive-only release verification and Keiro cohort research"
   reviews:
     - model: "claude-fable-5-1"
       harness: "claude-code"
@@ -50,6 +55,8 @@ A service author can copy a complete Keiro integration example and measure Hinag
 - [ ] A public-API Keiro service example migrates, loads, serves, and passes workbench assertions over local sockets.
 - [ ] Small/bulk benchmarks and concurrent suites meet recorded gates or receive an explicit evidence-backed plan revision.
 - [ ] Published API docs and isolated source distributions reproduce the examples and completed integration checks.
+
+2026-10-02 release-gate progress: `just release-check` now generates all four source archives, unpacks them into a fresh temporary project with no sibling checkout, builds and tests them, generates Haddocks, and confirms archive CLI help and the no-Git revision fallback. The gate passes under `nix develop`; Keiro example and benchmark deliverables remain open. Hackage lists Keiro and keiro-migrations 0.19.0.0, and their matching upstream release tags were verified. The Seihou-pinned Nix package set lacks Keiro packages, so the example will resolve a deliberate released Cabal cohort inside the Nix development shell.
 
 
 ## Surprises & Discoveries

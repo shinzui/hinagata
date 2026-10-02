@@ -31,6 +31,9 @@ test-postgres-bulk:
 bench-postgres:
     bash scripts/test-postgres.sh --bench
 
+release-check:
+    bash scripts/release-check.sh
+
 check-conventions:
     python3 scripts/check_conventions.py
 

@@ -270,6 +270,7 @@ comparePrevious connection configuration identity (Just previous) manifest deadl
                     else Right (Just (FingerprintComparison (baselineFingerprint previous) [component | (component, old, new) <- zip3 fingerprintComponents before after, old /= new]))
         Right _ -> Left (BaselineError "comparison generation is missing or has changed fingerprint identity" Nothing)
 
+-- | Ordered category names represented in a version-1 fingerprint manifest.
 fingerprintComponents :: [FingerprintComponent]
 fingerprintComponents =
   [ FingerprintVersion,
