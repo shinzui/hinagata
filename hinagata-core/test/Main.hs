@@ -1,8 +1,10 @@
 module Main (main) where
 
+import Control.Monad (replicateM_)
 import Data.ByteString.Char8 qualified as ByteString
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, sort)
 import Data.Text qualified as Text
+import Hinagata.Config (AccessConfig (..), CloneStrategy (..), HinagataConfig (..), SchemaGrant (..), SchemaPrivilege (..), hinagataConfig, hinagataEnvironmentBindings)
 import Hinagata.Connection
 import Hinagata.Fixture.Bundle qualified as Bundle
 import Hinagata.Fixture.Graph
@@ -11,13 +13,24 @@ import Hinagata.Fixture.SqlPolicy
 import Hinagata.Fixture.Types
 import Hinagata.Prelude
 import Hinagata.Types
+import Settei qualified
+import Settei.Env qualified as Env
 import System.Directory (createDirectoryIfMissing, createFileLink)
+import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.FilePath ((</>))
+import System.IO (IOMode (WriteMode), withBinaryFile)
 import System.IO.Temp (withSystemTempDirectory)
 
 main :: IO ()
 main = do
+  args <- getArgs
+  case args of
+    ["--csv-memory-probe", size, workspace] -> csvMemoryProbe (read size) workspace
+    _ -> regressionTests
+
+regressionTests :: IO ()
+regressionTests = do
   let a = fixture "a" ["b", "c"]
       b = fixture "b" ["d"]
       c = fixture "c" ["d"]
@@ -87,7 +100,86 @@ main = do
         ["START TRANSACTION", "COMMIT", "END", "ROLLBACK", "ABORT", "SAVEPOINT x", "RELEASE SAVEPOINT x"]
     )
   assert "standard string and quoted identifier are opaque" (checkSqlPolicy (ByteString.pack "SELECT 'BEGIN; COPY', \"COMMIT;\" FROM x;") == Right ())
+  configTests
   bundleTests
+
+-- | Run this in a fresh process with +RTS -s. The fixture data is generated
+-- and captured in fixed chunks so maximum live residency can be compared for
+-- 1x and 10x CSV inputs without materializing the CSV in this test process.
+csvMemoryProbe :: Int -> FilePath -> IO ()
+csvMemoryProbe byteCount workspace = do
+  let fixtureRoot = workspace </> "fixtures"
+      fixtureDirectory = fixtureRoot </> "bulk"
+      bundleRoot = workspace </> "bundles"
+      chunk = ByteString.replicate 65536 'A'
+  createDirectoryIfMissing True fixtureDirectory
+  ByteString.writeFile (fixtureDirectory </> "fixture.yaml") "name: bulk\nsteps:\n  - copy:\n      table: {schema: public, name: bulk}\n      columns: [payload]\n      file: bulk.csv\n      format: csv\n      header: false\n"
+  withBinaryFile (fixtureDirectory </> "bulk.csv") WriteMode $ \handle ->
+    replicateM_ (byteCount `div` ByteString.length chunk) (ByteString.hPut handle chunk)
+  let config = Bundle.BundleConfig fixtureRoot bundleRoot (positive 1024) (positive 65536)
+  result <- Bundle.compileFixtures config [fixtureName "bulk"]
+  case result of
+    Right plan -> putStrLn (Text.unpack (Bundle.planDigest plan))
+    Left problem -> fail (show problem)
+
+configTests :: IO ()
+configTests = do
+  validated <- case hinagataEnvironmentBindings of
+    Right result -> pure result
+    Left errors -> fail (show errors)
+  assert "explicit environment binding count" (length (Env.bindingsList validated) == 30)
+  assert "every declared setting has an environment binding" (sort (map Settei.schemaSettingKey (Settei.schemaPossible (Settei.describe hinagataConfig))) == sort (map Env.bindingKey (Env.bindingsList validated)))
+  let low =
+        sourceOrFail
+          "config"
+          Settei.BuiltInSource
+          [ ("endpoint.host", "/tmp/postgresql"),
+            ("endpoint.port", "5432"),
+            ("project.id", "example"),
+            ("fixture.root", "/tmp/fixtures"),
+            ("bundle.root", "/tmp/bundles"),
+            ("maintenance.database", "postgres"),
+            ("administration.user", "admin"),
+            ("administration.database", "postgres"),
+            ("setup.user", "migrator"),
+            ("setup.database", "template"),
+            ("application.user", "service"),
+            ("application.database", "testdb")
+          ]
+      env =
+        Env.environmentSource
+          validated
+          ( Env.envSnapshot
+              [ ("HINAGATA_APPLICATION_USER", "app_override"),
+                ("HINAGATA_APPLICATION_PASSWORD", "top-secret-credential"),
+                ("HINAGATA_CLONE_STRATEGY", "FILE_COPY")
+              ]
+          )
+      resolved = Settei.resolve Settei.defaultResolveOptions [low, env] hinagataConfig
+  case Settei.answer resolved of
+    Left errors -> fail (Text.unpack (Settei.renderErrorsText errors))
+    Right config -> do
+      assert "later Settei source wins" (user (application config) == "app_override")
+      assert "clone strategy supplied explicitly" (cloneStrategy config == FileCopy)
+      assert "admin and app roles stay separate" (user (administration config) == "admin")
+      assert "setup has explicit public schema CREATE" (any (\grant -> privilege grant == SchemaCreate) (setupSchemaGrants config))
+      assert "visible WAL_LOG default overridden" (Text.isInfixOf "FILE_COPY" (Settei.renderResolutionText (Settei.report resolved)))
+      assert "secret redacted on success" (not (Text.isInfixOf "top-secret-credential" (Settei.renderResolutionText (Settei.report resolved))))
+      assert "secret redacted in typed config" (not (isInfixOf "top-secret-credential" (show config)))
+  let bad = Env.environmentSource validated (Env.envSnapshot [("HINAGATA_APPLICATION_PASSWORD", "bad\0password"), ("HINAGATA_ENDPOINT_PORT", "0")])
+      failed = Settei.resolve Settei.defaultResolveOptions [low, bad] hinagataConfig
+      errorText = either Settei.renderErrorsText (const "") (Settei.answer failed)
+  assert "bad settings rejected" (either (const True) (const False) (Settei.answer failed))
+  assert "secret redacted on failure" (not (Text.isInfixOf "bad\0password" (errorText <> Settei.renderResolutionText (Settei.report failed))))
+  let defaults = Settei.resolve Settei.defaultResolveOptions [low] hinagataConfig
+  assert "default strategy visible" (Text.isInfixOf "clone.strategy = WalLog" (Settei.renderResolutionText (Settei.report defaults)))
+  assert "no database default permits mutation" (either (const True) (const False) (Settei.answer (Settei.resolve Settei.defaultResolveOptions [] hinagataConfig)))
+
+sourceOrFail :: Text -> Settei.SourceKind -> [(Text, Text)] -> Settei.Source
+sourceOrFail name kind values =
+  case Settei.sourceFromPairs name kind [(settingKey, Settei.RawText value) | (rawKey, value) <- values, Right settingKey <- [Settei.parseKey rawKey]] of
+    Right result -> result
+    Left errors -> error (show errors)
 
 bundleTests :: IO ()
 bundleTests = withSystemTempDirectory "hinagata-core-test-" $ \workspace -> do

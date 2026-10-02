@@ -58,13 +58,15 @@ A Haskell caller can compile fixture sources into a deterministic, reusable plan
 ## Progress
 
 - [x] A released dependency cohort builds and the pure fixture graph tests pass (2026-10-01: GHC 9.12.4, `nix develop -c just check`, including Cabal tests, source distribution, formatter, and local-system flake checks; released lens and Aeson versions checked against Hackage and tags).
-- [ ] SQL/CSV source bundles have deterministic plans/digests and reject invalid or changing sources.
-- [ ] Settei configuration schema, precedence inputs, and redaction are tested without database access.
+- [x] SQL/CSV source bundles have deterministic plans/digests and reject invalid or changing sources (2026-10-01: focused bundle tests; 8 MiB vs 80 MiB CSV probe measured 153,712 vs 153,896 bytes maximum GHC heap residency after strict incremental hashing).
+- [x] Settei configuration schema, precedence inputs, and redaction are tested without database access (2026-10-01: focused tests force 28 explicit bindings, check later-source precedence, separate roles, defaults, validation, and secret-safe reports).
 
-Handoff (2026-10-01): Seihou `nix-haskell-flake` v0.26.0 generated the managed flake and exact lock. `hinagata-core` exposes pure graph resolution, validated identifiers, and escaped/redacted libpq descriptions. Strict manifest decoding, streaming frozen bundles, cache integrity checks, base/scenario composition, and SQL lexical policy have focused tests, and `nix develop -c just check` passes through the local-system flake checks. Final bundle acceptance still needs a measured memory/residency proof. Settei declarations remain to be implemented before this child is complete.
+Handoff (2026-10-01): Seihou `nix-haskell-flake` v0.26.0 generated the managed flake and exact lock. `hinagata-core` exposes pure graph resolution, validated identifiers, escaped/redacted libpq descriptions, strict manifest decoding, streaming frozen bundles, cache integrity checks, base/scenario composition, SQL lexical policy, common diagnostic context, and the pure Settei declaration. The 10× CSV probe exposed and then verified the fix for a lazy SHA256 update chain: maximum GHC heap residency fell from 8.4/71.4 MB to 154/154 KB for 8/80 MiB inputs. Focused tests, `nix build .#hinagata-core`, `nix develop -c just check`, and Haddock all pass. The flake check covers the local aarch64-darwin system and omits incompatible systems; Haddock generated API HTML with coverage warnings for existing sparse comments.
 
 
 ## Surprises & Discoveries
+
+2026-10-01: A bounded `ByteString.hGet` loop alone did not bound residency. The lazy SHA256 context retained all prior chunks until finalization. Forcing each updated context in capture and cache verification kept the 10× CSV probe at approximately constant maximum heap residency. PostgreSQL 15+ requires a separate `CREATE ON SCHEMA public` grant for a non-owner setup role; database-level `CREATE` does not supply it. The shared declaration now includes explicit schema grants.
 
 
 ## Decision Log
@@ -77,6 +79,8 @@ Handoff (2026-10-01): Seihou `nix-haskell-flake` v0.26.0 generated the managed f
 
 
 ## Outcomes & Retrospective
+
+The first package now supplies deterministic frozen fixture plans and a database-free, inspectable configuration contract. The fixed-size capture and cache hash loops are backed by a repeatable fresh-process RTS residency probe (`hinagata-core-test --csv-memory-probe BYTES WORKSPACE +RTS -s`). The proof covers GHC heap residency during core capture, not PostgreSQL transfer or process-wide RSS; those belong to later plans. Source review found strict domain records, explicit deriving, no `PackageImports` outside the prelude, and no generic-lens orphan import in public type modules or the prelude. The Settei declaration imports Settei's own setting implementation, which uses generic-lens internally; it is not re-exported through Hinagata's prelude. Hinagata core does not use `at` or `ix`; later packages must inspect their map optic semantics when introduced.
 
 
 ## Context and Orientation
@@ -118,7 +122,7 @@ Implement the SQL policy scanner needed to reject top-level transaction control 
 
 ### Milestone 3: Typed configuration declaration
 
-Define `hinagataConfig :: Settei.Config HinagataConfig` with explicit endpoint, project identity, fixture/bundle paths, maintenance database/schema, explicit administration/setup/application access, declared database-level grants and settings for the setup and application roles, the clone strategy (`WAL_LOG` by default, `FILE_COPY` as an explicit measured choice), deadlines, setup-worker/active-lease/pending-request limits, chunk size, and SQL size limit. No default database authorizes mutation. Declare the concurrency limits as manager-local and keep the three access purposes explicit; never default an application endpoint from administrative credentials. Operational defaults are visible Settei sources/rules. Provide validated explicit environment bindings; no wildcard environment discovery. Retain library callers' ability to construct resolved values directly. Source file IO and optparse wiring remain CLI work.
+Define `hinagataConfig :: Settei.Config HinagataConfig` with explicit endpoint, project identity, fixture/bundle paths, maintenance database/schema, explicit administration/setup/application access, declared database grants, schema grants, and settings for the setup and application roles, the clone strategy (`WAL_LOG` by default, `FILE_COPY` as an explicit measured choice), deadlines, setup-worker/active-lease/pending-request limits, chunk size, and SQL size limit. No default database authorizes mutation. Declare the concurrency limits as manager-local and keep the three access purposes explicit; never default an application endpoint from administrative credentials. Operational defaults are visible Settei sources/rules. Provide validated explicit environment bindings; no wildcard environment discovery. Retain library callers' ability to construct resolved values directly. Source file IO and optparse wiring remain CLI work.
 
 Create `just check-conventions` and include it in `just check`: verify every Cabal component imports the baseline, postpositive qualified imports, and file-local PackageImports. Document source review of strict record fields, explicit deriving, optic usage (including `at`/`ix` semantics), entity-ID order, and transitive generic-lens orphan exposure; do not claim a simple text scan proves the import graph safe. Extend the gate whenever later packages/components are added. Create `just check`, `just fmt-check`, and focused core-test commands; make the Nix gate validate the package and tests. Publish module documentation and source-distribution checks. All command additions must execute real gates rather than placeholders.
 

@@ -259,7 +259,8 @@ copyAndHash config source output isSql = do
             then pure (Left (SqlStepTooLarge source))
             else do
               ByteString.hPut destination bytes
-              loop input destination newLength (SHA256.update context bytes)
+              let nextContext = SHA256.update context bytes
+              nextContext `seq` loop input destination newLength nextContext
 
 publish :: FilePath -> FilePath -> Text -> ByteString -> [CapturedFixture] -> IO FilePath
 publish bundleRoot staging digest manifest captured = do
@@ -316,7 +317,9 @@ hashFile path = withBinaryFile path ReadMode (go SHA256.init)
       bytes <- ByteString.hGet handle 65536
       if ByteString.null bytes
         then pure (hex (SHA256.finalize context))
-        else go (SHA256.update context bytes) handle
+        else do
+          let nextContext = SHA256.update context bytes
+          nextContext `seq` go nextContext handle
 
 within :: FilePath -> FilePath -> Bool
 within root candidate =
