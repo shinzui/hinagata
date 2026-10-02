@@ -14,6 +14,7 @@ import Hinagata.Fixture.Bundle
 import Hinagata.Fixture.Types
 import Hinagata.Postgres.Baseline hiding (elapsedMs)
 import Hinagata.Postgres.Error (LoadError (..), LoadPhase (..))
+import Hinagata.Postgres.Lease
 import Hinagata.Postgres.Load
 import Hinagata.Postgres.Ownership
 import Hinagata.Postgres.Session
@@ -269,6 +270,7 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
         level <- queryText migrated "SHOW client_min_messages"
         assert "setup role settings apply before migration" (level == "warning")
         execCheck migrated "CREATE TABLE items (id integer PRIMARY KEY, note text NOT NULL)"
+        execCheck migrated "GRANT SELECT, INSERT ON items TO hinagata_app"
         execCheck migrated "CREATE INDEX CONCURRENTLY items_note_idx ON items (note)"
         PQ.finish migrated
         pure (Right ())
@@ -292,12 +294,55 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   assert "credential rotation does not invalidate a baseline" (case rotated of Right (ref, report) -> baselineDatabase ref == baselineDatabase firstRef && kind report == Reused; _ -> False)
   let sealedSql = Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> databaseNameText (baselineDatabase firstRef) <> "' AND datallowconn = false")
   assert "ready baseline rejects connections" =<< ((== 1) <$> queryInt connection sealedSql)
+  createDirectoryIfMissing True (fixtureRoot </> "scenario")
+  ByteString.writeFile (fixtureRoot </> "scenario" </> "fixture.sql") "INSERT INTO items (id, note) VALUES (3, 'scenario');"
+  scenarioPlan <- bundleOrFail =<< compileFixtures (BundleConfig fixtureRoot bundleRoot (positive 1048576) (positive 65536)) [fixtureName "good", fixtureName "scenario"]
+  let consume info = do
+        app <- PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString (applicationTarget info))))
+        count <- queryInt app "SELECT count(*) FROM items"
+        assert "clone contains one base prefix plus scenario suffix" (count == 3)
+        execCheck app "INSERT INTO items (id, note) VALUES (4, 'application')"
+        PQ.finish app
+        pure (connectionDatabase (applicationTarget info))
+  firstLease <- withDatabase lifecycleConfig firstRef scenarioPlan consume
+  secondLease <- withDatabase lifecycleConfig firstRef scenarioPlan consume
+  firstClone <- orFail firstLease
+  secondClone <- orFail secondLease
+  assert "bracketed clones are distinct" (firstClone /= secondClone)
+  assert "released clone databases are dropped" =<< ((== 0) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname IN ('" <> databaseNameText firstClone <> "', '" <> databaseNameText secondClone <> "')")))
+  assert "clone release records terminal state" =<< ((== 2) <$> queryInt connection "SELECT count(*) FROM hinagata_test.leases WHERE state = 'Released'")
+  firstStarted <- newEmptyMVar
+  secondStarted <- newEmptyMVar
+  releaseCallbacks <- newEmptyMVar
+  firstDone <- newEmptyMVar
+  secondDone <- newEmptyMVar
+  _ <- forkIO (try @SomeException (withDatabase lifecycleConfig firstRef scenarioPlan (\info -> consume info >>= \clone -> putMVar firstStarted clone >> takeMVar releaseCallbacks >> pure clone)) >>= putMVar firstDone)
+  _ <- forkIO (try @SomeException (withDatabase lifecycleConfig firstRef scenarioPlan (\info -> consume info >>= \clone -> putMVar secondStarted clone >> takeMVar releaseCallbacks >> pure clone)) >>= putMVar secondDone)
+  warmFirst <- timeout 10000000 (takeMVar firstStarted)
+  warmSecond <- timeout 10000000 (takeMVar secondStarted)
+  assert "concurrent warm callers hold distinct writable clones" (case (warmFirst, warmSecond) of (Just left, Just right) -> left /= right; _ -> False)
+  putMVar releaseCallbacks ()
+  putMVar releaseCallbacks ()
+  warmFirstDone <- timeout 10000000 (takeMVar firstDone)
+  warmSecondDone <- timeout 10000000 (takeMVar secondDone)
+  assert "concurrent callbacks release both clones" (case (warmFirstDone, warmSecondDone) of (Just (Right (Right _)), Just (Right (Right _))) -> True; _ -> False)
+  thrown <- try @SomeException (withDatabase lifecycleConfig firstRef scenarioPlan (\_ -> fail "intentional callback failure"))
+  assert "callback exception propagates after cleanup" (case thrown of Left _ -> True; Right _ -> False)
+  assert "exceptional callback released its clone" =<< ((== 5) <$> queryInt connection "SELECT count(*) FROM hinagata_test.leases WHERE state = 'Released'")
+  badScenario <- bundleOrFail =<< compileFixtures (BundleConfig fixtureRoot bundleRoot (positive 1048576) (positive 65536)) [fixtureName "bad"]
+  failedLoad <- withDatabase lifecycleConfig firstRef badScenario (\_ -> pure ())
+  assert "failed scenario load refuses callback" (case failedLoad of Left _ -> True; Right _ -> False)
+  assert "failed scenario load releases its clone" =<< ((== 6) <$> queryInt connection "SELECT count(*) FROM hinagata_test.leases WHERE state = 'Released'")
   changed <- ensureBaseline baselineSpec {migrationRevision = Just "migration-v2"}
   (changedRef, changedReport) <- orFail changed
   changedCalls <- readIORef migrationCalls
   assert "migration revision creates a distinct baseline" (baselineDatabase changedRef /= baselineDatabase firstRef && kind changedReport == Built && changedCalls == 2)
   ByteString.writeFile (fixtureRoot </> "good" </> "fixture.sql") "INSERT INTO items (id, note) VALUES (1, 'changed first'); INSERT INTO items (id, note) VALUES (2, 'second');"
   changedPlan <- bundleOrFail =<< compileFixtures (BundleConfig fixtureRoot bundleRoot (positive 1048576) (positive 65536)) [fixtureName "good"]
+  allocationsBeforeConflict <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations"
+  conflicting <- withDatabase lifecycleConfig firstRef changedPlan (\_ -> pure ())
+  allocationsAfterConflict <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations"
+  assert "conflicting captured fixture refused before allocation" (case conflicting of Left _ -> allocationsBeforeConflict == allocationsAfterConflict; Right _ -> False)
   ByteString.writeFile (fixtureRoot </> "good" </> "fixture.sql") "INSERT INTO items (id, note) VALUES (1, 'first'); INSERT INTO items (id, note) VALUES (2, 'second');"
   changedFixture <- ensureBaseline baselineSpec {basePlan = changedPlan}
   assert "base fixture bytes select a new generation" (case changedFixture of Right (ref, report) -> baselineDatabase ref /= baselineDatabase firstRef && kind report == Built; _ -> False)

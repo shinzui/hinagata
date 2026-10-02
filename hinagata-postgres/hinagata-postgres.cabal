@@ -25,14 +25,17 @@ library
   exposed-modules:
     Hinagata.Postgres.Baseline
     Hinagata.Postgres.Error
+    Hinagata.Postgres.Lease
     Hinagata.Postgres.Load
     Hinagata.Postgres.Ownership
     Hinagata.Postgres.Session
 
   other-modules:
+    Hinagata.Postgres.Internal.Access
     Hinagata.Postgres.Internal.BaselineRef
     Hinagata.Postgres.Internal.Copy
     Hinagata.Postgres.Internal.Libpq
+    Hinagata.Postgres.Internal.Load
     Hinagata.Postgres.Internal.Sql
     Paths_hinagata_postgres
 

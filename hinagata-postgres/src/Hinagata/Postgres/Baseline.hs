@@ -12,6 +12,7 @@ where
 
 import Control.Exception (IOException, try)
 import Crypto.Hash.SHA256 qualified as SHA256
+import Data.Bifunctor (first)
 import Data.ByteString qualified as ByteString
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Encoding
@@ -21,6 +22,7 @@ import Hinagata.Config
 import Hinagata.Connection
 import Hinagata.Fixture.Bundle
 import Hinagata.Postgres.Error (NativeError (..), NativePhase (..), SessionError (..))
+import Hinagata.Postgres.Internal.Access qualified as Access
 import Hinagata.Postgres.Internal.BaselineRef
 import Hinagata.Postgres.Internal.Libpq
 import Hinagata.Postgres.Load (loadInto)
@@ -84,7 +86,7 @@ ensureBaseline spec@BaselineSpec {configuration} = do
     Right False -> pure (Left (BaselineError "base fixture bundle changed" Nothing))
     Right True -> startCatalog start
   where
-    startCatalog start = case adminTarget configuration (maintenanceDatabase configuration) of
+    startCatalog start = case first accessFailure (Access.adminTarget configuration (maintenanceDatabase configuration)) of
       Left failure -> pure (Left failure)
       Right maintenance -> do
         let options = defaultSessionOptions {operationDeadlineMs = positiveValue (setupDeadlineMs configuration)}
@@ -116,7 +118,7 @@ prepare connection maintenance options identity spec@BaselineSpec {configuration
   case locked of
     Left failure -> pure (Left (nativeFailure failure))
     Right _ -> do
-      previous <- if reusable then lookupReady connection configuration deadline projectText digest else pure (Right Nothing)
+      previous <- if reusable then lookupReady connection configuration basePlan deadline projectText digest else pure (Right Nothing)
       case previous of
         Left failure -> pure (Left failure)
         Right (Just baseline) -> do
@@ -132,8 +134,8 @@ prepare connection maintenance options identity spec@BaselineSpec {configuration
             Left CatalogError {cause, sqlState} -> pure (Left (BaselineError cause sqlState))
         Right Nothing -> buildGeneration connection maintenance options identity configuration basePlan projectText digest manifest spec deadline
 
-lookupReady :: PQ.Connection -> HinagataConfig -> Deadline -> Text -> Text -> IO (Either BaselineError (Maybe BaselineRef))
-lookupReady connection configuration deadline project digest = do
+lookupReady :: PQ.Connection -> HinagataConfig -> FixturePlan -> Deadline -> Text -> Text -> IO (Either BaselineError (Maybe BaselineRef))
+lookupReady connection configuration plan deadline project digest = do
   let table = quoteSqlIdentifier (maintenanceSchema configuration) <> ".\"generations\""
       statement = Encoding.encodeUtf8 ("SELECT id, database_name::text, database_oid::text, ownership_token::text FROM " <> table <> " WHERE project_id = $1 AND fingerprint = $2 AND state = 'Ready' ORDER BY created_at DESC LIMIT 1")
   rows <- queryParamRows connection deadline Sql statement [Just (Encoding.encodeUtf8 project), Just (Encoding.encodeUtf8 digest)] 1
@@ -144,7 +146,7 @@ lookupReady connection configuration deadline project digest = do
       database <- maybe (Left (BaselineError "ready generation has an invalid database name" Nothing)) Right (either (const Nothing) Just (mkDatabaseName (Encoding.decodeUtf8 name)))
       number <- maybe (Left (BaselineError "ready generation has an invalid database OID" Nothing)) Right (readMaybe (Text.unpack (Encoding.decodeUtf8 oid)))
       let owned = OwnedDatabase database number (Encoding.decodeUtf8 token)
-      Right (Just (BaselineRef database (Encoding.decodeUtf8 generationId) digest (CatalogIdentity 1 "") owned))
+      Right (Just (BaselineRef database (Encoding.decodeUtf8 generationId) digest (CatalogIdentity 1 "") owned plan))
     Right _ -> Left (BaselineError "ready generation has incomplete identity" Nothing)
 
 buildGeneration :: PQ.Connection -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> HinagataConfig -> FixturePlan -> Text -> Text -> Text -> BaselineSpec -> Deadline -> IO (Either BaselineError (BaselineRef, PreparationKind))
@@ -176,20 +178,20 @@ buildGeneration connection maintenance options identity configuration plan proje
                   published <- queryParamRows connection deadline Sql readySql [Just identifier, Just (Encoding.encodeUtf8 (Text.pack (show (oid owned))))] 0
                   pure $ case published of
                     Left failure -> Left (nativeFailure failure)
-                    Right _ -> Right (BaselineRef database generationId digest identity owned, Built)
+                    Right _ -> Right (BaselineRef database generationId digest identity owned plan, Built)
     Left failure -> pure (Left (nativeFailure failure))
     Right _ -> pure (Left (BaselineError "UUID generation returned an invalid result" Nothing))
 
 construct :: PQ.Connection -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> HinagataConfig -> FixturePlan -> Text -> DatabaseName -> Text -> BaselineSpec -> Deadline -> IO (Either BaselineError OwnedDatabase)
 construct connection maintenance options identity configuration plan generationId database token BaselineSpec {migrationHook, verificationHook, requiredExtensions, requiredLocale} deadline = do
-  let quoted = quoteDatabase database
+  let quoted = Access.quoteDatabase database
   created <- query connection deadline Sql (Encoding.encodeUtf8 ("CREATE DATABASE " <> quoted <> " TEMPLATE template0"))
   case created of
     Left NativeError {sqlState = Just "42501"} -> pure (Left (BaselineError "administration role lacks CREATEDB or template access" (Just "42501")))
     Left failure -> pure (Left (nativeFailure failure))
     Right () -> do
       let marker = "hinagata:v1:" <> clusterUuid identity <> ":" <> token
-      commented <- query connection deadline Sql (Encoding.encodeUtf8 ("COMMENT ON DATABASE " <> quoted <> " IS " <> quoteLiteral marker))
+      commented <- query connection deadline Sql (Encoding.encodeUtf8 ("COMMENT ON DATABASE " <> quoted <> " IS " <> Access.quoteLiteral marker))
       case commented of
         Left failure -> pure (Left (nativeFailure failure))
         Right () -> do
@@ -205,11 +207,11 @@ construct connection maintenance options identity configuration plan generationI
                 case bound of
                   Left failure -> pure (Left (nativeFailure failure))
                   Right [[Just _]] -> do
-                    prepared <- prepareAccess connection options configuration database deadline
+                    prepared <- first accessFailure <$> Access.prepareAccess connection options configuration database deadline
                     case prepared of
                       Left failure -> pure (Left failure)
                       Right () -> do
-                        case accessToTarget configuration (setup configuration) database of
+                        case first accessFailure (Access.accessToTarget configuration (setup configuration) database) of
                           Left failure -> pure (Left failure)
                           Right setupTarget -> do
                             migrated <- timeout (positiveValue (setupDeadlineMs configuration) * 1000) (migrationHook setupTarget)
@@ -287,96 +289,6 @@ checkExtension connection deadline extension = do
     Right _ -> Left (BaselineError "baseline lacks a declared extension" Nothing)
     Left failure -> Left (nativeFailure failure)
 
-prepareAccess :: PQ.Connection -> SessionOptions -> HinagataConfig -> DatabaseName -> Deadline -> IO (Either BaselineError ())
-prepareAccess connection options configuration database deadline = do
-  let grants = [(setup configuration, setupGrants configuration), (application configuration, applicationGrants configuration)]
-  databaseGrants <- traverse (uncurry (grantDatabase connection deadline database)) grants
-  case sequence databaseGrants of
-    Left failure -> pure (Left failure)
-    Right _ -> do
-      admin <- pure (adminTarget configuration database)
-      case admin of
-        Left failure -> pure (Left failure)
-        Right target -> do
-          opened <- withSession target options $ \session ->
-            runExclusive session $ \inner innerOptions -> do
-              innerDeadline <- deadlineAfter (operationDeadlineMs innerOptions)
-              outcomes <- traverse (grantSchema inner innerDeadline) ([(setup configuration, item) | item <- setupSchemaGrants configuration] ++ [(application configuration, item) | item <- applicationSchemaGrants configuration])
-              pure (Keep (sequence outcomes))
-          case opened of
-            Left failure -> pure (Left (sessionFailure failure))
-            Right (Left failure) -> pure (Left (sessionFailure failure))
-            Right (Right (Left failure)) -> pure (Left failure)
-            Right (Right (Right _)) -> do
-              setupResult <- applyRoleSettings configuration options database (setup configuration) (setupSettings configuration)
-              case setupResult of
-                Left failure -> pure (Left failure)
-                Right () -> applyRoleSettings configuration options database (application configuration) (applicationSettings configuration)
-
-applyRoleSettings :: HinagataConfig -> SessionOptions -> DatabaseName -> AccessConfig -> [RoleSetting] -> IO (Either BaselineError ())
-applyRoleSettings _ _ _ _ [] = pure (Right ())
-applyRoleSettings configuration options database access settings =
-  case (accessToTarget configuration access database, quoteRole (user access)) of
-    (Left failure, _) -> pure (Left failure)
-    (_, Left failure) -> pure (Left failure)
-    (Right target, Right role) -> do
-      opened <- withSession target options $ \session ->
-        runExclusive session $ \connection sessionOptions -> do
-          deadline <- deadlineAfter (operationDeadlineMs sessionOptions)
-          results <- traverse (setRoleSetting connection deadline role database) settings
-          pure (Keep (sequence results))
-      pure $ case opened of
-        Left failure -> Left (sessionFailure failure)
-        Right (Left failure) -> Left (sessionFailure failure)
-        Right (Right result) -> () <$ result
-
-setRoleSetting :: PQ.Connection -> Deadline -> Text -> DatabaseName -> RoleSetting -> IO (Either BaselineError ())
-setRoleSetting connection deadline role database RoleSetting {name, value}
-  | Text.any (== '\0') value = pure (Left (BaselineError "role setting contains NUL" Nothing))
-  | otherwise = do
-      let statement = Encoding.encodeUtf8 ("ALTER ROLE " <> role <> " IN DATABASE " <> quoteDatabase database <> " SET " <> quoteSqlIdentifier name <> " TO " <> quoteLiteral value)
-      either (Left . nativeFailure) Right <$> query connection deadline Sql statement
-
-grantDatabase :: PQ.Connection -> Deadline -> DatabaseName -> AccessConfig -> [DatabaseGrant] -> IO (Either BaselineError ())
-grantDatabase connection deadline database access grants =
-  case quoteRole (user access) of
-    Left failure -> pure (Left failure)
-    Right role ->
-      if null grants
-        then pure (Right ())
-        else do
-          let privileges = Text.intercalate ", " (map grantName grants)
-              statement = Encoding.encodeUtf8 ("GRANT " <> privileges <> " ON DATABASE " <> quoteDatabase database <> " TO " <> role)
-          either (Left . nativeFailure) Right <$> query connection deadline Sql statement
-
-grantSchema :: PQ.Connection -> Deadline -> (AccessConfig, SchemaGrant) -> IO (Either BaselineError ())
-grantSchema connection deadline (access, SchemaGrant {schema, privilege}) =
-  case quoteRole (user access) of
-    Left failure -> pure (Left failure)
-    Right role -> do
-      let name = case privilege of SchemaUsage -> "USAGE"; SchemaCreate -> "CREATE"
-          statement = Encoding.encodeUtf8 ("GRANT " <> name <> " ON SCHEMA " <> quoteSqlIdentifier schema <> " TO " <> role)
-      either (Left . nativeFailure) Right <$> query connection deadline Sql statement
-
-grantName :: DatabaseGrant -> Text
-grantName = \case GrantConnect -> "CONNECT"; GrantCreate -> "CREATE"; GrantTemporary -> "TEMPORARY"
-
-adminTarget :: HinagataConfig -> DatabaseName -> Either BaselineError ConnectionTarget
-adminTarget configuration = accessToTarget configuration (administration configuration)
-
-accessToTarget :: HinagataConfig -> AccessConfig -> DatabaseName -> Either BaselineError ConnectionTarget
-accessToTarget HinagataConfig {endpoint = EndpointConfig {host, port}} AccessConfig {user, password} database =
-  either (Left . (\message -> BaselineError message Nothing)) Right (mkConnectionTarget host port user database password)
-
-quoteDatabase :: DatabaseName -> Text
-quoteDatabase = (\value -> "\"" <> Text.replace "\"" "\"\"" value <> "\"") . databaseNameText
-
-quoteRole :: Text -> Either BaselineError Text
-quoteRole role = either (Left . (\message -> BaselineError message Nothing)) (Right . quoteSqlIdentifier) (mkSqlIdentifier role)
-
-quoteLiteral :: Text -> Text
-quoteLiteral value = "'" <> Text.replace "'" "''" value <> "'"
-
 fingerprintManifest :: Int -> BaselineSpec -> Text
 fingerprintManifest server BaselineSpec {configuration, basePlan, migrationRevision, verificationRevision, requiredExtensions, requiredLocale} =
   Text.intercalate
@@ -413,6 +325,9 @@ hex = Text.pack . concatMap digits . ByteString.unpack
 
 nativeFailure :: NativeError -> BaselineError
 nativeFailure NativeError {reason, sqlState} = BaselineError reason sqlState
+
+accessFailure :: Access.AccessError -> BaselineError
+accessFailure Access.AccessError {cause, sqlState} = BaselineError cause sqlState
 
 sessionFailure :: SessionError -> BaselineError
 sessionFailure failure = BaselineError (Text.pack (show failure)) Nothing

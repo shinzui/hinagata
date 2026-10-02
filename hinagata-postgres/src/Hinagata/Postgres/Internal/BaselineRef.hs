@@ -4,6 +4,7 @@ module Hinagata.Postgres.Internal.BaselineRef
   )
 where
 
+import Hinagata.Fixture.Bundle (FixturePlan)
 import Hinagata.Postgres.Ownership (CatalogIdentity, OwnedDatabase)
 import Hinagata.Prelude
 import Hinagata.Types (DatabaseName)
@@ -15,6 +16,7 @@ data BaselineRef = BaselineRef
     generationId :: !Text,
     baselineFingerprint :: !Text,
     clusterIdentity :: !CatalogIdentity,
-    ownership :: !OwnedDatabase
+    ownership :: !OwnedDatabase,
+    baselinePlan :: !FixturePlan
   }
   deriving stock (Eq, Show)
