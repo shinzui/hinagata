@@ -61,7 +61,7 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 - [ ] Concurrent leases receive isolated committed fixture state and release after callback termination.
 - [ ] Crash, preservation, detached lease, and cleanup tests prove positive ownership and race safety.
 
-2026-10-01 implementation note: The first milestone is underway. A version-1 catalog DDL now lives in `hinagata-postgres/sql/catalog-v1.sql`; `Hinagata.Postgres.Ownership.ensureCatalog` initializes an absent dedicated schema under a transaction and advisory transaction lock, records a cluster UUID, and validates schema/table ownership and format on later opens. The socket-only integration suite proves initial creation, stable reuse, refusal of an unrelated schema, and refusal of an incomplete catalog. Generation allocation, hooks, publication, leases, and cleanup remain open, so none of the milestone checkboxes is complete yet.
+2026-10-01 implementation note: The first milestone is underway. A version-1 catalog DDL now lives in `hinagata-postgres/sql/catalog-v1.sql`; `Hinagata.Postgres.Ownership.ensureCatalog` initializes an absent dedicated schema under a transaction and advisory transaction lock, records a cluster UUID, and validates schema/table ownership and format on later opens. `verifyOwnedDatabase` compares recorded name, OID, and cluster/token comment through a parameterized catalog query. The socket-only integration suite proves initial creation, stable reuse, refusal of unrelated or incomplete schemas, and match/mismatch/missing ownership results. Generation allocation, hooks, publication, leases, and cleanup remain open, so none of the milestone checkboxes is complete yet.
 
 
 ## Surprises & Discoveries

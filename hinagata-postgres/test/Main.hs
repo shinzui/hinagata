@@ -91,6 +91,21 @@ integrationTests socket = withSystemTempDirectory "hinagata-postgres-test-" $ \w
   firstCatalog <- ensureCatalog target catalogSchema defaultSessionOptions
   secondCatalog <- ensureCatalog target catalogSchema defaultSessionOptions
   assert "catalog initializes and reuses one cluster identity" (case (firstCatalog, secondCatalog) of (Right first, Right second) -> first == second && formatVersion first == 1; _ -> False)
+  catalog <- orFail firstCatalog
+  execCheck setupConnection "CREATE DATABASE hinagata_owned_test"
+  let marker = "hinagata:v1:" <> clusterUuid catalog <> ":test-token"
+  execCheck setupConnection (Encoding.encodeUtf8 ("COMMENT ON DATABASE hinagata_owned_test IS '" <> marker <> "'"))
+  ownedName <- orFail (mkDatabaseName "hinagata_owned_test")
+  ownedOid <- queryInt setupConnection "SELECT oid FROM pg_database WHERE datname = 'hinagata_owned_test'"
+  let owned = OwnedDatabase {name = ownedName, oid = ownedOid, token = "test-token"}
+  matched <- verifyOwnedDatabase target defaultSessionOptions catalog owned
+  assert "name, OID, and marker prove ownership" (matched == Right OwnershipMatches)
+  execCheck setupConnection "COMMENT ON DATABASE hinagata_owned_test IS 'foreign'"
+  replaced <- verifyOwnedDatabase target defaultSessionOptions catalog owned
+  assert "changed ownership marker is refused" (replaced == Right OwnershipMismatch)
+  execCheck setupConnection "DROP DATABASE hinagata_owned_test"
+  missing <- verifyOwnedDatabase target defaultSessionOptions catalog owned
+  assert "missing owned database is distinct from a mismatch" (missing == Right OwnershipMissing)
   execCheck setupConnection "CREATE SCHEMA foreign_catalog"
   foreignSchema <- orFail (mkSqlIdentifier "foreign_catalog")
   foreignCatalog <- ensureCatalog target foreignSchema defaultSessionOptions

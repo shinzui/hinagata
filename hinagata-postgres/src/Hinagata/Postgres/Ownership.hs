@@ -2,7 +2,10 @@
 module Hinagata.Postgres.Ownership
   ( CatalogIdentity (..),
     CatalogError (..),
+    OwnedDatabase (..),
+    OwnershipEvidence (..),
     ensureCatalog,
+    verifyOwnedDatabase,
   )
 where
 
@@ -15,7 +18,7 @@ import Hinagata.Connection (ConnectionTarget)
 import Hinagata.Postgres.Error (NativeError (..), NativePhase (..), SessionError (..))
 import Hinagata.Postgres.Internal.Libpq
 import Hinagata.Prelude
-import Hinagata.Types (SqlIdentifier, quoteSqlIdentifier, sqlIdentifierText)
+import Hinagata.Types (DatabaseName, SqlIdentifier, databaseNameText, quoteSqlIdentifier, sqlIdentifierText)
 import Paths_hinagata_postgres (getDataFileName)
 
 -- | The catalog format and cluster marker read back from the maintenance
@@ -34,6 +37,19 @@ data CatalogError = CatalogError
   }
   deriving stock (Eq, Show)
 
+-- | Identity recorded when Hinagata allocated a database. A name alone is
+-- never sufficient authority for cleanup.
+data OwnedDatabase = OwnedDatabase
+  { name :: !DatabaseName,
+    oid :: !Int,
+    token :: !Text
+  }
+  deriving stock (Eq, Show)
+
+-- | Comparison against the current cluster catalog and database comment.
+data OwnershipEvidence = OwnershipMatches | OwnershipMissing | OwnershipMismatch
+  deriving stock (Eq, Show)
+
 -- | Initialize a dedicated, absent schema or validate an existing version-1
 -- catalog. An occupied schema without Hinagata's version marker is refused.
 -- The administration role must own an existing catalog schema.
@@ -45,6 +61,32 @@ ensureCatalog target schema options = do
     Left failure -> Left (sessionFailure failure)
     Right (Left failure) -> Left (sessionFailure failure)
     Right (Right result) -> result
+
+-- | Recheck a recorded name, OID, and marker before any destructive action.
+-- A missing or replaced database is reported without changing it.
+verifyOwnedDatabase :: ConnectionTarget -> SessionOptions -> CatalogIdentity -> OwnedDatabase -> IO (Either CatalogError OwnershipEvidence)
+verifyOwnedDatabase target options identity expected = do
+  opened <- withSession target options $ \session ->
+    runExclusive session $ \connection sessionOptions -> do
+      deadline <- deadlineAfter (operationDeadlineMs sessionOptions)
+      checked <- checkOwnership connection deadline identity expected
+      pure (either (Retire . Left) (Keep . Right) checked)
+  pure $ case opened of
+    Left failure -> Left (sessionFailure failure)
+    Right (Left failure) -> Left (sessionFailure failure)
+    Right (Right result) -> result
+
+checkOwnership :: PQ.Connection -> Deadline -> CatalogIdentity -> OwnedDatabase -> IO (Either CatalogError OwnershipEvidence)
+checkOwnership connection deadline identity expected = do
+  let statement = "SELECT d.oid::text, s.description FROM pg_database d LEFT JOIN pg_shdescription s ON s.objoid = d.oid AND s.classoid = 'pg_database'::regclass WHERE d.datname = $1"
+      expectedMarker = "hinagata:v1:" <> clusterUuid identity <> ":" <> token expected
+  rows <- queryParamRows connection deadline Sql statement [Just (Encoding.encodeUtf8 (databaseNameText (name expected)))] 1
+  pure $ case rows of
+    Left failure -> Left (nativeFailure failure)
+    Right [] -> Right OwnershipMissing
+    Right [[Just actualOid, Just marker]]
+      | actualOid == Encoding.encodeUtf8 (Text.pack (show (oid expected))) && marker == Encoding.encodeUtf8 expectedMarker -> Right OwnershipMatches
+    Right _ -> Right OwnershipMismatch
 
 bootstrap :: PQ.Connection -> SqlIdentifier -> SessionOptions -> IO (SessionDisposition (Either CatalogError CatalogIdentity))
 bootstrap connection schema options = do
