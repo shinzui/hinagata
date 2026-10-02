@@ -31,6 +31,11 @@ provenance:
       at: 2026-10-01T00:30:12Z
       mode: "update"
       note: "Apply architecture-review contract refinements: lock modes, generation preparation, orphan classification, env overlay"
+    - model: "gpt-6-sol"
+      harness: "codex-cli"
+      at: 2026-10-02T05:09:42Z
+      mode: "implement"
+      note: "Start EP-1 and record core package bootstrap progress"
   reviews:
     - model: "claude-fable-5-1"
       harness: "claude-code"
@@ -66,7 +71,7 @@ No relevant local ADR existed initially; `mori show --full` confirms there is no
 
 | # | Title | Path | Hard Deps | Soft Deps | Status |
 |---|-------|------|-----------|-----------|--------|
-| 1 | Compile deterministic fixture plans and typed configuration | [1-compile-deterministic-fixture-plans-and-typed-configuration.md](../plans/1-compile-deterministic-fixture-plans-and-typed-configuration.md) | None | None | Not Started |
+| 1 | Compile deterministic fixture plans and typed configuration | [1-compile-deterministic-fixture-plans-and-typed-configuration.md](../plans/1-compile-deterministic-fixture-plans-and-typed-configuration.md) | None | None | In Progress |
 | 2 | Load SQL fixtures atomically into existing PostgreSQL databases | [2-load-sql-fixtures-atomically-into-existing-postgresql-databases.md](../plans/2-load-sql-fixtures-atomically-into-existing-postgresql-databases.md) | EP-1 | None | Not Started |
 | 3 | Manage reusable baselines and isolated database leases | [3-manage-reusable-baselines-and-isolated-database-leases.md](../plans/3-manage-reusable-baselines-and-isolated-database-leases.md) | EP-2 | None | Not Started |
 | 4 | Expose fixture commands and hurl-workbench handoff | [4-expose-fixture-commands-and-hurl-workbench-handoff.md](../plans/4-expose-fixture-commands-and-hurl-workbench-handoff.md) | EP-3 | None | Not Started |
@@ -109,7 +114,7 @@ The [Haskell standards audit](../research/haskell-standards-audit.md) owns the a
 
 ## Progress
 
-Planning complete and architecture-reviewed on 2026-09-30, with the review's shared-contract refinements applied; 0 of 5 child plans implemented. The first child is ready to begin. The remaining children await their stated implementation prerequisites, not missing user input. All integration/performance/release gates are assigned to the fifth child, with focused correctness proofs required earlier. No benchmark result or package build is claimed by this planning change.
+Planning complete and architecture-reviewed on 2026-09-30, with the review's shared-contract refinements applied. EP-1 is in progress: Seihou's `nix-haskell-flake` has bootstrapped the development environment, and core package implementation is underway. 0 of 5 child plans are complete. The remaining children await their stated implementation prerequisites. All integration/performance/release gates are assigned to the fifth child, with focused correctness proofs required earlier.
 
 
 ## Surprises & Discoveries

@@ -16,4 +16,13 @@ in  Schema.Project::{
       }
     , repos =
       [ Schema.Repo::{ name = "hinagata", github = Some "shinzui/hinagata" } ]
+    , packages =
+      [ Schema.Package::{
+        , name = "hinagata-core"
+        , type = Schema.PackageType.Library
+        , language = Schema.Language.Haskell
+        , path = Some "hinagata-core"
+        , description = Some "Pure fixture planning, validated identifiers, and connection descriptions"
+        }
+      ]
     }

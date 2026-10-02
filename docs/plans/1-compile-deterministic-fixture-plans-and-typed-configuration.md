@@ -32,6 +32,11 @@ provenance:
       at: 2026-10-01T00:30:12Z
       mode: "update"
       note: "Add clone strategy and declared grants/settings to the Settei declaration; README is extended not created"
+    - model: "gpt-6-sol"
+      harness: "codex-cli"
+      at: 2026-10-02T05:09:42Z
+      mode: "implement"
+      note: "Bootstrap Seihou environment and build pure core graph and connection types"
   reviews:
     - model: "claude-fable-5-1"
       harness: "claude-code"
@@ -52,9 +57,11 @@ A Haskell caller can compile fixture sources into a deterministic, reusable plan
 
 ## Progress
 
-- [ ] A released dependency cohort builds and the pure fixture graph tests pass.
+- [x] A released dependency cohort builds and the pure fixture graph tests pass (2026-10-01: GHC 9.12.4, `nix develop -c just check`, including Cabal tests, source distribution, formatter, and local-system flake checks; released lens and Aeson versions checked against Hackage and tags).
 - [ ] SQL/CSV source bundles have deterministic plans/digests and reject invalid or changing sources.
 - [ ] Settei configuration schema, precedence inputs, and redaction are tested without database access.
+
+Handoff (2026-10-01): Seihou `nix-haskell-flake` v0.26.0 generated the managed flake and exact lock. `hinagata-core` now exposes pure graph resolution, validated identifiers, and escaped/redacted libpq descriptions. Manifest decoding, frozen bundles, SQL policy, and Settei declarations remain to be implemented before this child is complete.
 
 
 ## Surprises & Discoveries

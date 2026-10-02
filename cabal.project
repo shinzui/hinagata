@@ -1,0 +1,4 @@
+packages: hinagata-core
+tests: True
+benchmarks: True
+write-ghc-environment-files: never
