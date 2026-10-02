@@ -227,7 +227,7 @@ prepare connection maintenance options identity spec@BaselineSpec {configuration
 prepareLocked :: Maybe FingerprintComparison -> PQ.Connection -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> HinagataConfig -> FixturePlan -> Text -> Text -> Text -> BaselineSpec -> Bool -> Deadline -> IO (Either BaselineError (BaselineRef, PreparationKind, Maybe FingerprintComparison))
 prepareLocked comparison connection maintenance options identity configuration basePlan projectText digest manifest spec reusable deadline = do
   let table = quoteSqlIdentifier (maintenanceSchema configuration) <> ".\"generations\""
-      interruptedSql = Encoding.encodeUtf8 ("UPDATE " <> table <> " SET state = 'Failed', updated_at = clock_timestamp() WHERE project_id = $1 AND fingerprint = $2 AND state = 'Building'")
+      interruptedSql = Encoding.encodeUtf8 ("UPDATE " <> table <> " SET state = 'Failed', last_error = 'builder session ended before publication', updated_at = clock_timestamp() WHERE project_id = $1 AND fingerprint = $2 AND state = 'Building'")
       interruptedArgs = map (Just . Encoding.encodeUtf8) [projectText, digest]
   interrupted <- queryParamRows connection deadline Sql interruptedSql interruptedArgs 0
   case interrupted of
@@ -302,7 +302,7 @@ lookupReady connection configuration plan hook deadline project digest = do
       database <- maybe (Left (BaselineError "ready generation has an invalid database name" Nothing)) Right (either (const Nothing) Just (mkDatabaseName (Encoding.decodeUtf8 name)))
       number <- maybe (Left (BaselineError "ready generation has an invalid database OID" Nothing)) Right (readMaybe (Text.unpack (Encoding.decodeUtf8 oid)))
       let owned = OwnedDatabase database number (Encoding.decodeUtf8 token)
-      Right (Just (BaselineRef database (Encoding.decodeUtf8 generationId) digest (CatalogIdentity 1 "") owned plan hook))
+      Right (Just (BaselineRef database (Encoding.decodeUtf8 generationId) digest (CatalogIdentity 2 "") owned plan hook))
     Right _ -> Left (BaselineError "ready generation has incomplete identity" Nothing)
 
 buildGeneration :: PQ.Connection -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> HinagataConfig -> FixturePlan -> Text -> Text -> Text -> BaselineSpec -> Deadline -> IO (Either BaselineError (BaselineRef, PreparationKind))
@@ -325,9 +325,9 @@ buildGeneration connection maintenance options identity configuration plan proje
             Right _ -> do
               built <- construct connection maintenance options identity configuration plan generationId database token spec deadline
               case built of
-                Left failure -> do
-                  let failedSql = Encoding.encodeUtf8 ("UPDATE " <> table <> " SET state = 'Failed', updated_at = clock_timestamp() WHERE id = $1")
-                  _ <- queryParamRows connection deadline Sql failedSql [Just identifier] 0
+                Left failure@BaselineError {cause = failureCause} -> do
+                  let failedSql = Encoding.encodeUtf8 ("UPDATE " <> table <> " SET state = 'Failed', last_error = $2, updated_at = clock_timestamp() WHERE id = $1")
+                  _ <- queryParamRows connection deadline Sql failedSql [Just identifier, Just (Encoding.encodeUtf8 (Text.take 512 failureCause))] 0
                   pure (Left failure)
                 Right owned -> do
                   let readySql = Encoding.encodeUtf8 ("UPDATE " <> table <> " SET state = 'Ready', database_oid = $2::oid, updated_at = clock_timestamp() WHERE id = $1")

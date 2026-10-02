@@ -6,7 +6,11 @@ description: Private native libpq sessions for atomic SQL and CSV fixtures.
 category: Testing
 license: BSD-3-Clause
 license-file: LICENSE
-data-files: sql/catalog-v1.sql
+data-files:
+  sql/catalog-v1.sql
+  sql/catalog-v2.sql
+  sql/upgrade-v1-v2.sql
+
 build-type: Simple
 
 common common
@@ -58,6 +62,7 @@ test-suite hinagata-postgres-test
   type: exitcode-stdio-1.0
   hs-source-dirs: test
   main-is: Main.hs
+  other-modules: Paths_hinagata_postgres
   ghc-options: -O0
   build-depends:
     base >=4.21 && <5,

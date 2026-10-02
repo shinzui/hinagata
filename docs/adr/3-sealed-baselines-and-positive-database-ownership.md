@@ -16,6 +16,8 @@ Amended: 2026-10-02 (per-clone preparation before scenario loading)
 
 Amended: 2026-10-02 (ownership-checked sealed baseline retirement)
 
+Amended: 2026-10-02 (transactional catalog v1-to-v2 upgrade and failure diagnostics)
+
 ## Context
 
 Reuse must not silently test stale migrations or share scenario state. CREATE/DROP DATABASE are nontransactional, and copying a template requires no connected sessions.
@@ -36,6 +38,8 @@ A caller-supplied classifier identifies failure values without changing them. Th
 An optional trusted clone preparation hook uses setup access after clone grants and settings and before scenario fixtures. It runs for every new clone, including clones of a reused baseline. The hook is kept on the in-memory baseline handle and does not affect the sealed template fingerprint; a hook failure prevents callback handoff and triggers ownership-checked release.
 
 Baseline retirement takes the generation lock exclusively, rechecks the generation record and positive database identity, records Retiring before the nontransactional drop, and leaves that record as a tombstone for issued clone references. Existing clones remain independent of the removed template. A stale handle fails the Ready check, while a later ensure call may build a new generation for the same fingerprint.
+
+Fresh maintenance catalogs use format 2. An owned format-1 catalog upgrades under the bootstrap transaction and advisory lock, preserving its cluster UUID and records while adding diagnostic columns to generations and allocations. Read-only inspection reports that an upgrade is required without changing the schema. Failed builds and interrupted builders record a bounded non-secret reason; failed clone drops retain a diagnostic alongside their catalog state.
 
 ## Consequences
 

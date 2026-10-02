@@ -87,6 +87,8 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 2026-10-02 connection evidence: The disposable-cluster socket and TCP suites hold four managed callbacks open with one application session apiece and observe nine client connections total: four maintenance lock sessions, four application sessions, and the observing administration session. This measures the local manager ceiling in that setup, not a global cluster admission guarantee. Detailed queue/lock/clone/load/release timing reports remain open in the second milestone.
 
+2026-10-02 catalog upgrade progress: New catalogs use format 2 with nullable generation/allocation failure diagnostics. `ensureCatalog` upgrades an owned format-1 schema under the existing bootstrap transaction and advisory lock, preserving its UUID and records; `inspectCatalog` asks the caller to perform the upgrade while remaining read-only. Disposable-cluster socket and TCP tests create a real format-1 schema, verify refusal before upgrade, then verify format-2 identity and columns afterward. A deliberately failing second upgrade statement proves that the first DDL change rolls back and the catalog remains at format 1. Failed generation builds, interrupted builders, and failed clone drops now retain generic diagnostics. Allocation-boundary process kills remain in the third milestone.
+
 
 ## Surprises & Discoveries
 

@@ -22,6 +22,7 @@ import Hinagata.Postgres.Ownership
 import Hinagata.Postgres.Session
 import Hinagata.Prelude
 import Hinagata.Types
+import Paths_hinagata_postgres (getDataFileName)
 import System.Directory (createDirectoryIfMissing)
 import System.Environment (lookupEnv)
 import System.Exit (exitFailure)
@@ -207,13 +208,33 @@ integrationTests socket = withSystemTempDirectory "hinagata-postgres-test-" $ \w
 
 lifecycleTests :: ConnectionTarget -> PQ.Connection -> Host -> Port -> Text -> DatabaseName -> FilePath -> FilePath -> FixturePlan -> IO ()
 lifecycleTests target connection host port adminUser database fixtureRoot bundleRoot goodPlan = do
+  legacySchema <- orFail (mkSqlIdentifier "hinagata_legacy_test")
+  legacyDdl <- ByteString.readFile =<< getDataFileName "sql/catalog-v1.sql"
+  execCheck connection (Encoding.encodeUtf8 (Text.replace "%SCHEMA%" (quoteSqlIdentifier legacySchema) (Encoding.decodeUtf8 legacyDdl)))
+  legacyVersion <- queryInt connection "SELECT format_version FROM hinagata_legacy_test.meta"
+  assert "legacy fixture starts at catalog version 1" (legacyVersion == 1)
+  legacyPreview <- inspectCatalog target legacySchema defaultSessionOptions
+  assert "read-only inspection requests a legacy catalog upgrade" (case legacyPreview of Left CatalogError {cause} -> "version-2 upgrade" `Text.isInfixOf` cause; _ -> False)
+  legacyUuid <- queryText connection "SELECT cluster_uuid::text FROM hinagata_legacy_test.meta"
+  upgraded <- ensureCatalog target legacySchema defaultSessionOptions
+  assert "owned version-1 catalog upgrades in place" (case upgraded of Right CatalogIdentity {formatVersion = 2, clusterUuid} -> Encoding.encodeUtf8 clusterUuid == legacyUuid; _ -> False)
+  inspectedUpgrade <- inspectCatalog target legacySchema defaultSessionOptions
+  assert "upgraded catalog passes read-only inspection" (inspectedUpgrade == upgraded)
+  assert "upgrade installs diagnostic columns" =<< ((== 2) <$> queryInt connection "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'hinagata_legacy_test' AND table_name IN ('generations', 'allocations') AND column_name = 'last_error'")
+  partialSchema <- orFail (mkSqlIdentifier "hinagata_partial_test")
+  execCheck connection (Encoding.encodeUtf8 (Text.replace "%SCHEMA%" (quoteSqlIdentifier partialSchema) (Encoding.decodeUtf8 legacyDdl)))
+  execCheck connection "ALTER TABLE hinagata_partial_test.allocations ADD COLUMN last_error text"
+  refusedUpgrade <- ensureCatalog target partialSchema defaultSessionOptions
+  assert "failed catalog upgrade is refused" (case refusedUpgrade of Left _ -> True; Right _ -> False)
+  assert "failed upgrade rolls back format version" =<< ((== 1) <$> queryInt connection "SELECT format_version FROM hinagata_partial_test.meta")
+  assert "failed upgrade rolls back its earlier DDL" =<< ((== 0) <$> queryInt connection "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'hinagata_partial_test' AND table_name = 'generations' AND column_name = 'last_error'")
   catalogSchema <- orFail (mkSqlIdentifier "hinagata_test")
   absentPreview <- inspectCatalog target catalogSchema defaultSessionOptions
   assert "catalog inspection refuses an absent schema without creating it" (case absentPreview of Left _ -> True; Right _ -> False)
   assert "catalog inspection leaves the schema absent" =<< ((== 0) <$> queryInt connection "SELECT count(*) FROM pg_namespace WHERE nspname = 'hinagata_test'")
   firstCatalog <- ensureCatalog target catalogSchema defaultSessionOptions
   secondCatalog <- ensureCatalog target catalogSchema defaultSessionOptions
-  assert "catalog initializes and reuses one cluster identity" (case (firstCatalog, secondCatalog) of (Right first, Right second) -> first == second && formatVersion first == 1; _ -> False)
+  assert "catalog initializes and reuses one cluster identity" (case (firstCatalog, secondCatalog) of (Right first, Right second) -> first == second && formatVersion first == 2; _ -> False)
   catalog <- orFail firstCatalog
   execCheck connection "CREATE DATABASE hinagata_owned_test"
   let marker = "hinagata:v1:" <> clusterUuid catalog <> ":test-token"

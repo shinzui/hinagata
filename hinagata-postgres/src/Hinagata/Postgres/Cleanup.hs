@@ -327,6 +327,8 @@ applyLocked connection maintenance options identity configuration selection dead
                         case dropped of
                           Left problem -> do
                             _ <- changeState connection configuration deadline snapshot "CleanupFailed"
+                            let statement = Encoding.encodeUtf8 ("UPDATE " <> quoteSqlIdentifier (maintenanceSchema configuration) <> ".\"allocations\" SET last_error = $2 WHERE id = $1")
+                            _ <- queryParamRows connection deadline Sql statement [Just (Encoding.encodeUtf8 (allocation snapshot)), Just (Encoding.encodeUtf8 (Text.take 512 (reason problem)))] 0
                             pure (Left (nativeFailure problem))
                           Right () -> finishReleased connection configuration deadline snapshot
 

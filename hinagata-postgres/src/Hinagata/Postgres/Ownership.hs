@@ -51,9 +51,9 @@ data OwnedDatabase = OwnedDatabase
 data OwnershipEvidence = OwnershipMatches | OwnershipMissing | OwnershipMismatch
   deriving stock (Eq, Show)
 
--- | Initialize a dedicated, absent schema or validate an existing version-1
--- catalog. An occupied schema without Hinagata's version marker is refused.
--- The administration role must own an existing catalog schema.
+-- | Initialize a dedicated, absent version-2 schema or transactionally upgrade
+-- an owned version-1 catalog. An occupied schema without Hinagata's version
+-- marker is refused. The administration role must own an existing schema.
 ensureCatalog :: ConnectionTarget -> SqlIdentifier -> SessionOptions -> IO (Either CatalogError CatalogIdentity)
 ensureCatalog target schema options = do
   opened <- withSession target options $ \session ->
@@ -75,7 +75,11 @@ inspectCatalog target schema options = do
       checked <- case namespace of
         Left failure -> pure (Left (nativeFailure failure))
         Right [[Just owner, Just current]]
-          | owner == current -> validateCatalog connection schema deadline
+          | owner == current -> do
+              inspected <- validateCatalog connection schema deadline
+              pure $ case inspected of
+                Right CatalogIdentity {formatVersion = 1} -> Left (CatalogError "maintenance catalog requires a version-2 upgrade through ensureCatalog" Nothing Nothing)
+                other -> other
           | otherwise -> pure (Left (CatalogError "maintenance schema is owned by another role" Nothing Nothing))
         Right [] -> pure (Left (CatalogError "maintenance catalog does not exist" Nothing Nothing))
         Right _ -> pure (Left (CatalogError "maintenance schema identity is ambiguous" Nothing Nothing))
@@ -143,13 +147,17 @@ initialize connection schema deadline = do
         Left failure -> pure (Left (nativeFailure failure))
         Right [] -> createCatalog connection schema deadline
         Right [[Just owner, Just current]]
-          | owner == current -> validateCatalog connection schema deadline
+          | owner == current -> do
+              existing <- validateCatalog connection schema deadline
+              case existing of
+                Right CatalogIdentity {formatVersion = 1} -> upgradeCatalog connection schema deadline
+                other -> pure other
           | otherwise -> pure (Left (CatalogError "maintenance schema is owned by another role" Nothing Nothing))
         Right _ -> pure (Left (CatalogError "maintenance schema identity is ambiguous" Nothing Nothing))
 
 createCatalog :: PQ.Connection -> SqlIdentifier -> Deadline -> IO (Either CatalogError CatalogIdentity)
 createCatalog connection schema deadline = do
-  file <- getDataFileName "sql/catalog-v1.sql"
+  file <- getDataFileName "sql/catalog-v2.sql"
   source <- try @IOException (ByteString.readFile file)
   case source of
     Left _ -> pure (Left (CatalogError "catalog DDL is unavailable" Nothing Nothing))
@@ -159,6 +167,19 @@ createCatalog connection schema deadline = do
               Text.replace "%SCHEMA%" (quoteSqlIdentifier schema) (Encoding.decodeUtf8 bytes)
       created <- query connection deadline Sql statement
       case created of
+        Left failure -> pure (Left (nativeFailure failure))
+        Right () -> validateCatalog connection schema deadline
+
+upgradeCatalog :: PQ.Connection -> SqlIdentifier -> Deadline -> IO (Either CatalogError CatalogIdentity)
+upgradeCatalog connection schema deadline = do
+  file <- getDataFileName "sql/upgrade-v1-v2.sql"
+  source <- try @IOException (ByteString.readFile file)
+  case source of
+    Left _ -> pure (Left (CatalogError "catalog upgrade DDL is unavailable" Nothing Nothing))
+    Right bytes -> do
+      let statement = Encoding.encodeUtf8 (Text.replace "%SCHEMA%" (quoteSqlIdentifier schema) (Encoding.decodeUtf8 bytes))
+      upgraded <- query connection deadline Sql statement
+      case upgraded of
         Left failure -> pure (Left (nativeFailure failure))
         Right () -> validateCatalog connection schema deadline
 
@@ -172,11 +193,18 @@ validateCatalog connection schema deadline = do
     Right [[Just "4"]] -> do
       let statement = Encoding.encodeUtf8 ("SELECT format_version::text, cluster_uuid::text FROM " <> quoteSqlIdentifier schema <> ".\"meta\" WHERE singleton")
       rows <- queryParamRows connection deadline Sql statement [] 2
-      pure $ case rows of
-        Left failure -> Left (nativeFailure failure)
-        Right [[Just "1", Just uuid]] -> Right (CatalogIdentity 1 (Encoding.decodeUtf8 uuid))
-        Right _ -> Left (CatalogError "maintenance catalog has an unsupported or invalid format" Nothing Nothing)
-    Right _ -> pure (Left (CatalogError "maintenance schema lacks a complete Hinagata version-1 catalog" Nothing Nothing))
+      case rows of
+        Left failure -> pure (Left (nativeFailure failure))
+        Right [[Just "1", Just uuid]] -> pure (Right (CatalogIdentity 1 (Encoding.decodeUtf8 uuid)))
+        Right [[Just "2", Just uuid]] -> do
+          let columnsQuery = "SELECT count(*)::text FROM information_schema.columns WHERE table_schema = $1 AND table_name IN ('generations', 'allocations') AND column_name = 'last_error' AND data_type = 'text'"
+          columns <- queryParamRows connection deadline Sql columnsQuery [Just name] 1
+          pure $ case columns of
+            Left failure -> Left (nativeFailure failure)
+            Right [[Just "2"]] -> Right (CatalogIdentity 2 (Encoding.decodeUtf8 uuid))
+            Right _ -> Left (CatalogError "maintenance catalog lacks version-2 columns" Nothing Nothing)
+        Right _ -> pure (Left (CatalogError "maintenance catalog has an unsupported or invalid format" Nothing Nothing))
+    Right _ -> pure (Left (CatalogError "maintenance schema lacks a complete Hinagata catalog" Nothing Nothing))
 
 rollbackCatalog :: PQ.Connection -> SessionOptions -> CatalogError -> IO (SessionDisposition (Either CatalogError CatalogIdentity))
 rollbackCatalog connection options failure = do
