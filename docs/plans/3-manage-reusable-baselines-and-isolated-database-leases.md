@@ -59,7 +59,7 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 - [x] Versioned maintenance records and generation publication make baseline reuse/invalidation observable.
 - [x] Concurrent leases receive isolated committed fixture state and release after callback termination.
-- [ ] Crash, preservation, detached lease, and cleanup tests prove positive ownership and race safety.
+- [x] Crash, preservation, detached lease, and cleanup tests prove positive ownership and race safety.
 
 2026-10-02 implementation note: The first milestone is underway. Version-1 DDL lives in `hinagata-postgres/sql/catalog-v1.sql`; `ensureCatalog` initializes a dedicated schema under a transaction and advisory transaction lock, records a cluster UUID, and validates schema/table ownership and format on later opens. `verifyOwnedDatabase` compares name, OID, current owner, and cluster/token comment. `Hinagata.Postgres.Baseline.ensureBaseline` now verifies the frozen plan before allocation, records intent before `CREATE DATABASE`, binds OID and comment before hook work, applies database/schema grants and role-owned settings, runs migration/base-load/verification, checks locale/extensions and open sessions, seals, then publishes. Known revisions reuse only a positively identified ready generation; unknown migration revisions build afresh. The disposable-cluster socket and TCP suites cover separate administration/setup/application roles, a nontransactional `CREATE INDEX CONCURRENTLY` migration, credential rotation, source/revision invalidation, failed rebuild preserving ready state, concurrent cold callers, missing extension, changed marker, and catalog refusal. `just check` passes local package/format/source-distribution/Nix gates, and Haddock generates the exposed PostgreSQL API. Explanation of changed fingerprint components, builder-death/waiter deadlines, clone allocation, leases, and cleanup remain open, so no milestone checkbox is complete yet.
 
@@ -101,6 +101,8 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 2026-10-02 seal/publication progress: A disposable-catalog trigger pauses the Building-to-Ready update after the baseline database is sealed. Killing the worker and server backend leaves the generation Building and its sealed database present. The next caller marks that generation Failed and publishes one replacement Ready generation. A separate worker killed after Ready publication leaves a reusable sealed generation. The socket and TCP suites and `just check` pass.
 
+2026-10-02 test-framework adapter progress: `hinagata-postgres/examples/tasty-adapter/TastyAdapter.hs` builds as part of the integration test component, with Tasty dependencies confined to that component. Its `databaseCase` wraps a suite-scoped manager and classifies a returned `Left` as a retained test failure; the integration suite executes the same adapter path with a real clone. The example documents callback connection closure and explicit retained-lease cleanup. Socket and TCP suites and `just check` pass for the adapter and additional OID/cluster identity and unknown catalog-format assertions.
+
 2026-10-02 interrupted-drop progress: A disposable-cluster test installs a trigger scoped to one allocation, pausing its Released catalog update after the actual `DROP DATABASE` has succeeded. Killing the worker and server backend then leaves a positively bound Releasing record whose database is absent. Cleanup preview reports Missing, and explicit apply idempotently records Released. The socket and TCP suites and `just check` pass. The trigger is removed before later tests.
 
 2026-10-02 drop-failure progress: The disposable PostgreSQL test cluster enables prepared transactions solely for fault injection. A prepared transaction in a detached clone makes `releaseLease` fail at `DROP DATABASE ... WITH (FORCE)`; the clone remains present and its allocation and lease become CleanupFailed with a stored diagnostic. Rolling back the prepared transaction permits an explicit release retry. The socket and TCP suites and `just check` pass.
@@ -135,6 +137,10 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 
 ## Outcomes & Retrospective
+
+EP-3 provides sealed, fingerprinted baselines and isolated, concurrent clone leases on a caller-owned PostgreSQL cluster. The manager bounds local setup and active capacity; classified callbacks, detached leases, retention, inspection, explicit cleanup, and baseline retirement use positive database identity and catalog states. Disposable socket and TCP suites cover generation and allocation process-death boundaries, live-lock races, drop refusal, unknown catalog formats, and missing CREATEDB permission. A million-row prepared baseline was reused and cloned without replaying COPY, and eight CREATE DATABASE statements overlapped. Stage timings are exposed for successful classified scopes; partial-failure and collection-wide aggregate timings remain possible follow-up diagnostics, not part of the accepted result types.
+
+The test-framework adapter remains a test-component example, preserving the core library's framework independence. The final `nix develop -c just check` passed after the completion documentation edit.
 
 
 ## Context and Orientation

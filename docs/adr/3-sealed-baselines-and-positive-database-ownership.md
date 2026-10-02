@@ -24,6 +24,8 @@ Amended: 2026-10-02 (callback cleanup failure diagnostics and retry clearing)
 
 Amended: 2026-10-02 (interrupt callbacks when their lease-owning session dies)
 
+Amended: 2026-10-02 (process-death evidence across allocation and publication boundaries)
+
 ## Context
 
 Reuse must not silently test stale migrations or share scenario state. CREATE/DROP DATABASE are nontransactional, and copying a template requires no connected sessions.
@@ -48,6 +50,8 @@ An optional trusted clone preparation hook uses setup access after clone grants 
 Baseline retirement takes the generation lock exclusively, rechecks the generation record and positive database identity, records Retiring before the nontransactional drop, and leaves that record as a tombstone for issued clone references. Existing clones remain independent of the removed template. A stale handle fails the Ready check, while a later ensure call may build a new generation for the same fingerprint.
 
 Fresh maintenance catalogs use format 2. An owned format-1 catalog upgrades under the bootstrap transaction and advisory lock, preserving its cluster UUID and records while adding diagnostic columns to generations and allocations. Read-only inspection reports that an upgrade is required without changing the schema. Failed builds and interrupted builders record a bounded non-secret reason; failed clone drops retain a diagnostic alongside their catalog state.
+
+A crash after CREATE or after writing the ownership marker but before binding the database OID leaves an ambiguous allocation: even a matching marker is insufficient deletion authority without the committed OID. A crash after sealing but before Ready publication leaves a Building generation and a sealed database; the next builder marks the interrupted record Failed under its fingerprint lock and constructs a new generation, leaving the old database inspectable. A Ready generation remains reusable after its publishing process dies. An unknown catalog format is refused without replacement.
 
 Classified lease outcomes report separate monotonic timings for catalog setup, generation-lock wait, clone creation and identity binding, scenario loading, and completion. Manager admission adds active- and setup-queue wait; direct leases record zero queue time. These are caller-visible stage durations, not a cluster-wide throughput guarantee.
 

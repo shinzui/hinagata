@@ -73,7 +73,7 @@ No relevant local ADR existed initially; `mori show --full` confirms there is no
 |---|-------|------|-----------|-----------|--------|
 | 1 | Compile deterministic fixture plans and typed configuration | [1-compile-deterministic-fixture-plans-and-typed-configuration.md](../plans/1-compile-deterministic-fixture-plans-and-typed-configuration.md) | None | None | Complete |
 | 2 | Load SQL fixtures atomically into existing PostgreSQL databases | [2-load-sql-fixtures-atomically-into-existing-postgresql-databases.md](../plans/2-load-sql-fixtures-atomically-into-existing-postgresql-databases.md) | EP-1 | None | Complete |
-| 3 | Manage reusable baselines and isolated database leases | [3-manage-reusable-baselines-and-isolated-database-leases.md](../plans/3-manage-reusable-baselines-and-isolated-database-leases.md) | EP-2 | None | In Progress |
+| 3 | Manage reusable baselines and isolated database leases | [3-manage-reusable-baselines-and-isolated-database-leases.md](../plans/3-manage-reusable-baselines-and-isolated-database-leases.md) | EP-2 | None | Complete |
 | 4 | Expose fixture commands and hurl-workbench handoff | [4-expose-fixture-commands-and-hurl-workbench-handoff.md](../plans/4-expose-fixture-commands-and-hurl-workbench-handoff.md) | EP-3 | None | Not Started |
 | 5 | Prove Keiro service integration and performance | [5-prove-keiro-service-integration-and-performance.md](../plans/5-prove-keiro-service-integration-and-performance.md) | EP-4 | None | Not Started |
 
@@ -114,7 +114,7 @@ The [Haskell standards audit](../research/haskell-standards-audit.md) owns the a
 
 ## Progress
 
-Planning complete and architecture-reviewed on 2026-09-30, with the review's shared-contract refinements applied. EP-1 is complete: Seihou's `nix-haskell-flake` bootstrapped the development environment, and the core package passes its tests, source-distribution, formatter, Nix package and flake checks, and the CSV capture residency probe. EP-2 is complete: the private libpq loader passes socket-only and TCP integration suites, source distribution, Haddock, local Nix checks, and a 100k/1m-row bounded-residency benchmark. EP-3 is in progress on baseline and lease lifecycle. 2 of 5 child plans are complete. Full service integration/performance/release gates remain assigned to the fifth child, with focused correctness proofs required earlier.
+Planning complete and architecture-reviewed on 2026-09-30, with the review's shared-contract refinements applied. EP-1 is complete: Seihou's `nix-haskell-flake` bootstrapped the development environment, and the core package passes its tests, source-distribution, formatter, Nix package and flake checks, and the CSV capture residency probe. EP-2 is complete: the private libpq loader passes socket-only and TCP integration suites, source distribution, Haddock, local Nix checks, and a 100k/1m-row bounded-residency benchmark. EP-3 is complete: sealed baseline reuse, concurrent isolated leases, ownership-aware recovery, catalog upgrades, and a million-row prepared baseline pass disposable socket/TCP and bulk acceptance runs. 3 of 5 child plans are complete. CLI/process handoff is next; full service integration/performance/release gates remain assigned to the fifth child.
 
 
 ## Surprises & Discoveries
@@ -123,7 +123,9 @@ The [prior-art review](../research/prior-art.md) supports prepared templates and
 
 The 2026-09-30 architecture review verified two PostgreSQL facts that shape the lifecycle contract. CREATE DATABASE takes only a share lock on its template (`src/backend/commands/dbcommands.c`: "ShareLock allows two CREATE DATABASEs to work from the same template concurrently"), so an exclusive Hinagata allocation lock would have been the concurrency bottleneck the fifth plan measures. PostgreSQL 15 removed CREATE on `public` for roles other than the database owner, so a setup role distinct from the owning administration role cannot migrate a fresh generation unless declared grants are applied first.
 
-EP-1's 2026-10-01 memory probe caught lazy SHA256 context accumulation despite bounded reads; strict updates hold roughly constant GHC heap residency for 8 MiB and 80 MiB CSV captures. PostgreSQL's database-level `CREATE` privilege does not provide `CREATE ON SCHEMA public`, so the shared Settei contract now declares schema grants separately and [ADR 3](../adr/3-sealed-baselines-and-positive-database-ownership.md) records the distinction. EP-3 must apply the declared schema grants before migration on a fresh generation and assert them on clones.
+EP-1's 2026-10-01 memory probe caught lazy SHA256 context accumulation despite bounded reads; strict updates hold roughly constant GHC heap residency for 8 MiB and 80 MiB CSV captures. PostgreSQL's database-level `CREATE` privilege does not provide `CREATE ON SCHEMA public`, so the shared Settei contract now declares schema grants separately and [ADR 3](../adr/3-sealed-baselines-and-positive-database-ownership.md) records the distinction. EP-3 applies the declared schema grants before migration on a fresh generation and asserts them on clones.
+
+EP-3 fault injection confirms that process death after CREATE or marker writing can leave an allocation with no committed OID. EP-4's cleanup command must present that ambiguity and refuse automatic deletion. A sealed but unpublished Building generation remains inspectable while the next builder publishes a replacement; a published Ready generation remains reusable after its publisher exits.
 
 
 ## Decision Log

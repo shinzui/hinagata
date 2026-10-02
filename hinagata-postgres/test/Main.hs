@@ -35,6 +35,7 @@ import System.IO.Temp (withSystemTempDirectory)
 import System.Posix.Signals (sigKILL, signalProcess)
 import System.Process (ProcessHandle, getPid, getProcessExitCode, proc, waitForProcess, withCreateProcess)
 import System.Timeout (timeout)
+import TastyAdapter qualified
 
 main :: IO ()
 main = do
@@ -331,6 +332,14 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   inspectedUpgrade <- inspectCatalog target legacySchema defaultSessionOptions
   assert "upgraded catalog passes read-only inspection" (inspectedUpgrade == upgraded)
   assert "upgrade installs diagnostic columns" =<< ((== 2) <$> queryInt connection "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'hinagata_legacy_test' AND table_name IN ('generations', 'allocations') AND column_name = 'last_error'")
+  execCheck connection "ALTER TABLE hinagata_legacy_test.meta DROP CONSTRAINT meta_format_version_check"
+  execCheck connection "UPDATE hinagata_legacy_test.meta SET format_version = 99"
+  unknownCatalog <- ensureCatalog target legacySchema defaultSessionOptions
+  unknownPreview <- inspectCatalog target legacySchema defaultSessionOptions
+  assert "unknown catalog versions are refused without replacement" (case (unknownCatalog, unknownPreview) of (Left _, Left _) -> True; _ -> False)
+  assert "refused unknown catalog retains its version" =<< ((== 99) <$> queryInt connection "SELECT format_version FROM hinagata_legacy_test.meta")
+  execCheck connection "UPDATE hinagata_legacy_test.meta SET format_version = 2"
+  execCheck connection "ALTER TABLE hinagata_legacy_test.meta ADD CONSTRAINT meta_format_version_check CHECK (format_version = 2)"
   partialSchema <- orFail (mkSqlIdentifier "hinagata_partial_test")
   execCheck connection (Encoding.encodeUtf8 (Text.replace "%SCHEMA%" (quoteSqlIdentifier partialSchema) (Encoding.decodeUtf8 legacyDdl)))
   execCheck connection "ALTER TABLE hinagata_partial_test.allocations ADD COLUMN last_error text"
@@ -354,6 +363,10 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   let owned = OwnedDatabase {name = ownedName, oid = ownedOid, token = "test-token"}
   matched <- verifyOwnedDatabase target defaultSessionOptions catalog owned
   assert "name, OID, and marker prove ownership" (matched == Right OwnershipMatches)
+  wrongOid <- verifyOwnedDatabase target defaultSessionOptions catalog owned {oid = ownedOid + 1}
+  assert "matching name and marker cannot override a changed OID" (wrongOid == Right OwnershipMismatch)
+  wrongCluster <- verifyOwnedDatabase target defaultSessionOptions catalog {clusterUuid = "replaced-cluster"} owned
+  assert "records from a replaced cluster cannot authorize the database" (wrongCluster == Right OwnershipMismatch)
   execCheck connection "COMMENT ON DATABASE hinagata_owned_test IS 'foreign'"
   replaced <- verifyOwnedDatabase target defaultSessionOptions catalog owned
   assert "changed ownership marker is refused" (replaced == Right OwnershipMismatch)
@@ -485,6 +498,7 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   calledAfterFailedHook <- readIORef failedHookCallback
   assert "failed clone preparation releases its clone before callback" (case failedHookLease of Left LeaseError {cause = "clone preparation hook failed"} -> not calledAfterFailedHook; _ -> False)
   withManager lifecycleConfig $ \manager -> do
+    TastyAdapter.runDatabaseCase manager firstRef scenarioPlan (\info -> consume info >> pure (Right ()))
     let requests = DatabaseRequest "zeta" firstRef scenarioPlan :| [DatabaseRequest "alpha" firstRef scenarioPlan]
     collection <-
       withDatabases
