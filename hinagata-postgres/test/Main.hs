@@ -1,7 +1,7 @@
 module Main (main) where
 
 import Control.Concurrent (forkIO, killThread, threadDelay)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, readMVar, takeMVar, tryReadMVar)
 import Control.Exception (SomeException, bracket, try)
 import Control.Monad (forM_)
 import Data.ByteString.Char8 qualified as ByteString
@@ -548,11 +548,11 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   cleanupLifecycleTests lifecycleConfig catalog firstRef scenarioPlan connection database
   retentionLifecycleTests lifecycleConfig firstRef scenarioPlan connection catalog
   bulkRequested <- (== Just "1") <$> lookupEnv "HINAGATA_TEST_BULK_BASELINE"
-  when bulkRequested (bulkBaselineTests lifecycleConfig fixtureRoot bundleRoot)
+  when bulkRequested (bulkBaselineTests lifecycleConfig fixtureRoot bundleRoot connection)
   generationLifecycleTests lifecycleConfig baselineSpec firstRef scenarioPlan fixtureRoot bundleRoot connection migrationCalls messageSetting target catalogSchema
 
-bulkBaselineTests :: HinagataConfig -> FilePath -> FilePath -> IO ()
-bulkBaselineTests configuration fixtureRoot bundleRoot = do
+bulkBaselineTests :: HinagataConfig -> FilePath -> FilePath -> PQ.Connection -> IO ()
+bulkBaselineTests configuration fixtureRoot bundleRoot observer = do
   let directory = fixtureRoot </> "bulk-prepared"
       csv = directory </> "rows.csv"
       bundleConfig = BundleConfig fixtureRoot bundleRoot (positive 1048576) (positive 65536)
@@ -587,6 +587,24 @@ bulkBaselineTests configuration fixtureRoot bundleRoot = do
   firstClone <- countClone baseline base
   secondClone <- countClone baseline base
   assert "repeated clones retain one million rows without replaying duplicate-key COPY" (firstClone == Right rows && secondClone == Right rows)
+  start <- newEmptyMVar
+  finished <- mapM (const newEmptyMVar) [1 .. 8 :: Int]
+  mapM_ (\slot -> forkIO (readMVar start >> acquireDetached configuration baseline base >>= putMVar slot)) finished
+  putMVar start ()
+  let observe peak 0 = pure peak
+      observe peak remaining = do
+        active <- queryInt observer "SELECT count(*) FROM pg_stat_activity WHERE state = 'active' AND query LIKE 'CREATE DATABASE %' AND pid <> pg_backend_pid()"
+        completed <- mapM tryReadMVar finished
+        let nextPeak = max peak active
+        if all isJust completed then pure nextPeak else threadDelay 10000 >> observe nextPeak (remaining - 1)
+  maxCreates <- observe 0 (3000 :: Int)
+  acquired <- mapM (timeout 30000000 . takeMVar) finished
+  infos <- traverse (maybe (fail "bulk clone acquisition timed out") orFail) acquired
+  let cloneNames = map (connectionDatabase . applicationTarget) infos
+  assert "eight bulk clones have distinct databases" (length (nub cloneNames) == 8)
+  assert "large-template CREATE DATABASE statements overlap" (maxCreates >= 2)
+  releases <- traverse (\LeaseInfo {leaseId} -> releaseLease configuration leaseId) infos
+  assert "eight bulk clones release after concurrency measurement" (all (\case Right (Released _) -> True; _ -> False) releases)
   withBinaryFile csv ReadWriteMode $ \handle -> ByteString.hPut handle "1,changed\n"
   changedPlan <- bundleOrFail =<< compileFixtures bundleConfig [fixtureName "bulk-prepared"]
   (changed, changedReport) <- orFail =<< ensureBaseline specification {basePlan = changedPlan, compareAgainst = Just baseline}
@@ -598,7 +616,7 @@ bulkBaselineTests configuration fixtureRoot bundleRoot = do
       PQ.finish
       (\session -> queryText session "SELECT payload FROM bulk_prepared_items WHERE id = 1")
   assert "changed bulk generation includes the modified source byte" (changedValue == Right "changed")
-  putStrLn "million-row prepared baseline, reuse, repeated clones, and source-byte invalidation passed"
+  putStrLn ("million-row prepared baseline, reuse, repeated clones, source-byte invalidation, and concurrent CREATE passed; max_active_create=" ++ show maxCreates)
 
 connectionCeilingTest :: HinagataConfig -> BaselineRef -> FixturePlan -> PQ.Connection -> IO ()
 connectionCeilingTest configuration baseline scenario connection = withManager configuration $ \manager -> do
