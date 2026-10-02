@@ -9,6 +9,7 @@ module Hinagata.Postgres.Baseline
     PreparationReport (..),
     BaselineError (..),
     ensureBaseline,
+    retireBaseline,
   )
 where
 
@@ -140,6 +141,70 @@ ensureBaseline spec@BaselineSpec {configuration} = do
               Right (Left failure) -> Left (sessionFailure failure)
               Right (Right (Right (baseline, kind, comparison))) -> Right (baseline, PreparationReport kind (baselineFingerprint baseline) (fromIntegral ((end - start) `div` 1000000)) comparison)
               Right (Right (Left failure)) -> Left failure
+
+-- | Retire a positively identified sealed generation under its exclusive
+-- generation lock. Existing clones remain independent; the Retiring catalog
+-- record is kept as a tombstone for their allocation references. A retry is
+-- idempotent after the owned template has already disappeared.
+retireBaseline :: HinagataConfig -> BaselineRef -> IO (Either BaselineError ())
+retireBaseline configuration baseline =
+  case first accessFailure (Access.adminTarget configuration (maintenanceDatabase configuration)) of
+    Left problem -> pure (Left problem)
+    Right maintenance -> do
+      let options = defaultSessionOptions {operationDeadlineMs = positiveValue (setupDeadlineMs configuration)}
+      catalog <- inspectCatalog maintenance (maintenanceSchema configuration) options
+      case catalog of
+        Left CatalogError {cause, sqlState} -> pure (Left (BaselineError cause sqlState))
+        Right identity
+          | identity /= clusterIdentity baseline -> pure (Left (BaselineError "baseline belongs to a different catalog or cluster" Nothing))
+          | otherwise -> do
+              opened <- withSession maintenance options $ \session ->
+                runExclusive session $ \connection sessionOptions -> do
+                  deadline <- deadlineAfter (operationDeadlineMs sessionOptions)
+                  locked <- queryParamRows connection deadline Sql "SELECT pg_advisory_lock(1212761905, hashtext($1))" [Just (Encoding.encodeUtf8 ("generation:" <> generationId baseline))] 1
+                  result <- case locked of
+                    Left problem -> pure (Left (nativeFailure problem))
+                    Right _ -> retireLocked connection maintenance sessionOptions identity configuration baseline deadline
+                  pure (Keep result)
+              pure $ case opened of
+                Left problem -> Left (sessionFailure problem)
+                Right (Left problem) -> Left (sessionFailure problem)
+                Right (Right result) -> result
+
+retireLocked :: PQ.Connection -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> HinagataConfig -> BaselineRef -> Deadline -> IO (Either BaselineError ())
+retireLocked connection maintenance options identity configuration baseline deadline = do
+  let table = quoteSqlIdentifier (maintenanceSchema configuration) <> ".\"generations\""
+      statement = Encoding.encodeUtf8 ("SELECT database_name::text, database_oid::text, ownership_token::text, state FROM " <> table <> " WHERE id = $1 AND project_id = $2")
+      args = map (Just . Encoding.encodeUtf8) [generationId baseline, projectIdText (project configuration)]
+  rows <- queryParamRows connection deadline Sql statement args 1
+  case rows of
+    Left problem -> pure (Left (nativeFailure problem))
+    Right [[Just database, Just oidBytes, Just tokenBytes, Just state]]
+      | database == Encoding.encodeUtf8 (databaseNameText (baselineName baseline))
+          && oidBytes == Encoding.encodeUtf8 (Text.pack (show (oid (ownership baseline))))
+          && tokenBytes == Encoding.encodeUtf8 (token (ownership baseline))
+          && state `elem` ["Ready", "Retiring"] -> do
+          evidence <- verifyOwnedDatabase maintenance options identity (ownership baseline)
+          case evidence of
+            Left CatalogError {cause, sqlState} -> pure (Left (BaselineError cause sqlState))
+            Right OwnershipMismatch -> pure (Left (BaselineError "baseline ownership changed; retirement refused" Nothing))
+            Right OwnershipMissing
+              | state == "Retiring" -> pure (Right ())
+              | otherwise -> pure (Left (BaselineError "ready baseline is missing; retirement refused" Nothing))
+            Right OwnershipMatches -> do
+              marked <- if state == "Retiring" then pure (Right []) else queryParamRows connection deadline Sql (Encoding.encodeUtf8 ("UPDATE " <> table <> " SET state = 'Retiring', updated_at = clock_timestamp() WHERE id = $1 AND state = 'Ready' RETURNING id")) [Just (Encoding.encodeUtf8 (generationId baseline))] 1
+              case marked of
+                Left problem -> pure (Left (nativeFailure problem))
+                Right [[Just _]] | state == "Ready" -> dropTemplate connection options baseline
+                Right [] | state == "Retiring" -> dropTemplate connection options baseline
+                Right _ -> pure (Left (BaselineError "baseline state changed during retirement" Nothing))
+    Right _ -> pure (Left (BaselineError "baseline generation is missing or has changed identity" Nothing))
+
+dropTemplate :: PQ.Connection -> SessionOptions -> BaselineRef -> IO (Either BaselineError ())
+dropTemplate connection options baseline = do
+  deadline <- deadlineAfter (cleanupDeadlineMs options)
+  outcome <- query connection deadline Sql (Encoding.encodeUtf8 ("DROP DATABASE " <> Access.quoteDatabase (baselineName baseline) <> " WITH (FORCE)"))
+  pure (first nativeFailure outcome)
 
 prepare :: PQ.Connection -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> BaselineSpec -> IO (Either BaselineError (BaselineRef, PreparationKind, Maybe FingerprintComparison))
 prepare connection maintenance options identity spec@BaselineSpec {configuration, basePlan, migrationRevision, verificationRevision} = do

@@ -4,7 +4,7 @@ import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, try)
 import Data.ByteString.Char8 qualified as ByteString
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Encoding
 import Database.PostgreSQL.LibPQ qualified as PQ
@@ -442,6 +442,12 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
     assert "deadline does not cancel another caller's lease" (case holder of Just (Right (Right _)) -> True; _ -> False)
     afterDeadline <- withManagedDatabase manager firstRef scenarioPlan (\_ -> pure ())
     assert "deadline releases pending admission" (case afterDeadline of Right _ -> True; Left _ -> False)
+  cleanupLifecycleTests lifecycleConfig catalog firstRef scenarioPlan connection database
+  retentionLifecycleTests lifecycleConfig firstRef scenarioPlan connection catalog
+  generationLifecycleTests lifecycleConfig baselineSpec firstRef scenarioPlan fixtureRoot bundleRoot connection migrationCalls messageSetting target catalogSchema
+
+cleanupLifecycleTests :: HinagataConfig -> CatalogIdentity -> BaselineRef -> FixturePlan -> PQ.Connection -> DatabaseName -> IO ()
+cleanupLifecycleTests lifecycleConfig catalog firstRef scenarioPlan connection database = do
   generationBytes <- queryText connection (Encoding.encodeUtf8 ("SELECT id FROM hinagata_test.generations WHERE database_name = '" <> databaseNameText (baselineDatabase firstRef) <> "'"))
   let generationText = Encoding.decodeUtf8 generationBytes
       orphanId = "11111111-1111-4111-8111-111111111111"
@@ -527,6 +533,9 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   execCheck connection (Encoding.encodeUtf8 ("INSERT INTO hinagata_test.allocations (id, project_id, generation_id, run_id, database_name, ownership_token, state) VALUES ('" <> protectedId <> "', 'baseline-test', '" <> generationText <> "', 'recovery-run', '" <> databaseNameText database <> "', '" <> ambiguousToken <> "', 'Allocating')"))
   protectedApply <- applyCleanup lifecycleConfig IncludeRetained [protectedId]
   assert "maintenance database is protected even with a catalog allocation" (case protectedApply of Right [Refused identifier _] -> identifier == protectedId; _ -> False)
+
+retentionLifecycleTests :: HinagataConfig -> BaselineRef -> FixturePlan -> PQ.Connection -> CatalogIdentity -> IO ()
+retentionLifecycleTests lifecycleConfig firstRef scenarioPlan connection catalog = do
   classifiedSuccess <- withDatabaseClassified lifecycleConfig firstRef scenarioPlan PreserveFailures not (\_ -> pure True)
   assert "successful classified value is returned unchanged and released" (case classifiedSuccess of Right LeaseOutcome {callbackValue = True, leaseDisposition = LeaseReleased, cleanupDiagnostic = Nothing} -> True; _ -> False)
   classifiedFailure <- withDatabaseClassified lifecycleConfig firstRef scenarioPlan PreserveFailures not (\_ -> pure False)
@@ -589,6 +598,9 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   assert "callback cancellation rethrows its asynchronous exception" (case cancelledResult of Just (Left _) -> True; _ -> False)
   assert "callback cancellation releases despite failure-preservation policy" =<< ((== 1) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM hinagata_test.leases WHERE id = '" <> cancelledId <> "' AND state = 'Released'")))
   assert "callback cancellation drops its database" =<< ((== 0) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> databaseNameText (connectionDatabase cancelledTarget) <> "'")))
+
+generationLifecycleTests :: HinagataConfig -> BaselineSpec -> BaselineRef -> FixturePlan -> FilePath -> FilePath -> PQ.Connection -> IORef Int -> SqlIdentifier -> ConnectionTarget -> SqlIdentifier -> IO ()
+generationLifecycleTests lifecycleConfig baselineSpec firstRef scenarioPlan fixtureRoot bundleRoot connection migrationCalls messageSetting target catalogSchema = do
   changed <- ensureBaseline baselineSpec {migrationRevision = Just "migration-v2", compareAgainst = Just firstRef}
   (changedRef, changedReport) <- orFail changed
   changedCalls <- readIORef migrationCalls
@@ -651,6 +663,17 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   interruptedRecords <- queryInt connection "SELECT count(*) FROM hinagata_test.generations WHERE fingerprint_manifest->>'manifest' LIKE '%migration-builder-death%' AND state = 'Failed'"
   survivingRecords <- queryInt connection "SELECT count(*) FROM hinagata_test.generations WHERE fingerprint_manifest->>'manifest' LIKE '%migration-builder-death%' AND state = 'Ready'"
   assert "interrupted build becomes Failed while survivor is ready" (interruptedRecords == 1 && survivingRecords == 1)
+  retired <- retireBaseline lifecycleConfig changedRef
+  assert "sealed baseline retires under positive ownership" (retired == Right ())
+  assert "retired template database is absent" =<< ((== 0) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> databaseNameText (baselineDatabase changedRef) <> "'")))
+  retiredRecord <- queryText connection (Encoding.encodeUtf8 ("SELECT state FROM hinagata_test.generations WHERE database_name = '" <> databaseNameText (baselineDatabase changedRef) <> "'"))
+  assert "retired generation remains as a catalog tombstone" (retiredRecord == "Retiring")
+  retiredAgain <- retireBaseline lifecycleConfig changedRef
+  assert "retirement is idempotent after the owned template disappears" (retiredAgain == Right ())
+  staleClone <- withDatabase lifecycleConfig changedRef scenarioPlan (\_ -> pure ())
+  assert "retired baseline cannot allocate another clone" (case staleClone of Left _ -> True; _ -> False)
+  replacement <- ensureBaseline baselineSpec {migrationRevision = Just "migration-v2"}
+  assert "retirement permits a new ready generation for the same fingerprint" (case replacement of Right (ref, report) -> kind report == Built && baselineDatabase ref /= baselineDatabase changedRef; _ -> False)
   let tamperedName = databaseNameText (baselineDatabase firstRef)
   execCheck connection (Encoding.encodeUtf8 ("COMMENT ON DATABASE \"" <> tamperedName <> "\" IS 'foreign'"))
   tampered <- ensureBaseline baselineSpec

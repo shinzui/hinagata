@@ -58,6 +58,7 @@ test-suite hinagata-postgres-test
   type: exitcode-stdio-1.0
   hs-source-dirs: test
   main-is: Main.hs
+  ghc-options: -O0
   build-depends:
     base >=4.21 && <5,
     bytestring >=0.12 && <0.14,

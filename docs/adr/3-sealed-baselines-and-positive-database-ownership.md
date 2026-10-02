@@ -14,6 +14,8 @@ Amended: 2026-10-02 (classified callback outcomes and explicit retained release)
 
 Amended: 2026-10-02 (per-clone preparation before scenario loading)
 
+Amended: 2026-10-02 (ownership-checked sealed baseline retirement)
+
 ## Context
 
 Reuse must not silently test stale migrations or share scenario state. CREATE/DROP DATABASE are nontransactional, and copying a template requires no connected sessions.
@@ -32,6 +34,8 @@ PostgreSQL's [`DROP DATABASE` reference](https://www.postgresql.org/docs/18/sql-
 A caller-supplied classifier identifies failure values without changing them. The policy may preserve those values or thrown callback failures; detached acquisition records a retained clone after setup. Both are released by explicit lease ID, with the same lock and positive-ownership checks as orphan cleanup. Cleanup diagnostics accompany returned values separately, while a thrown callback keeps its original exception.
 
 An optional trusted clone preparation hook uses setup access after clone grants and settings and before scenario fixtures. It runs for every new clone, including clones of a reused baseline. The hook is kept on the in-memory baseline handle and does not affect the sealed template fingerprint; a hook failure prevents callback handoff and triggers ownership-checked release.
+
+Baseline retirement takes the generation lock exclusively, rechecks the generation record and positive database identity, records Retiring before the nontransactional drop, and leaves that record as a tombstone for issued clone references. Existing clones remain independent of the removed template. A stale handle fails the Ready check, while a later ensure call may build a new generation for the same fingerprint.
 
 ## Consequences
 
