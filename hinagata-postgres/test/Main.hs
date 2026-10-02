@@ -574,6 +574,33 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   concurrentFirst <- timeout 10000000 (takeMVar firstCold)
   concurrentSecond <- timeout 10000000 (takeMVar secondCold)
   assert "concurrent cold callers publish one generation" (case (concurrentFirst, concurrentSecond) of (Just (Right (left, leftReport)), Just (Right (right, rightReport))) -> baselineDatabase left == baselineDatabase right && [kind leftReport, kind rightReport] `elem` [[Built, Reused], [Reused, Built]]; _ -> False)
+  builderEntered <- newEmptyMVar
+  builderBlock <- newEmptyMVar
+  builderDone <- newEmptyMVar
+  let deathSpec = baselineSpec {migrationRevision = Just "migration-builder-death"}
+      blockedBuilder = deathSpec {migrationHook = \_ -> putMVar builderEntered () >> takeMVar builderBlock >> pure (Right ())}
+  builderThread <- forkIO (try @SomeException (ensureBaseline blockedBuilder) >>= putMVar builderDone)
+  builderStarted <- timeout 10000000 (takeMVar builderEntered)
+  assert "builder reaches migration after recording a generation" (case builderStarted of Just () -> True; _ -> False)
+  cancelledWaiterDone <- newEmptyMVar
+  cancelledWaiter <- forkIO (try @SomeException (ensureBaseline deathSpec) >>= putMVar cancelledWaiterDone)
+  threadDelay 100000
+  killThread cancelledWaiter
+  cancelledWaiterResult <- timeout 10000000 (takeMVar cancelledWaiterDone)
+  assert "cancelling one baseline waiter does not block indefinitely" (case cancelledWaiterResult of Just (Left _) -> True; _ -> False)
+  expiredWaiter <- timeout 10000000 (ensureBaseline (deathSpec {configuration = lifecycleConfig {setupDeadlineMs = positive 200}}))
+  assert "a waiter deadline expires while the builder still holds its lock" (case expiredWaiter of Just (Left _) -> True; _ -> False)
+  survivingWaiterDone <- newEmptyMVar
+  _ <- forkIO (ensureBaseline deathSpec >>= putMVar survivingWaiterDone)
+  threadDelay 100000
+  killThread builderThread
+  builderResult <- timeout 10000000 (takeMVar builderDone)
+  assert "builder process death releases its coordination session" (case builderResult of Just (Left _) -> True; _ -> False)
+  survivor <- timeout 10000000 (takeMVar survivingWaiterDone)
+  assert "a later waiter builds a ready generation after builder death" (case survivor of Just (Right (_, report)) -> kind report == Built; _ -> False)
+  interruptedRecords <- queryInt connection "SELECT count(*) FROM hinagata_test.generations WHERE fingerprint_manifest->>'manifest' LIKE '%migration-builder-death%' AND state = 'Failed'"
+  survivingRecords <- queryInt connection "SELECT count(*) FROM hinagata_test.generations WHERE fingerprint_manifest->>'manifest' LIKE '%migration-builder-death%' AND state = 'Ready'"
+  assert "interrupted build becomes Failed while survivor is ready" (interruptedRecords == 1 && survivingRecords == 1)
   let tamperedName = databaseNameText (baselineDatabase firstRef)
   execCheck connection (Encoding.encodeUtf8 ("COMMENT ON DATABASE \"" <> tamperedName <> "\" IS 'foreign'"))
   tampered <- ensureBaseline baselineSpec

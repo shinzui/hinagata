@@ -159,21 +159,28 @@ prepare connection maintenance options identity spec@BaselineSpec {configuration
 
 prepareLocked :: Maybe FingerprintComparison -> PQ.Connection -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> HinagataConfig -> FixturePlan -> Text -> Text -> Text -> BaselineSpec -> Bool -> Deadline -> IO (Either BaselineError (BaselineRef, PreparationKind, Maybe FingerprintComparison))
 prepareLocked comparison connection maintenance options identity configuration basePlan projectText digest manifest spec reusable deadline = do
-  previous <- if reusable then lookupReady connection configuration basePlan deadline projectText digest else pure (Right Nothing)
-  case previous of
-    Left failure -> pure (Left failure)
-    Right (Just baseline) -> do
-      evidence <- verifyOwnedDatabase maintenance options identity (ownership baseline)
-      case evidence of
-        Right OwnershipMatches -> do
-          sealed <- queryParamRows connection deadline Sql "SELECT datallowconn::text FROM pg_database WHERE datname = $1" [Just (Encoding.encodeUtf8 (databaseNameText (baselineDatabase baseline)))] 1
-          pure $ case sealed of
-            Right [[Just "false"]] -> Right (baseline {clusterIdentity = identity}, Reused, comparison)
-            Right _ -> Left (BaselineError "ready generation is not sealed" Nothing)
-            Left failure -> Left (nativeFailure failure)
-        Right _ -> pure (Left (BaselineError "ready generation lost positive database ownership" Nothing))
-        Left CatalogError {cause, sqlState} -> pure (Left (BaselineError cause sqlState))
-    Right Nothing -> fmap (fmap (\(baseline, kind) -> (baseline, kind, comparison))) (buildGeneration connection maintenance options identity configuration basePlan projectText digest manifest spec deadline)
+  let table = quoteSqlIdentifier (maintenanceSchema configuration) <> ".\"generations\""
+      interruptedSql = Encoding.encodeUtf8 ("UPDATE " <> table <> " SET state = 'Failed', updated_at = clock_timestamp() WHERE project_id = $1 AND fingerprint = $2 AND state = 'Building'")
+      interruptedArgs = map (Just . Encoding.encodeUtf8) [projectText, digest]
+  interrupted <- queryParamRows connection deadline Sql interruptedSql interruptedArgs 0
+  case interrupted of
+    Left failure -> pure (Left (nativeFailure failure))
+    Right _ -> do
+      previous <- if reusable then lookupReady connection configuration basePlan deadline projectText digest else pure (Right Nothing)
+      case previous of
+        Left failure -> pure (Left failure)
+        Right (Just baseline) -> do
+          evidence <- verifyOwnedDatabase maintenance options identity (ownership baseline)
+          case evidence of
+            Right OwnershipMatches -> do
+              sealed <- queryParamRows connection deadline Sql "SELECT datallowconn::text FROM pg_database WHERE datname = $1" [Just (Encoding.encodeUtf8 (databaseNameText (baselineDatabase baseline)))] 1
+              pure $ case sealed of
+                Right [[Just "false"]] -> Right (baseline {clusterIdentity = identity}, Reused, comparison)
+                Right _ -> Left (BaselineError "ready generation is not sealed" Nothing)
+                Left failure -> Left (nativeFailure failure)
+            Right _ -> pure (Left (BaselineError "ready generation lost positive database ownership" Nothing))
+            Left CatalogError {cause, sqlState} -> pure (Left (BaselineError cause sqlState))
+        Right Nothing -> fmap (fmap (\(baseline, kind) -> (baseline, kind, comparison))) (buildGeneration connection maintenance options identity configuration basePlan projectText digest manifest spec deadline)
 
 comparePrevious :: PQ.Connection -> HinagataConfig -> CatalogIdentity -> Maybe BaselineRef -> Text -> Deadline -> IO (Either BaselineError (Maybe FingerprintComparison))
 comparePrevious _ _ _ Nothing _ _ = pure (Right Nothing)

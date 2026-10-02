@@ -57,7 +57,7 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 ## Progress
 
-- [ ] Versioned maintenance records and generation publication make baseline reuse/invalidation observable.
+- [x] Versioned maintenance records and generation publication make baseline reuse/invalidation observable.
 - [x] Concurrent leases receive isolated committed fixture state and release after callback termination.
 - [ ] Crash, preservation, detached lease, and cleanup tests prove positive ownership and race safety.
 
@@ -77,6 +77,8 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 2026-10-02 acquisition progress: A monotonic lease acquisition deadline now spans bundle verification, catalog setup, maintenance connection establishment, clone allocation, and scenario loading. Managed acquisition passes its remaining queue/setup budget into the same path. A timed-out scenario load attempts ownership-checked release before returning, while the consumer callback is outside the acquisition deadline; socket and TCP tests cover both behaviors. Allocation interrupted before the clone identity is returned remains a catalog-recorded recovery case. Baseline builder/waiter deadline proof remains open.
 
+2026-10-02 generation recovery progress: Once the project/fingerprint builder lock is acquired, the next caller marks any interrupted Building records for that fingerprint Failed before ready lookup or retry. A disposable-cluster test stops a builder during its migration hook, cancels one waiting caller, lets another waiting caller's deadline expire, then verifies that a surviving waiter publishes one Ready generation and the interrupted generation remains inspectable as Failed. This completes the first progress milestone; allocation-boundary and catalog-upgrade recovery proof remain in the third.
+
 
 ## Surprises & Discoveries
 
@@ -90,6 +92,8 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 2026-10-02: Apply database/schema grants as the administration database owner, then have setup and application roles apply their own database-specific settings over short-lived connections. PostgreSQL permits ordinary roles to set their own defaults; altering another role would require `CREATEROLE`/admin-option authority unrelated to database ownership. Include role names and setting-value digests in the fingerprint manifest, omitting raw setting values and access passwords.
 
 2026-10-02: Compare fingerprints only against a caller-selected prior generation. A new baseline has no meaningful implicit predecessor when projects can have several baseline variants; an absent selection is reported as no comparison, not as an inferred change.
+
+2026-10-02: Mark interrupted Building records Failed only after acquiring their project/fingerprint advisory lock. The lock proves no builder for that fingerprint still owns publication; the existing database and ownership record remain for explicit inspection rather than implicit deletion.
 
 
 ## Outcomes & Retrospective
