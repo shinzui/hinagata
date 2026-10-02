@@ -10,6 +10,7 @@ where
 
 import Data.Text qualified as Text
 import Hinagata.Prelude
+import Hinagata.Types (SqlIdentifier)
 
 -- | A path component and stable fixture identity, not an arbitrary file path.
 newtype FixtureName = FixtureName Text
@@ -36,9 +37,9 @@ data FixtureStep
   deriving stock (Eq, Show, Generic)
 
 data CopySpec = CopySpec
-  { schema :: !Text,
-    table :: !Text,
-    columns :: ![Text],
+  { schema :: !SqlIdentifier,
+    table :: !SqlIdentifier,
+    columns :: ![SqlIdentifier],
     file :: !FilePath,
     header :: !Bool
   }

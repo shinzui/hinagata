@@ -61,7 +61,7 @@ A Haskell caller can compile fixture sources into a deterministic, reusable plan
 - [ ] SQL/CSV source bundles have deterministic plans/digests and reject invalid or changing sources.
 - [ ] Settei configuration schema, precedence inputs, and redaction are tested without database access.
 
-Handoff (2026-10-01): Seihou `nix-haskell-flake` v0.26.0 generated the managed flake and exact lock. `hinagata-core` now exposes pure graph resolution, validated identifiers, and escaped/redacted libpq descriptions. Manifest decoding, frozen bundles, SQL policy, and Settei declarations remain to be implemented before this child is complete.
+Handoff (2026-10-01): Seihou `nix-haskell-flake` v0.26.0 generated the managed flake and exact lock. `hinagata-core` exposes pure graph resolution, validated identifiers, and escaped/redacted libpq descriptions. Strict manifest decoding, streaming frozen bundles, cache integrity checks, base/scenario composition, and SQL lexical policy have focused tests, and `nix develop -c just check` passes through the local-system flake checks. Final bundle acceptance still needs a measured memory/residency proof. Settei declarations remain to be implemented before this child is complete.
 
 
 ## Surprises & Discoveries
