@@ -85,6 +85,8 @@ A test harness can prepare one verified baseline on its existing PostgreSQL clus
 
 2026-10-02 retirement progress: `retireBaseline` takes the generation lock exclusively, rechecks the project/catalog row and positive database identity, marks the sealed template Retiring, then drops it. The Retiring row remains as a tombstone because existing clone allocations reference that generation. Retrying after a successful drop is idempotent; a stale baseline handle cannot allocate, and a later ensure call may build a new Ready generation for the same fingerprint. Socket integration covers these boundaries. The integration test module was split into smaller lifecycle functions and its test-suite component compiles with `-O0`; library and benchmark optimization settings are unchanged.
 
+2026-10-02 connection evidence: The disposable-cluster socket and TCP suites hold four managed callbacks open with one application session apiece and observe nine client connections total: four maintenance lock sessions, four application sessions, and the observing administration session. This measures the local manager ceiling in that setup, not a global cluster admission guarantee. Detailed queue/lock/clone/load/release timing reports remain open in the second milestone.
+
 
 ## Surprises & Discoveries
 

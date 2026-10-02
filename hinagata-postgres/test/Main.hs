@@ -2,7 +2,7 @@ module Main (main) where
 
 import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (SomeException, try)
+import Control.Exception (SomeException, bracket, try)
 import Data.ByteString.Char8 qualified as ByteString
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.Text qualified as Text
@@ -442,9 +442,31 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
     assert "deadline does not cancel another caller's lease" (case holder of Just (Right (Right _)) -> True; _ -> False)
     afterDeadline <- withManagedDatabase manager firstRef scenarioPlan (\_ -> pure ())
     assert "deadline releases pending admission" (case afterDeadline of Right _ -> True; Left _ -> False)
+  connectionCeilingTest lifecycleConfig firstRef scenarioPlan connection
   cleanupLifecycleTests lifecycleConfig catalog firstRef scenarioPlan connection database
   retentionLifecycleTests lifecycleConfig firstRef scenarioPlan connection catalog
   generationLifecycleTests lifecycleConfig baselineSpec firstRef scenarioPlan fixtureRoot bundleRoot connection migrationCalls messageSetting target catalogSchema
+
+connectionCeilingTest :: HinagataConfig -> BaselineRef -> FixturePlan -> PQ.Connection -> IO ()
+connectionCeilingTest configuration baseline scenario connection = withManager configuration $ \manager -> do
+  ready <- mapM (const newEmptyMVar) [1 .. 4 :: Int]
+  finished <- mapM (const newEmptyMVar) [1 .. 4 :: Int]
+  release <- newEmptyMVar
+  let holdApplication info signal =
+        bracket
+          (PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString (applicationTarget info)))))
+          PQ.finish
+          (\app -> queryInt app "SELECT count(*) FROM items" >> putMVar signal () >> takeMVar release)
+  mapM_
+    (\(signal, done) -> forkIO (try @SomeException (withManagedDatabase manager baseline scenario (\info -> holdApplication info signal)) >>= putMVar done))
+    (zip ready finished)
+  arrivals <- mapM (timeout 10000000 . takeMVar) ready
+  assert "four managed callbacks reach their application sessions" (all (== Just ()) arrivals)
+  observed <- queryInt connection "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend' AND usename IN (current_user, 'hinagata_app')"
+  assert "four active leases plus one application session each stay within nine client connections including the observer" (observed == 9)
+  mapM_ (const (putMVar release ())) [1 .. 4 :: Int]
+  outcomes <- mapM (timeout 10000000 . takeMVar) finished
+  assert "measured callbacks all release their managed leases" (all (\case Just (Right (Right ())) -> True; _ -> False) outcomes)
 
 cleanupLifecycleTests :: HinagataConfig -> CatalogIdentity -> BaselineRef -> FixturePlan -> PQ.Connection -> DatabaseName -> IO ()
 cleanupLifecycleTests lifecycleConfig catalog firstRef scenarioPlan connection database = do
