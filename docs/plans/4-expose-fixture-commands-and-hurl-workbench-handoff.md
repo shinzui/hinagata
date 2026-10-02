@@ -58,6 +58,8 @@ Developers can inspect fixture plans, load an existing socket database, validate
 
 2026-10-02 CLI bootstrap progress: The new `hinagata-cli` package is wired into `cabal.project`, the unmanaged `flake.module.nix`, and `just check`. Its first offline slice uses Settei's strict YAML, environment, and repeated override sources for schema, check, explanation, and `fixture plan` commands. The plan command emits format-version-1 JSON or text without connecting to PostgreSQL; the CLI also provides help, version fallback, and parser-derived shell completion scripts before configuration resolution. `just test-cli` checks absent-file help/schema behavior, nested completion, a no-server plan, and secret redaction on a typed resolution failure. `nix develop -c just check` passes including the new Nix package and source distribution. Loading, validation, database commands, build-revision injection, and workbench handoff remain open.
 
+2026-10-02 direct-load progress: `fixture load NAME... --target-database DATABASE` requires the database name on the command line, compiles a frozen bundle, and delegates the transaction to the PostgreSQL loader with the configured setup role. JSON reports committed counts and stage timings; a failed load reports the library's phase, fixture, step, and SQLSTATE in a versioned error. `just test-cli-postgres` starts a disposable socket cluster, confirms committed rows through an independent `psql` connection, then provokes a duplicate-key failure and verifies that an earlier insert in that fixture was rolled back. The offline `just test-cli` gate remains separate. `nix develop -c just check` passes including the CLI source distribution and Nix package.
+
 
 ## Surprises & Discoveries
 

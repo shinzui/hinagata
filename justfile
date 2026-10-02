@@ -10,6 +10,10 @@ test-cli:
     cabal build hinagata-cli
     bash scripts/test-cli.sh
 
+test-cli-postgres:
+    cabal build hinagata-cli
+    bash scripts/test-postgres.sh --cli
+
 test-postgres:
     bash scripts/test-postgres.sh
 

@@ -17,6 +17,7 @@ data Shell = Bash | Zsh | Fish
 
 data Command
   = FixturePlan ![Text.Text] !Bool
+  | FixtureLoad ![Text.Text] !Text.Text !Bool
   | Completions !Shell
   deriving stock (Eq, Show)
 
@@ -51,12 +52,21 @@ commandParser =
 fixtureParser :: Parser Command
 fixtureParser =
   Options.hsubparser
-    (Options.command "plan" (Options.info planParser (Options.progDesc "Compile and inspect a fixture plan without PostgreSQL")))
+    ( Options.command "plan" (Options.info planParser (Options.progDesc "Compile and inspect a fixture plan without PostgreSQL"))
+        <> Options.command "load" (Options.info loadParser (Options.progDesc "Transactionally load fixtures into an existing test database"))
+    )
 
 planParser :: Parser Command
 planParser =
   FixturePlan
     <$> (fmap Text.pack <$> some (Options.strArgument (Options.metavar "NAME...")))
+    <*> Options.switch (Options.long "json" <> Options.help "Print versioned JSON")
+
+loadParser :: Parser Command
+loadParser =
+  FixtureLoad
+    <$> (fmap Text.pack <$> some (Options.strArgument (Options.metavar "NAME...")))
+    <*> (Text.pack <$> Options.strOption (Options.long "target-database" <> Options.metavar "DATABASE" <> Options.help "Existing caller-owned test database to write"))
     <*> Options.switch (Options.long "json" <> Options.help "Print versioned JSON")
 
 completionParser :: Parser Command

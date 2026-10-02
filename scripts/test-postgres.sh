@@ -5,6 +5,7 @@ mode="${1:-test}"
 run_case() {
   case "$mode" in
     test|--tcp|--bulk-baseline) cabal test hinagata-postgres-test --test-show-details=direct ;;
+    --cli) bash scripts/test-cli-postgres.sh ;;
     --bench)
       cabal bench hinagata-postgres-direct-load --benchmark-options='100000 +RTS -s'
       cabal bench hinagata-postgres-direct-load --benchmark-options='1000000 +RTS -s'
@@ -14,7 +15,7 @@ run_case() {
 }
 
 if [[ -n "${HINAGATA_TEST_PGHOST:-}" ]]; then
-  if [[ "$mode" == --bench || "$mode" == --bulk-baseline ]]; then
+  if [[ "$mode" == --bench || "$mode" == --bulk-baseline || "$mode" == --cli ]]; then
     echo "bulk or benchmark mode requires the disposable PostgreSQL cluster" >&2
     exit 2
   fi

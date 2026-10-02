@@ -5,10 +5,14 @@ import Data.Version (showVersion)
 import Hinagata.Cli.Config
 import Hinagata.Cli.Options
 import Hinagata.Cli.Output
-import Hinagata.Config (HinagataConfig (..), hinagataConfig)
+import Hinagata.Config (AccessConfig (..), EndpointConfig (..), HinagataConfig (..), hinagataConfig)
+import Hinagata.Connection (mkConnectionTarget)
 import Hinagata.Fixture.Bundle
 import Hinagata.Fixture.Types (mkFixtureName)
+import Hinagata.Postgres.Load (loadInto)
+import Hinagata.Postgres.Session (SessionOptions (..), defaultSessionOptions)
 import Hinagata.Prelude ()
+import Hinagata.Types (mkDatabaseName, positiveValue)
 import Options.Applicative qualified as Options
 import Options.Applicative.BashCompletion qualified as Completion
 import Paths_hinagata_cli qualified as Package
@@ -38,25 +42,45 @@ main = do
               Nothing -> dispatch configuration options
 
 dispatch :: HinagataConfig -> CliOptions -> IO ()
-dispatch HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLimit, chunkSize} options = case command options of
+dispatch configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLimit, chunkSize} options = case command options of
   Just (FixturePlan roots jsonSelected) ->
     case traverse mkFixtureName roots of
-      Left problem -> abort jsonSelected (CliError "options" "fixture_name_invalid" problem Nothing 2)
+      Left problem -> abort jsonSelected (CliError "options" "fixture_name_invalid" problem Nothing Nothing Nothing Nothing 2)
       Right names -> do
         let bundle = BundleConfig fixtureRoot bundleRoot sqlSizeLimit chunkSize
         compiled <- compileFixtures bundle names
         case compiled of
           Left problem -> abort jsonSelected (bundleError problem)
           Right plan -> emitPlan jsonSelected plan
-  Nothing -> abort False (CliError "options" "command_required" "choose a command or configuration diagnostic" Nothing 2)
+  Just (FixtureLoad roots databaseText jsonSelected) ->
+    case (traverse mkFixtureName roots, mkDatabaseName databaseText) of
+      (Left problem, _) -> abort jsonSelected (CliError "options" "fixture_name_invalid" problem Nothing Nothing Nothing Nothing 2)
+      (_, Left problem) -> abort jsonSelected (CliError "options" "target_database_invalid" problem Nothing Nothing Nothing Nothing 2)
+      (Right names, Right database) -> do
+        let bundle = BundleConfig fixtureRoot bundleRoot sqlSizeLimit chunkSize
+        compiled <- compileFixtures bundle names
+        case compiled of
+          Left problem -> abort jsonSelected (bundleError problem)
+          Right plan -> do
+            let EndpointConfig {host = serverHost, port = serverPort} = endpoint configuration
+                AccessConfig {user = roleUser, password = rolePassword} = setup configuration
+                sessionOptions = defaultSessionOptions {operationDeadlineMs = positiveValue (setupDeadlineMs configuration), statementDeadlineMs = positiveValue (setupDeadlineMs configuration)}
+            case mkConnectionTarget serverHost serverPort roleUser database rolePassword of
+              Left problem -> abort jsonSelected (CliError "options" "target_invalid" problem Nothing Nothing Nothing Nothing 2)
+              Right target -> do
+                loaded <- loadInto target sessionOptions plan
+                case loaded of
+                  Left problem -> abort jsonSelected (loadError problem)
+                  Right report -> emitLoad jsonSelected database report
+  Nothing -> abort False (CliError "options" "command_required" "choose a command or configuration diagnostic" Nothing Nothing Nothing Nothing 2)
   Just (Completions _) -> pure ()
 
 reportConfigFailure :: CliOptions -> ConfigFailure -> IO ()
 reportConfigFailure options failure = do
-  let jsonSelected = case command options of Just (FixturePlan _ selected) -> selected; _ -> False
+  let jsonSelected = case command options of Just (FixturePlan _ selected) -> selected; Just (FixtureLoad _ _ selected) -> selected; _ -> False
       outcome = case failure of
-        SourceFailure message -> CliError "configuration-source" "config_source_invalid" message Nothing 3
-        ResolutionFailure message _ -> CliError "configuration-resolution" "config_resolution_invalid" message Nothing 4
+        SourceFailure message -> CliError "configuration-source" "config_source_invalid" message Nothing Nothing Nothing Nothing 3
+        ResolutionFailure message _ -> CliError "configuration-resolution" "config_resolution_invalid" message Nothing Nothing Nothing Nothing 4
   case failure of
     ResolutionFailure _ explanation -> TextIO.hPutStr stderr explanation
     _ -> pure ()
