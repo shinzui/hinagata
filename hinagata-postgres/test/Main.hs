@@ -12,6 +12,7 @@ import Hinagata.Fixture.Bundle
 import Hinagata.Fixture.Types
 import Hinagata.Postgres.Error (LoadError (..), LoadPhase (..))
 import Hinagata.Postgres.Load
+import Hinagata.Postgres.Ownership
 import Hinagata.Postgres.Session
 import Hinagata.Prelude
 import Hinagata.Types
@@ -86,6 +87,14 @@ integrationTests socket = withSystemTempDirectory "hinagata-postgres-test-" $ \w
   ByteString.writeFile (finalCopyDirectory </> "fixture.yaml") "name: final-copy-error\nsteps:\n  - copy:\n      table: {schema: public, name: final_copy_items}\n      columns: [id]\n      file: rows.csv\n      format: csv\n      header: false\n"
   ByteString.writeFile (finalCopyDirectory </> "rows.csv") "1\n2\n"
   setupConnection <- PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString target)))
+  catalogSchema <- orFail (mkSqlIdentifier "hinagata_test")
+  firstCatalog <- ensureCatalog target catalogSchema defaultSessionOptions
+  secondCatalog <- ensureCatalog target catalogSchema defaultSessionOptions
+  assert "catalog initializes and reuses one cluster identity" (case (firstCatalog, secondCatalog) of (Right first, Right second) -> first == second && formatVersion first == 1; _ -> False)
+  execCheck setupConnection "CREATE SCHEMA foreign_catalog"
+  foreignSchema <- orFail (mkSqlIdentifier "foreign_catalog")
+  foreignCatalog <- ensureCatalog target foreignSchema defaultSessionOptions
+  assert "existing foreign schema without format marker is refused" (case foreignCatalog of Left _ -> True; _ -> False)
   execCheck setupConnection "CREATE TABLE items (id integer PRIMARY KEY, note text NOT NULL)"
   execCheck setupConnection "INSERT INTO items (id, note) VALUES (99, 'sentinel')"
   execCheck setupConnection "CREATE TABLE parent_items (id integer PRIMARY KEY)"
@@ -194,6 +203,9 @@ integrationTests socket = withSystemTempDirectory "hinagata-postgres-test-" $ \w
   finalCopy <- loadInto target defaultSessionOptions finalCopyPlan
   assert "final COPY result error is reported" (case finalCopy of Left LoadError {phase = ExecuteCopy, sqlState = Just "P0001"} -> True; _ -> False)
   assert "final COPY result error rolls back" =<< ((== 0) <$> queryInt setupConnection "SELECT count(*) FROM final_copy_items")
+  execCheck setupConnection "DROP TABLE hinagata_test.leases"
+  incompleteCatalog <- ensureCatalog target catalogSchema defaultSessionOptions
+  assert "incomplete version-1 catalog is refused" (case incompleteCatalog of Left _ -> True; _ -> False)
   PQ.finish setupConnection
 
 requiredEnv :: String -> IO String

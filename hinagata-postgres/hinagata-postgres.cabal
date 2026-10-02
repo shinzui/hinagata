@@ -6,6 +6,7 @@ description: Private native libpq sessions for atomic SQL and CSV fixtures.
 category: Testing
 license: BSD-3-Clause
 license-file: LICENSE
+data-files: sql/catalog-v1.sql
 build-type: Simple
 
 common common
@@ -24,12 +25,14 @@ library
   exposed-modules:
     Hinagata.Postgres.Error
     Hinagata.Postgres.Load
+    Hinagata.Postgres.Ownership
     Hinagata.Postgres.Session
 
   other-modules:
     Hinagata.Postgres.Internal.Copy
     Hinagata.Postgres.Internal.Libpq
     Hinagata.Postgres.Internal.Sql
+    Paths_hinagata_postgres
 
   build-depends:
     base >=4.21 && <5,

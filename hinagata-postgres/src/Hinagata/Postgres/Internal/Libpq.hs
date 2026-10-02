@@ -8,6 +8,7 @@ module Hinagata.Postgres.Internal.Libpq
     runExclusive,
     SessionDisposition (..),
     query,
+    queryParamRows,
     drainResults,
     awaitResult,
     flushOutput,
@@ -22,6 +23,7 @@ import Control.Concurrent (forkIOWithUnmask)
 import Control.Concurrent.MVar
 import Control.Exception (IOException, SomeException, bracket, finally, mask, throwIO, try)
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as ByteString
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Encoding
 import Data.Word (Word64)
@@ -171,6 +173,49 @@ query connection deadline phase statement = do
           if not flushed
             then pure (Left (NativeError phase Nothing "query output could not be flushed before deadline"))
             else drainResults connection deadline phase
+
+-- | Execute one parameterized catalog query, retaining at most a small,
+-- explicit number of copied result cells. Single-row mode keeps libpq from
+-- constructing a large result before the bound can be checked.
+queryParamRows :: PQ.Connection -> Deadline -> NativePhase -> ByteString -> [Maybe ByteString] -> Int -> IO (Either NativeError [[Maybe ByteString]])
+queryParamRows connection deadline phase statement arguments maxRows = do
+  sent <- PQ.sendQueryParams connection statement (map (fmap (\value -> (PQ.Oid 0, value, PQ.Text))) arguments) PQ.Text
+  if not sent
+    then pure (Left (NativeError phase Nothing "libpq refused catalog query dispatch"))
+    else do
+      singleRows <- PQ.setSingleRowMode connection
+      if not singleRows
+        then pure (Left (NativeError phase Nothing "libpq refused catalog single-row mode"))
+        else do
+          flushed <- flushOutput connection deadline
+          if not flushed
+            then pure (Left (NativeError phase Nothing "catalog query output could not be flushed before deadline"))
+            else collect [] Nothing
+  where
+    collect rows firstError = do
+      ready <- awaitResult connection deadline
+      if not ready
+        then pure (Left (NativeError phase Nothing "catalog query timed out or connection failed"))
+        else do
+          next <- PQ.getResult connection
+          case next of
+            Nothing -> pure (maybe (Right (reverse rows)) Left firstError)
+            Just result -> do
+              status <- PQ.resultStatus result
+              state <- PQ.resultErrorField result PQ.DiagSqlstate
+              case status of
+                PQ.SingleTuple -> do
+                  columns <- PQ.nfields result
+                  if length rows >= maxRows || columns > 20
+                    then collect rows (firstError <|> Just (NativeError phase Nothing "catalog query exceeded its result bound"))
+                    else do
+                      cells <- traverse (PQ.getvalue' result 0) [0 .. columns - 1]
+                      if any (maybe False ((> 16384) . ByteString.length)) cells
+                        then collect rows (firstError <|> Just (NativeError phase Nothing "catalog query cell exceeded its size bound"))
+                        else collect (cells : rows) firstError
+                PQ.TuplesOk -> collect rows firstError
+                PQ.CommandOk -> collect rows firstError
+                _ -> collect rows (firstError <|> Just (NativeError phase (Encoding.decodeUtf8 <$> state) (Text.pack (show status))))
 
 drainResults :: PQ.Connection -> Deadline -> NativePhase -> IO (Either NativeError ())
 drainResults connection deadline phase = collect False Nothing

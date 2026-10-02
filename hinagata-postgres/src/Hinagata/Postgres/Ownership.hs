@@ -1,0 +1,132 @@
+-- | Versioned maintenance-catalog bootstrap on a caller-selected database.
+module Hinagata.Postgres.Ownership
+  ( CatalogIdentity (..),
+    CatalogError (..),
+    ensureCatalog,
+  )
+where
+
+import Control.Exception (IOException, try)
+import Data.ByteString qualified as ByteString
+import Data.Text qualified as Text
+import Data.Text.Encoding qualified as Encoding
+import Database.PostgreSQL.LibPQ qualified as PQ
+import Hinagata.Connection (ConnectionTarget)
+import Hinagata.Postgres.Error (NativeError (..), NativePhase (..), SessionError (..))
+import Hinagata.Postgres.Internal.Libpq
+import Hinagata.Prelude
+import Hinagata.Types (SqlIdentifier, quoteSqlIdentifier, sqlIdentifierText)
+import Paths_hinagata_postgres (getDataFileName)
+
+-- | The catalog format and cluster marker read back from the maintenance
+-- database. The marker prevents records from one cluster being used in another.
+data CatalogIdentity = CatalogIdentity
+  { formatVersion :: !Int,
+    clusterUuid :: !Text
+  }
+  deriving stock (Eq, Show)
+
+-- | Expected bootstrap failures. Raw server messages are not retained.
+data CatalogError = CatalogError
+  { cause :: !Text,
+    sqlState :: !(Maybe Text),
+    cleanupFailure :: !(Maybe Text)
+  }
+  deriving stock (Eq, Show)
+
+-- | Initialize a dedicated, absent schema or validate an existing version-1
+-- catalog. An occupied schema without Hinagata's version marker is refused.
+-- The administration role must own an existing catalog schema.
+ensureCatalog :: ConnectionTarget -> SqlIdentifier -> SessionOptions -> IO (Either CatalogError CatalogIdentity)
+ensureCatalog target schema options = do
+  opened <- withSession target options $ \session ->
+    runExclusive session $ \connection sessionOptions -> bootstrap connection schema sessionOptions
+  pure $ case opened of
+    Left failure -> Left (sessionFailure failure)
+    Right (Left failure) -> Left (sessionFailure failure)
+    Right (Right result) -> result
+
+bootstrap :: PQ.Connection -> SqlIdentifier -> SessionOptions -> IO (SessionDisposition (Either CatalogError CatalogIdentity))
+bootstrap connection schema options = do
+  deadline <- deadlineAfter (operationDeadlineMs options)
+  begun <- query connection deadline Begin "BEGIN"
+  case begun of
+    Left failure -> pure (Retire (Left (nativeFailure failure)))
+    Right () -> do
+      result <- initialize connection schema deadline
+      case result of
+        Left failure -> rollbackCatalog connection options failure
+        Right identity -> do
+          committed <- query connection deadline Commit "COMMIT"
+          case committed of
+            Left failure -> pure (Retire (Left (nativeFailure failure)))
+            Right () -> do
+              status <- PQ.transactionStatus connection
+              if status == PQ.TransIdle
+                then pure (Keep (Right identity))
+                else pure (Retire (Left (CatalogError "catalog transaction did not return to idle" Nothing Nothing)))
+
+initialize :: PQ.Connection -> SqlIdentifier -> Deadline -> IO (Either CatalogError CatalogIdentity)
+initialize connection schema deadline = do
+  let name = Encoding.encodeUtf8 (sqlIdentifierText schema)
+  locked <- queryParamRows connection deadline Sql "SELECT pg_advisory_xact_lock(1212761905, hashtext($1))" [Just name] 1
+  case locked of
+    Left failure -> pure (Left (nativeFailure failure))
+    Right _ -> do
+      namespace <- queryParamRows connection deadline Sql "SELECT pg_get_userbyid(nspowner), current_user FROM pg_namespace WHERE nspname = $1" [Just name] 1
+      case namespace of
+        Left failure -> pure (Left (nativeFailure failure))
+        Right [] -> createCatalog connection schema deadline
+        Right [[Just owner, Just current]]
+          | owner == current -> validateCatalog connection schema deadline
+          | otherwise -> pure (Left (CatalogError "maintenance schema is owned by another role" Nothing Nothing))
+        Right _ -> pure (Left (CatalogError "maintenance schema identity is ambiguous" Nothing Nothing))
+
+createCatalog :: PQ.Connection -> SqlIdentifier -> Deadline -> IO (Either CatalogError CatalogIdentity)
+createCatalog connection schema deadline = do
+  file <- getDataFileName "sql/catalog-v1.sql"
+  source <- try @IOException (ByteString.readFile file)
+  case source of
+    Left _ -> pure (Left (CatalogError "catalog DDL is unavailable" Nothing Nothing))
+    Right bytes -> do
+      let statement =
+            Encoding.encodeUtf8 $
+              Text.replace "%SCHEMA%" (quoteSqlIdentifier schema) (Encoding.decodeUtf8 bytes)
+      created <- query connection deadline Sql statement
+      case created of
+        Left failure -> pure (Left (nativeFailure failure))
+        Right () -> validateCatalog connection schema deadline
+
+validateCatalog :: PQ.Connection -> SqlIdentifier -> Deadline -> IO (Either CatalogError CatalogIdentity)
+validateCatalog connection schema deadline = do
+  let name = Encoding.encodeUtf8 (sqlIdentifierText schema)
+      structureQuery = "SELECT count(*)::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname IN ('meta', 'generations', 'allocations', 'leases') AND c.relkind = 'r' AND c.relowner = current_user::regrole"
+  structure <- queryParamRows connection deadline Sql structureQuery [Just name] 1
+  case structure of
+    Left failure -> pure (Left (nativeFailure failure))
+    Right [[Just "4"]] -> do
+      let statement = Encoding.encodeUtf8 ("SELECT format_version::text, cluster_uuid::text FROM " <> quoteSqlIdentifier schema <> ".\"meta\" WHERE singleton")
+      rows <- queryParamRows connection deadline Sql statement [] 2
+      pure $ case rows of
+        Left failure -> Left (nativeFailure failure)
+        Right [[Just "1", Just uuid]] -> Right (CatalogIdentity 1 (Encoding.decodeUtf8 uuid))
+        Right _ -> Left (CatalogError "maintenance catalog has an unsupported or invalid format" Nothing Nothing)
+    Right _ -> pure (Left (CatalogError "maintenance schema lacks a complete Hinagata version-1 catalog" Nothing Nothing))
+
+rollbackCatalog :: PQ.Connection -> SessionOptions -> CatalogError -> IO (SessionDisposition (Either CatalogError CatalogIdentity))
+rollbackCatalog connection options failure = do
+  deadline <- deadlineAfter (cleanupDeadlineMs options)
+  rolled <- query connection deadline Rollback "ROLLBACK"
+  case rolled of
+    Left cleanup -> pure (Retire (Left failure {cleanupFailure = Just (reason cleanup)}))
+    Right () -> do
+      status <- PQ.transactionStatus connection
+      if status == PQ.TransIdle
+        then pure (Keep (Left failure))
+        else pure (Retire (Left failure {cleanupFailure = Just "catalog rollback did not return to idle"}))
+
+nativeFailure :: NativeError -> CatalogError
+nativeFailure NativeError {reason, sqlState} = CatalogError reason sqlState Nothing
+
+sessionFailure :: SessionError -> CatalogError
+sessionFailure failure = CatalogError (Text.pack (show failure)) Nothing Nothing
