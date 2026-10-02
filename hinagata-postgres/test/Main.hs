@@ -267,6 +267,7 @@ crashLeaseWorker fixtureRoot bundleRoot mode readyFile = do
       fail "crash worker reached normal baseline completion"
     "intent" -> runLease specification bundleConfig
     "created" -> runLease specification bundleConfig
+    "drop" -> runLease specification bundleConfig
     "handoff" -> runLease specification bundleConfig
     "loading" -> runLease specification bundleConfig
     _ -> fail "unknown crash-worker phase"
@@ -278,8 +279,14 @@ crashLeaseWorker fixtureRoot bundleRoot mode readyFile = do
       scenario <- bundleOrFail =<< compileFixtures bundleConfig [fixtureName "good", fixtureName scenarioName]
       _ <- withDatabase (configuration specification) baseline scenario $ \LeaseInfo {leaseId} -> do
         when (mode == "handoff") (writeReady readyFile (Encoding.encodeUtf8 leaseId))
-        threadDelay 60000000
+        if mode == "drop"
+          then writeReady readyFile (Encoding.encodeUtf8 leaseId) >> waitForGo (readyFile ++ ".go")
+          else threadDelay 60000000
       fail "crash worker reached normal lease completion"
+
+    waitForGo path = do
+      present <- doesFileExist path
+      unless present (threadDelay 10000 >> waitForGo path)
 
 writeReady :: FilePath -> ByteString.ByteString -> IO ()
 writeReady path payload = do
@@ -605,8 +612,63 @@ processCrashTests configuration baselineSpec connection fixtureRoot bundleRoot =
   runBuilderCase executable
   runUnboundCase executable "intent" "LOCK TABLE pg_database IN SHARE ROW EXCLUSIVE MODE" "CREATE DATABASE %" False
   runUnboundCase executable "created" "LOCK TABLE pg_shdescription IN SHARE ROW EXCLUSIVE MODE" "COMMENT ON DATABASE %" True
+  runDropCase executable
   mapM_ (runCase executable) ["loading", "handoff"]
   where
+    runDropCase executable = do
+      let readyFile = bundleRoot </> "crash-drop.ready"
+          command = proc executable ["--crash-lease-worker", fixtureRoot, bundleRoot, "drop", readyFile]
+      withCreateProcess command $ \_ _ _ child -> do
+        lease <- waitForChild child $ do
+          present <- doesFileExist readyFile
+          if present then Just . Encoding.decodeUtf8 <$> ByteString.readFile readyFile else pure Nothing
+        allocation <- Encoding.decodeUtf8 <$> queryText connection (Encoding.encodeUtf8 ("SELECT allocation_id FROM hinagata_test.leases WHERE id = '" <> lease <> "'"))
+        database <- Encoding.decodeUtf8 <$> queryText connection (Encoding.encodeUtf8 ("SELECT database_name::text FROM hinagata_test.allocations WHERE id = '" <> allocation <> "'"))
+        let leaseKey = "lease:" <> lease
+        serverPid <- queryInt connection (Encoding.encodeUtf8 ("SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND classid = 1212761905::oid AND objid = hashtext('" <> leaseKey <> "')::oid AND granted AND pid <> pg_backend_pid()"))
+        let triggerName = "pause_drop_release"
+            activeSql = ByteString.pack ("SELECT count(*) FROM pg_stat_activity WHERE pid = " ++ show serverPid ++ " AND state = 'active'")
+        _ <-
+          bracket
+            ( do
+                execCheck connection "CREATE FUNCTION hinagata_test.pause_drop_release() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(30); RETURN NEW; END $$"
+                execCheck connection (Encoding.encodeUtf8 ("CREATE TRIGGER " <> triggerName <> " BEFORE UPDATE ON hinagata_test.allocations FOR EACH ROW WHEN (NEW.id = '" <> allocation <> "' AND NEW.state = 'Released') EXECUTE FUNCTION hinagata_test.pause_drop_release()"))
+            )
+            ( \_ -> do
+                execCheck connection (Encoding.encodeUtf8 ("DROP TRIGGER " <> triggerName <> " ON hinagata_test.allocations"))
+                execCheck connection "DROP FUNCTION hinagata_test.pause_drop_release()"
+            )
+            ( \_ -> do
+                writeReady (readyFile ++ ".go") "go"
+                observed <- try @SomeException $ waitForChild child $ do
+                  state <- queryText connection (Encoding.encodeUtf8 ("SELECT state FROM hinagata_test.allocations WHERE id = '" <> allocation <> "'"))
+                  present <- queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> database <> "'"))
+                  active <- queryInt connection activeSql
+                  if state == "Releasing" && present == 0 && active > 0
+                    then pure (Just ())
+                    else pure Nothing
+                case observed of
+                  Right () -> pure ()
+                  Left exception -> do
+                    state <- queryText connection (Encoding.encodeUtf8 ("SELECT state FROM hinagata_test.allocations WHERE id = '" <> allocation <> "'"))
+                    present <- queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> database <> "'"))
+                    active <- queryInt connection activeSql
+                    fail ("drop boundary was not reached: " ++ show exception ++ "; state=" ++ show state ++ "; present=" ++ show present ++ "; matching-backends=" ++ show active)
+                processId <- maybe (fail "drop worker has no process ID") pure =<< getPid child
+                signalProcess sigKILL processId
+                ended <- timeout 10000000 (waitForProcess child)
+                assert "killed drop worker exits abnormally" (case ended of Just ExitSuccess -> False; Just (ExitFailure _) -> True; Nothing -> False)
+                activeBackend <- queryInt connection (ByteString.pack ("SELECT count(*) FROM pg_stat_activity WHERE pid = " ++ show serverPid))
+                when (activeBackend > 0) (void (queryText connection (ByteString.pack ("SELECT pg_terminate_backend(" ++ show serverPid ++ ")::text"))))
+                waitForBackendGone "drop" serverPid
+            )
+        assert "killed drop worker leaves its database absent" =<< ((== 0) <$> queryInt connection (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname = '" <> database <> "'")))
+        candidates <- orFail =<< planCleanup configuration
+        candidate <- maybe (fail "killed drop allocation is absent from cleanup preview") pure (find (\item -> allocationId item == allocation) candidates)
+        assert "killed drop worker leaves a Releasing allocation with a missing clone" (state candidate == "Releasing" && disposition candidate == Missing)
+        released <- applyCleanup configuration OrphansOnly [allocation]
+        assert "explicit cleanup idempotently records the interrupted drop" (released == Right [Released allocation])
+
     runUnboundCase executable mode catalogLock activePattern expectDatabase = do
       before <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations"
       let command = proc executable ["--crash-lease-worker", fixtureRoot, bundleRoot, mode, bundleRoot </> ("crash-" ++ mode ++ ".ready")]
