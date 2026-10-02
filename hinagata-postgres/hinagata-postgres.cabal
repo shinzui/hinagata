@@ -27,6 +27,7 @@ library
     Hinagata.Postgres.Error
     Hinagata.Postgres.Lease
     Hinagata.Postgres.Load
+    Hinagata.Postgres.Manager
     Hinagata.Postgres.Ownership
     Hinagata.Postgres.Session
 

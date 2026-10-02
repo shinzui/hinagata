@@ -16,6 +16,7 @@ import Hinagata.Postgres.Baseline hiding (elapsedMs)
 import Hinagata.Postgres.Error (LoadError (..), LoadPhase (..))
 import Hinagata.Postgres.Lease
 import Hinagata.Postgres.Load
+import Hinagata.Postgres.Manager
 import Hinagata.Postgres.Ownership
 import Hinagata.Postgres.Session
 import Hinagata.Prelude
@@ -333,6 +334,61 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   failedLoad <- withDatabase lifecycleConfig firstRef badScenario (\_ -> pure ())
   assert "failed scenario load refuses callback" (case failedLoad of Left _ -> True; Right _ -> False)
   assert "failed scenario load releases its clone" =<< ((== 6) <$> queryInt connection "SELECT count(*) FROM hinagata_test.leases WHERE state = 'Released'")
+  withManager lifecycleConfig $ \manager -> do
+    let requests = DatabaseRequest "zeta" firstRef scenarioPlan :| [DatabaseRequest "alpha" firstRef scenarioPlan]
+    collection <-
+      withDatabases
+        manager
+        requests
+        ( \entries -> do
+            assert "named collection orders acquisitions stably" (map fst entries == ["alpha", "zeta"])
+            traverse (consume . snd) entries
+        )
+    clones <- orFail collection
+    assert "named collection has simultaneous distinct clones" (case clones of [left, right] -> left /= right; _ -> False)
+    beforePartial <- queryInt connection "SELECT count(*) FROM hinagata_test.leases WHERE state = 'Released'"
+    partial <- withDatabases manager (DatabaseRequest "alpha" firstRef scenarioPlan :| [DatabaseRequest "zeta" firstRef badScenario]) (\_ -> pure ())
+    afterPartial <- queryInt connection "SELECT count(*) FROM hinagata_test.leases WHERE state = 'Released'"
+    assert "later collection failure unwinds earlier clones" (case partial of Left _ -> afterPartial == beforePartial + 2; Right _ -> False)
+  let tightConfig = lifecycleConfig {activeLeases = positive 1, pendingRequests = positive 1, setupWorkers = positive 1}
+  withManager tightConfig $ \manager -> do
+    allocationsBeforeOversize <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations"
+    oversize <- withDatabases manager (DatabaseRequest "a" firstRef scenarioPlan :| [DatabaseRequest "b" firstRef scenarioPlan]) (\_ -> pure ())
+    allocationsAfterOversize <- queryInt connection "SELECT count(*) FROM hinagata_test.allocations"
+    assert "oversized collection is refused before allocation" (case oversize of Left _ -> allocationsBeforeOversize == allocationsAfterOversize; Right _ -> False)
+    held <- newEmptyMVar
+    releaseHeld <- newEmptyMVar
+    firstFinished <- newEmptyMVar
+    secondFinished <- newEmptyMVar
+    thirdFinished <- newEmptyMVar
+    _ <- forkIO (try @SomeException (withManagedDatabase manager firstRef scenarioPlan (\_ -> putMVar held () >> takeMVar releaseHeld)) >>= putMVar firstFinished)
+    _ <- takeMVar held
+    queuedWorker <- forkIO (try @SomeException (withManagedDatabase manager firstRef scenarioPlan (\_ -> pure ())) >>= putMVar secondFinished)
+    threadDelay 100000
+    saturated <- withManagedDatabase manager firstRef scenarioPlan (\_ -> pure ())
+    assert "manager rejects a full pending queue before allocation" (case saturated of Left _ -> True; Right _ -> False)
+    killThread queuedWorker
+    cancelledQueue <- timeout 1000000 (takeMVar secondFinished)
+    assert "queued admission can be cancelled" (case cancelledQueue of Just (Left _) -> True; _ -> False)
+    _ <- forkIO (try @SomeException (withManagedDatabase manager firstRef scenarioPlan (\_ -> pure ())) >>= putMVar thirdFinished)
+    putMVar releaseHeld ()
+    firstResult <- timeout 10000000 (takeMVar firstFinished)
+    thirdResult <- timeout 10000000 (takeMVar thirdFinished)
+    assert "manager releases capacity after callback and queue cancellation" (case (firstResult, thirdResult) of (Just (Right (Right _)), Just (Right (Right _))) -> True; _ -> False)
+  let deadlineConfig = tightConfig {acquisitionDeadlineMs = positive 1000}
+  withManager deadlineConfig $ \manager -> do
+    held <- newEmptyMVar
+    releaseHeld <- newEmptyMVar
+    finished <- newEmptyMVar
+    _ <- forkIO (try @SomeException (withManagedDatabase manager firstRef scenarioPlan (\_ -> putMVar held () >> takeMVar releaseHeld)) >>= putMVar finished)
+    _ <- takeMVar held
+    expired <- withManagedDatabase manager firstRef scenarioPlan (\_ -> pure ())
+    assert "queued acquisition obeys its deadline" (case expired of Left _ -> True; Right _ -> False)
+    putMVar releaseHeld ()
+    holder <- timeout 10000000 (takeMVar finished)
+    assert "deadline does not cancel another caller's lease" (case holder of Just (Right (Right _)) -> True; _ -> False)
+    afterDeadline <- withManagedDatabase manager firstRef scenarioPlan (\_ -> pure ())
+    assert "deadline releases pending admission" (case afterDeadline of Right _ -> True; Left _ -> False)
   changed <- ensureBaseline baselineSpec {migrationRevision = Just "migration-v2"}
   (changedRef, changedReport) <- orFail changed
   changedCalls <- readIORef migrationCalls
