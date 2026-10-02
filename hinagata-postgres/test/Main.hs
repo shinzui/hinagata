@@ -5,7 +5,8 @@ import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, bracket, try)
 import Data.ByteString.Char8 qualified as ByteString
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
-import Data.List (find)
+import Data.List (find, nub)
+import Data.Maybe (catMaybes)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Encoding
 import Database.PostgreSQL.LibPQ qualified as PQ
@@ -531,6 +532,7 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
     afterDeadline <- withManagedDatabase manager firstRef scenarioPlan (\_ -> pure ())
     assert "deadline releases pending admission" (case afterDeadline of Right _ -> True; Left _ -> False)
   connectionCeilingTest lifecycleConfig firstRef scenarioPlan connection
+  eightWarmTest lifecycleConfig firstRef scenarioPlan connection
   processCrashTests lifecycleConfig baselineSpec connection fixtureRoot bundleRoot
   cleanupLifecycleTests lifecycleConfig catalog firstRef scenarioPlan connection database
   retentionLifecycleTests lifecycleConfig firstRef scenarioPlan connection catalog
@@ -556,6 +558,41 @@ connectionCeilingTest configuration baseline scenario connection = withManager c
   mapM_ (const (putMVar release ())) [1 .. 4 :: Int]
   outcomes <- mapM (timeout 10000000 . takeMVar) finished
   assert "measured callbacks all release their managed leases" (all (\case Just (Right (Right ())) -> True; _ -> False) outcomes)
+
+eightWarmTest :: HinagataConfig -> BaselineRef -> FixturePlan -> PQ.Connection -> IO ()
+eightWarmTest configuration baseline scenario connection = do
+  let templateName = databaseNameText (baselineDatabase baseline)
+  generation <- queryText connection (Encoding.encodeUtf8 ("SELECT id FROM hinagata_test.generations WHERE database_name = '" <> templateName <> "'"))
+  let key = "generation:" <> generation
+      hold = queryInt connection ("SELECT 1 FROM (SELECT pg_advisory_lock_shared(1212761905, hashtext('" <> key <> "'))) held")
+      unlock = queryText connection ("SELECT pg_advisory_unlock_shared(1212761905, hashtext('" <> key <> "'))::text")
+  bracket hold (const unlock) $ \_ -> do
+    ready <- mapM (const newEmptyMVar) [1 .. 8 :: Int]
+    finished <- mapM (const newEmptyMVar) [1 .. 8 :: Int]
+    release <- newEmptyMVar
+    let consume number signal info =
+          bracket
+            (PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString (applicationTarget info)))))
+            PQ.finish
+            ( \app -> do
+                before <- queryInt app "SELECT count(*) FROM items"
+                assert "each warm clone starts with one base and scenario closure" (before == 3)
+                execCheck app (ByteString.pack ("INSERT INTO items (id, note) VALUES (" ++ show (1000 + number) ++ ", 'private')"))
+                after <- queryInt app "SELECT count(*) FROM items"
+                assert "each warm clone accepts an isolated application write" (after == 4)
+                putMVar signal (connectionDatabase (applicationTarget info))
+                takeMVar release
+            )
+    mapM_
+      (\(number, signal, done) -> forkIO (try @SomeException (withDatabase configuration baseline scenario (consume number signal)) >>= putMVar done))
+      (zip3 [1 .. 8 :: Int] ready finished)
+    arrivals <- mapM (timeout 20000000 . takeMVar) ready
+    assert "eight warm callbacks acquire while a shared generation lock is held" (all isJust arrivals)
+    let names = catMaybes arrivals
+    assert "eight warm callbacks hold distinct writable databases" (length (nub names) == 8)
+    mapM_ (const (putMVar release ())) [1 .. 8 :: Int]
+    outcomes <- mapM (timeout 20000000 . takeMVar) finished
+    assert "all eight warm callbacks release cleanly" (all (\case Just (Right (Right ())) -> True; _ -> False) outcomes)
 
 processCrashTests :: HinagataConfig -> BaselineSpec -> PQ.Connection -> FilePath -> FilePath -> IO ()
 processCrashTests configuration baselineSpec connection fixtureRoot bundleRoot = do
