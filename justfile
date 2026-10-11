@@ -56,6 +56,8 @@ check-docs:
     okf validate docs/user --strict --profile mori/user-documentation-profile.dhall --profile-enforce --log-enforce
     okf validate docs/guides --strict --profile mori/user-documentation-profile.dhall --profile-enforce --log-enforce
     okf validate docs/terminology --strict --profile mori/terminology-profile.dhall --profile-enforce --log-enforce
+    dhall type --file docs/improvement-requests/profile.dhall >/dev/null
+    okf validate docs/improvement-requests --strict --profile docs/improvement-requests/profile.dhall --profile-enforce --log-enforce
     mori terms validate --path .
 
 check: check-conventions check-docs core-test postgres-test test-cli fmt-check

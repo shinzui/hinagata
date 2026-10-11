@@ -42,6 +42,28 @@ in  Schema.Project::{
       ]
     , okfBundles =
       [ Schema.OkfBundle::{
+        , name = "improvement-requests"
+        , path = "docs/improvement-requests"
+        , profile = Some "docs/improvement-requests/profile.dhall"
+        , profileBinding = Some
+            ( Schema.ProfileBinding.Published
+                Schema.PinnedImport::{
+                , publisher = "shinzui/okf-profiles"
+                , publisherRef = Some Schema.MoriRef::{
+                  , namespace = "shinzui"
+                  , name = "okf-profiles"
+                  }
+                , export = Some "coordination.improvementRequests"
+                , version = Some "v0.20.0"
+                , pin = Some
+                    "sha256:079a5b3679dccafd2070535b3d59a0ffdf28e20bf9cacfe095dca96c8012879a"
+                }
+            )
+        , okfVersion = "0.2"
+        , description = Some
+            "Cross-repository integration-testing improvement requests owned by Hinagata"
+        }
+      , Schema.OkfBundle::{
         , name = "user-documentation"
         , path = "docs/user"
         , profile = Some "mori/user-documentation-profile.dhall"
