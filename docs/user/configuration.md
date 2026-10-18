@@ -35,6 +35,9 @@ Later sources override earlier sources in this order:
 
 Each role can also have an optional `password` setting.
 The three database selections have no fallback.
+Native connections and rendered connection strings use the explicit host, port, user, and database.
+An explicit empty `hostaddr` prevents `PGHOSTADDR` or service-file address defaults from redirecting the host.
+Other libpq defaults, including password/passfile and TLS settings, remain available.
 The [first-use tutorial](getting-started.md) contains a complete offline configuration.
 For database operations, supply existing roles and databases that permit the required operations.
 

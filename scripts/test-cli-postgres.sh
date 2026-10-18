@@ -50,7 +50,7 @@ verification:
   revision: cli-verification-v1
 EOF
 
-"$binary" --config "$workspace/hinagata.yaml" fixture load create-table --target-database "$HINAGATA_TEST_PGDATABASE" --json > "$workspace/load.json"
+PGHOSTADDR=127.0.0.2 PGHOST=/missing/ambient PGPORT=1 PGUSER=missing_ambient PGDATABASE=missing_ambient "$binary" --config "$workspace/hinagata.yaml" fixture load create-table --target-database "$HINAGATA_TEST_PGDATABASE" --json > "$workspace/load.json"
 count="$(psql -h "$HINAGATA_TEST_PGHOST" -p "$HINAGATA_TEST_PGPORT" -U "$HINAGATA_TEST_PGUSER" -d "$HINAGATA_TEST_PGDATABASE" -Atqc 'SELECT count(*) FROM cli_items')"
 test "$count" = 2
 
@@ -90,7 +90,7 @@ PY
 count="$(psql -h "$HINAGATA_TEST_PGHOST" -p "$HINAGATA_TEST_PGPORT" -U "$HINAGATA_TEST_PGUSER" -d "$HINAGATA_TEST_PGDATABASE" -Atqc 'SELECT count(*) FROM cli_items')"
 test "$count" = 2
 
-"$binary" --config "$workspace/hinagata.yaml" db prepare --json > "$workspace/prepare-cold.json"
+PGHOSTADDR=127.0.0.2 "$binary" --config "$workspace/hinagata.yaml" db prepare --json > "$workspace/prepare-cold.json"
 "$binary" --config "$workspace/hinagata.yaml" db prepare --json > "$workspace/prepare-warm.json"
 python3 - "$workspace/prepare-cold.json" "$workspace/prepare-warm.json" <<'PY'
 import json

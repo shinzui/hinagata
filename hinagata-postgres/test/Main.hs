@@ -6,7 +6,7 @@ import Control.Exception (SomeException, bracket, try)
 import Control.Monad (forM_)
 import Data.ByteString.Char8 qualified as ByteString
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
-import Data.List (find, nub)
+import Data.List (find, nub, sort)
 import Data.Maybe (catMaybes)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Encoding
@@ -28,13 +28,13 @@ import Hinagata.Prelude
 import Hinagata.Types
 import Paths_hinagata_postgres (getDataFileName)
 import System.Directory (createDirectoryIfMissing, doesFileExist, renameFile)
-import System.Environment (getArgs, getExecutablePath, lookupEnv)
+import System.Environment (getArgs, getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..), exitFailure)
 import System.FilePath ((</>))
 import System.IO (IOMode (ReadWriteMode, WriteMode), withBinaryFile)
 import System.IO.Temp (withSystemTempDirectory)
 import System.Posix.Signals (sigKILL, signalProcess)
-import System.Process (ProcessHandle, getPid, getProcessExitCode, proc, waitForProcess, withCreateProcess)
+import System.Process (CreateProcess (..), ProcessHandle, getPid, getProcessExitCode, proc, waitForProcess, withCreateProcess)
 import System.Timeout (timeout)
 import TastyAdapter qualified
 
@@ -43,6 +43,17 @@ main = do
   arguments <- getArgs
   case arguments of
     ["--crash-lease-worker", fixtureRoot, bundleRoot, mode, readyFile] -> crashLeaseWorker fixtureRoot bundleRoot mode readyFile
+    ["--endpoint-worker", fixtureRoot, bundleRoot, selectedHost, expected] -> do
+      (target, _, _, _, _) <- environmentTarget selectedHost
+      plan <- bundleOrFail =<< compileFixtures (BundleConfig fixtureRoot bundleRoot (positive 1048576) (positive 65536)) [fixtureName "endpoint-probe"]
+      result <- loadInto target defaultSessionOptions plan
+      assert "isolated explicit endpoint load" (case (expected, result) of ("success", Right _) -> True; ("failure", Left _) -> True; _ -> False)
+    ["--lifecycle-worker", fixtureRoot, bundleRoot] -> do
+      socket <- requiredEnv "HINAGATA_TEST_PGHOST"
+      (target, host, port, user, database) <- environmentTarget socket
+      bracket (PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString target)))) PQ.finish $ \connection -> do
+        plan <- bundleOrFail =<< compileFixtures (BundleConfig fixtureRoot bundleRoot (positive 1048576) (positive 65536)) [fixtureName "good"]
+        lifecycleTests target connection host port user database fixtureRoot bundleRoot plan
     [] -> do
       host <- lookupEnv "HINAGATA_TEST_PGHOST"
       case host of
@@ -107,6 +118,7 @@ integrationTests socket = withSystemTempDirectory "hinagata-postgres-test-" $ \w
   ByteString.writeFile (analyzeDirectory </> "analyze.sql") "ANALYZE items;"
   ByteString.writeFile (finalCopyDirectory </> "fixture.yaml") "name: final-copy-error\nsteps:\n  - copy:\n      table: {schema: public, name: final_copy_items}\n      columns: [id]\n      file: rows.csv\n      format: csv\n      header: false\n"
   ByteString.writeFile (finalCopyDirectory </> "rows.csv") "1\n2\n"
+  when ownedCluster (runEndpointWorker workspace "127.0.0.2" ["--lifecycle-worker", fixtureRoot, bundleRoot])
   setupConnection <- PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString target)))
   execCheck setupConnection "CREATE TABLE items (id integer PRIMARY KEY, note text NOT NULL)"
   execCheck setupConnection "INSERT INTO items (id, note) VALUES (99, 'sentinel')"
@@ -134,7 +146,7 @@ integrationTests socket = withSystemTempDirectory "hinagata-postgres-test-" $ \w
   assert "rejected closure preserves caller sentinel" =<< ((== 1) <$> queryInt setupConnection "SELECT count(*) FROM items WHERE id = 99 AND note = 'sentinel'")
   assert "rejected closure creates no table" =<< ((== 0) <$> queryInt setupConnection "SELECT count(*) FROM pg_class WHERE relname = 'escaped_transaction'")
   goodPlan <- bundleOrFail =<< compileFixtures config [fixtureName "good"]
-  when ownedCluster (lifecycleTests target setupConnection host port (Text.pack user) database fixtureRoot bundleRoot goodPlan)
+  endpointTests workspace socket setupConnection fixtureRoot bundleRoot
   loaded <- loadInto target defaultSessionOptions goodPlan
   assert "SQL closure loads" (case loaded of Right report -> fixtureCount report == 1 && stepCount report == 1; Left _ -> False)
   assert "SQL rows committed" =<< ((== 3) <$> queryInt setupConnection "SELECT count(*) FROM items")
@@ -232,6 +244,46 @@ integrationTests socket = withSystemTempDirectory "hinagata-postgres-test-" $ \w
   assert "final COPY result error is reported" (case finalCopy of Left LoadError {phase = ExecuteCopy, sqlState = Just "P0001"} -> True; _ -> False)
   assert "final COPY result error rolls back" =<< ((== 0) <$> queryInt setupConnection "SELECT count(*) FROM final_copy_items")
   PQ.finish setupConnection
+
+-- Child environments keep conflicting libpq defaults away from concurrent tests.
+environmentTarget :: FilePath -> IO (ConnectionTarget, Host, Port, Text, DatabaseName)
+environmentTarget selectedHost = do
+  host <- orFail (if take 1 selectedHost == "/" then socketDirectory (Text.pack selectedHost) else tcpHost (Text.pack selectedHost))
+  port <- orFail . mkPort . read =<< requiredEnv "HINAGATA_TEST_PGPORT"
+  user <- Text.pack <$> requiredEnv "HINAGATA_TEST_PGUSER"
+  database <- orFail . mkDatabaseName . Text.pack =<< requiredEnv "HINAGATA_TEST_PGDATABASE"
+  target <- orFail (mkConnectionTarget host port user database Nothing)
+  pure (target, host, port, user, database)
+
+runEndpointWorker :: FilePath -> String -> [String] -> IO ()
+runEndpointWorker workspace address arguments = do
+  executable <- getExecutablePath
+  inherited <- getEnvironment
+  let serviceFile = workspace </> "pg_service.conf"
+      overlay = [("PGHOSTADDR", address), ("PGHOST", "/missing/ambient/socket"), ("PGPORT", "1"), ("PGUSER", "missing_ambient_role"), ("PGDATABASE", "missing_ambient_database"), ("PGSERVICE", "conflict"), ("PGSERVICEFILE", serviceFile)]
+      command = (proc executable arguments) {env = Just (overlay ++ filter (\(key, _) -> key `notElem` map fst overlay) inherited)}
+  ByteString.writeFile serviceFile "[conflict]\nhostaddr=127.0.0.2\nhost=/missing/service/socket\nport=1\nuser=missing_service_role\ndbname=missing_service_database\n"
+  withCreateProcess command $ \_ _ _ child -> do
+    status <- timeout 180000000 (waitForProcess child)
+    assert "endpoint subprocess succeeds within bound" (status == Just ExitSuccess)
+  after <- getEnvironment
+  assert "endpoint subprocesses preserve parent environment" (sort inherited == sort after)
+
+endpointTests :: FilePath -> FilePath -> PQ.Connection -> FilePath -> FilePath -> IO ()
+endpointTests workspace socket connection fixtureRoot bundleRoot = do
+  let directory = fixtureRoot </> "endpoint-probe"
+      run = runEndpointWorker workspace
+  createDirectoryIfMissing True directory
+  ByteString.writeFile (directory </> "fixture.sql") "INSERT INTO endpoint_probe VALUES (1);"
+  execCheck connection "CREATE TABLE endpoint_probe (id integer)"
+  run "127.0.0.2" ["--endpoint-worker", fixtureRoot, bundleRoot, socket, "success"]
+  run "" ["--endpoint-worker", fixtureRoot, bundleRoot, socket, "success"]
+  run "127.0.0.1" ["--endpoint-worker", fixtureRoot, bundleRoot, socket </> "missing", "failure"]
+  assert "missing socket never dispatches to reachable TCP" =<< ((== 2) <$> queryInt connection "SELECT count(*) FROM endpoint_probe")
+  tcpEnabled <- lookupEnv "HINAGATA_TEST_TCP"
+  when (tcpEnabled == Just "1") $ do
+    run "127.0.0.2" ["--endpoint-worker", fixtureRoot, bundleRoot, "127.0.0.1", "success"]
+    assert "explicit TCP overrides ambient address" =<< ((== 3) <$> queryInt connection "SELECT count(*) FROM endpoint_probe")
 
 lifecycleConfigFor :: Host -> Port -> Text -> DatabaseName -> FilePath -> FilePath -> SqlIdentifier -> ProjectId -> SqlIdentifier -> SqlIdentifier -> HinagataConfig
 lifecycleConfigFor host port adminUser database fixtureRoot bundleRoot catalogSchema projectId publicSchema messageSetting =

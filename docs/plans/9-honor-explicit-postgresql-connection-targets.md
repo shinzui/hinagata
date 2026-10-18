@@ -16,6 +16,11 @@ provenance:
       at: 2026-10-18T21:23:51Z
       mode: "other"
       note: "Complete audit remediation scope, regression acceptance, integration ownership, and Mina intention linkage."
+    - model: "gpt-6.1-sol"
+      harness: "codex-cli"
+      at: 2026-10-18T21:29:37Z
+      mode: "implement"
+      note: "Isolate conflicting libpq defaults in subprocess regressions and enforce explicit endpoint routing."
 intention: "intention_01m58e4vxke9stryg9na9xc9em"
 ---
 
@@ -34,16 +39,16 @@ Fix audit finding F3 (P1): native operations must connect to the explicitly supp
 ## Progress
 
 
-- [ ] M1: Native and rendered connection targets resist ambient endpoint overrides in isolated process tests.
-- [ ] M2: Direct loads and owned lifecycle operations honor socket/TCP selection with conflicting environment defaults.
+- [x] M1: Native and rendered connection targets resist ambient endpoint overrides in isolated process tests.
+- [x] M2: Direct loads and owned lifecycle operations honor socket/TCP selection with conflicting environment defaults.
 
-Implementation has not started. The audit observations below describe the original defect, not acceptance of a fix.
+Accepted 2026-10-18: isolated endpoint loads failed on the original renderer, then passed with explicit empty hostaddr. Core tests, disposable socket and TCP PostgreSQL suites, executable build, CLI/PostgreSQL suite, and `just check-docs` pass. Subprocess tests cover conflicting environment and service defaults, valid socket/TCP, missing socket with zero alternate writes, unchanged parent environment, and the complete owned lifecycle under conflicting defaults.
 
 
 ## Surprises & Discoveries
 
 
-None recorded during implementation yet.
+Mori has no registered postgresql-libpq source. Upstream PostgreSQL REL_18_STABLE `fe-connect.c` confirms explicit non-null option values, including empty hostaddr, bypass environment and service defaults; an empty address selects the supplied host. The native lifecycle subprocess runs before the parent observer connects, preserving the existing nine-connection budget test.
 
 
 ## Decision Log
@@ -55,7 +60,7 @@ None recorded during implementation yet.
 ## Outcomes & Retrospective
 
 
-Pending implementation and acceptance evidence.
+F3 is fixed centrally in public connection rendering. Endpoint and lifecycle regressions pass without mutating process-global environment. Authentication/TLS defaults remain supported; ADR 2 and the configuration reference document this boundary.
 
 
 ## Context and Orientation

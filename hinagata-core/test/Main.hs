@@ -53,7 +53,7 @@ regressionTests = do
         database <- mkDatabaseName "example"
         password <- mkSecret "p'\\secret"
         mkConnectionTarget host port "service" database (Just password)
-  assert "keyword escaping" (fmap (connectionStringText . renderConnectionString) target == Right "host='/tmp/a b\\'c\\\\d' port='5432' user='service' dbname='example' password='p\\'\\\\secret'")
+  assert "keyword escaping" (fmap (connectionStringText . renderConnectionString) target == Right "host='/tmp/a b\\'c\\\\d' hostaddr='' port='5432' user='service' dbname='example' password='p\\'\\\\secret'")
   assert "connection display redacts password" (all (not . (`isInfixOf` show target)) ["p'", "secret"])
   let validManifest =
         ByteString.pack

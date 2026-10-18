@@ -110,11 +110,14 @@ instance Show ConnectionString where
 connectionStringText :: ConnectionString -> Text
 connectionStringText (ConnectionString value) = value
 
+-- | Render explicit endpoint fields, clearing ambient hostaddr overrides.
+-- Other libpq defaults (including authentication and TLS) remain available.
 renderConnectionString :: ConnectionTarget -> ConnectionString
 renderConnectionString ConnectionTarget {host, port, user, database, password} =
   ConnectionString $
     Text.intercalate " " $
       [ field "host" (hostText host),
+        field "hostaddr" "",
         field "port" (Text.pack (show (portNumber port))),
         field "user" user,
         field "dbname" (databaseNameText database)
