@@ -42,7 +42,8 @@ PROJECT
 
 cd "$workspace/unpacked"
 cabal build all
-cabal test all --test-show-details=direct
+cabal test hinagata-core-test hinagata-cli-process-test --test-show-details=direct
+bash "$project/scripts/test-postgres.sh"
 cabal haddock all
 
 cli="$(cabal list-bin hinagata)"

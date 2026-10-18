@@ -2,9 +2,15 @@ cabal-version: 3.12
 name: hinagata-cli
 version: 0.1.0.0
 synopsis: Fixture planning and PostgreSQL lease commands for Hinagata
+description: Plan and load fixtures, prepare reusable baselines, and manage isolated PostgreSQL database leases.
 category: Testing
 license: BSD-3-Clause
 license-file: LICENSE
+author: Nadeem Bitar
+maintainer: nadeem@gmail.com
+homepage: https://github.com/shinzui/hinagata
+bug-reports: https://github.com/shinzui/hinagata/issues
+extra-doc-files: CHANGELOG.md
 build-type: Simple
 
 common common
@@ -38,6 +44,7 @@ executable hinagata
     Hinagata.Cli.Validation
     Paths_hinagata_cli
 
+  autogen-modules: Paths_hinagata_cli
   build-depends:
     aeson >=2.2 && <2.4,
     async >=2.2.6 && <2.3,
@@ -45,8 +52,8 @@ executable hinagata
     bytestring >=0.12 && <0.14,
     directory >=1.3 && <1.4,
     filepath >=1.4 && <1.6,
-    hinagata-core,
-    hinagata-postgres,
+    hinagata-core ^>=0.1.0.0,
+    hinagata-postgres ^>=0.1.0.0,
     optparse-applicative >=0.19 && <0.20,
     process >=1.6.26 && <1.7,
     settei >=0.2 && <0.3,
@@ -81,8 +88,8 @@ test-suite hinagata-cli-process-test
     bytestring >=0.12 && <0.14,
     directory >=1.3 && <1.4,
     filepath >=1.4 && <1.6,
-    hinagata-core,
-    hinagata-postgres,
+    hinagata-core ^>=0.1.0.0,
+    hinagata-postgres ^>=0.1.0.0,
     optparse-applicative >=0.19 && <0.20,
     process >=1.6.26 && <1.7,
     settei >=0.2 && <0.3,
@@ -91,3 +98,8 @@ test-suite hinagata-cli-process-test
     settei-yaml >=0.2 && <0.3,
     text >=2.1 && <2.3,
     unix >=2.8 && <2.9,
+
+source-repository head
+  type: git
+  location: https://github.com/shinzui/hinagata.git
+  subdir: hinagata-cli

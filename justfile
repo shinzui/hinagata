@@ -4,7 +4,7 @@ core-test:
     cabal test hinagata-core-test --test-show-details=direct
 
 postgres-test:
-    cabal test hinagata-postgres-test --test-show-details=direct
+    bash scripts/test-postgres.sh
 
 test-cli:
     cabal build hinagata-cli
@@ -60,7 +60,7 @@ check-docs:
     okf validate docs/improvement-requests --strict --profile docs/improvement-requests/profile.dhall --profile-enforce --log-enforce
     mori terms validate --path .
 
-check: check-conventions check-docs core-test postgres-test test-cli fmt-check
+check: check-conventions check-docs core-test postgres-test test-cli test-cli-postgres fmt-check
     cabal sdist hinagata-core
     cabal sdist hinagata-postgres
     cabal sdist hinagata-cli
