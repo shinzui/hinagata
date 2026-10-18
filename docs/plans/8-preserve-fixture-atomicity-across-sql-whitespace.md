@@ -16,6 +16,11 @@ provenance:
       at: 2026-10-18T21:23:51Z
       mode: "other"
       note: "Complete audit remediation scope, regression acceptance, integration ownership, and Mina intention linkage."
+    - model: "gpt-6.1-sol"
+      harness: "codex-cli"
+      at: 2026-10-18T21:27:02Z
+      mode: "implement"
+      note: "Add lexical and native atomicity regressions and repair PostgreSQL whitespace classification."
 intention: "intention_01m58e4vxke9stryg9na9xc9em"
 ---
 
@@ -34,16 +39,16 @@ Fix audit finding F1 (P1): transaction-control SQL must not pass fixture validat
 ## Progress
 
 
-- [ ] M1: PostgreSQL whitespace cannot hide forbidden statements, while quoted/commented text remains accepted.
-- [ ] M2: Native direct-load regressions prove rejection before mutation and rollback of valid multi-step fixtures.
+- [x] M1: PostgreSQL whitespace cannot hide forbidden statements, while quoted/commented text remains accepted.
+- [x] M2: Native direct-load regressions prove rejection before mutation and rollback of valid multi-step fixtures.
 
-Implementation has not started. The audit observations below describe the original defect, not acceptance of a fix.
+Accepted 2026-10-18: core whitespace/prefix/quoted-text regressions and the native three-step form-feed reproduction failed on the original tree, then passed after the scanner repair. `cabal test hinagata-core-test --test-show-details=direct`, `bash scripts/test-postgres.sh`, `python3 scripts/check_conventions.py`, and `git diff --check` pass. Native tests verify capture rejection, an unchanged sentinel, no escaped table, and existing late SQL/COPY rollback behavior.
 
 
 ## Surprises & Discoveries
 
 
-None recorded during implementation yet.
+The exact native reproduction emitted a no-transaction warning and failed capture rejection on the old scanner. A positive line-comment test needed to keep forbidden text before a newline, since newline legitimately ends that comment.
 
 
 ## Decision Log
@@ -55,7 +60,7 @@ None recorded during implementation yet.
 ## Outcomes & Retrospective
 
 
-Pending implementation and acceptance evidence.
+F1 is fixed by recognizing all six PostgreSQL ASCII whitespace bytes without expanding the trusted lexical policy. Native capture prevents dispatch of the bypass fixture; existing multi-step SQL and COPY failures remain atomic. ADR 2 records the separator and opaque-body contract.
 
 
 ## Context and Orientation

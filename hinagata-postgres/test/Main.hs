@@ -119,6 +119,20 @@ integrationTests socket = withSystemTempDirectory "hinagata-postgres-test-" $ \w
   execCheck setupConnection "CREATE TABLE final_copy_items (id integer PRIMARY KEY)"
   execCheck setupConnection "CREATE FUNCTION fail_final_copy() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'final COPY failure'; END $$"
   execCheck setupConnection "CREATE TRIGGER fail_final_copy AFTER INSERT ON final_copy_items FOR EACH STATEMENT EXECUTE FUNCTION fail_final_copy()"
+  let bypassDirectory = fixtureRoot </> "whitespace-bypass"
+  createDirectoryIfMissing True bypassDirectory
+  ByteString.writeFile (bypassDirectory </> "fixture.yaml") "name: whitespace-bypass\nsteps:\n  - sql: first.sql\n  - sql: commit.sql\n  - sql: fail.sql\n"
+  ByteString.writeFile (bypassDirectory </> "first.sql") "CREATE TABLE escaped_transaction (id integer); INSERT INTO escaped_transaction VALUES (1); UPDATE items SET note = 'changed' WHERE id = 99;"
+  ByteString.writeFile (bypassDirectory </> "commit.sql") "\fCOMMIT;"
+  ByteString.writeFile (bypassDirectory </> "fail.sql") "SELECT 1/0;"
+  bypass <- compileFixtures config [fixtureName "whitespace-bypass"]
+  -- Follow the public compile/load workflow even on the vulnerable implementation.
+  case bypass of
+    Right plan -> void (loadInto target defaultSessionOptions plan)
+    Left _ -> pure ()
+  assert "form-feed COMMIT rejected during capture" (case bypass of Left (InvalidSql _ _) -> True; _ -> False)
+  assert "rejected closure preserves caller sentinel" =<< ((== 1) <$> queryInt setupConnection "SELECT count(*) FROM items WHERE id = 99 AND note = 'sentinel'")
+  assert "rejected closure creates no table" =<< ((== 0) <$> queryInt setupConnection "SELECT count(*) FROM pg_class WHERE relname = 'escaped_transaction'")
   goodPlan <- bundleOrFail =<< compileFixtures config [fixtureName "good"]
   when ownedCluster (lifecycleTests target setupConnection host port (Text.pack user) database fixtureRoot bundleRoot goodPlan)
   loaded <- loadInto target defaultSessionOptions goodPlan

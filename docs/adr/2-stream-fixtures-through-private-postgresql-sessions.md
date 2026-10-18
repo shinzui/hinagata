@@ -4,7 +4,7 @@ Status: Accepted
 
 Date: 2026-09-26
 
-Amended: 2026-10-02 (flush each bounded nonblocking COPY chunk)
+Amended: 2026-10-18 (recognize PostgreSQL ASCII whitespace during SQL policy checks)
 
 ## Context
 
@@ -16,4 +16,4 @@ Compile deterministic graphs into immutable local bundles. Execute SQL and expli
 
 ## Consequences
 
-Bulk data has bounded client memory. The adapter owns lifetime, cancellation, and backpressure proofs. Bounds require a released build-cohort check. SQL remains trusted transaction-compatible project code; sequence changes and external effects are not covered by rollback. Binary COPY and a public query DSL are deferred. See [research](../research/initial-design.md) for release and source evidence.
+Bulk data has bounded client memory. The adapter owns lifetime, cancellation, and backpressure proofs. Bounds require a released build-cohort check. The lexical preflight recognizes PostgreSQL ASCII whitespace, including form feed and vertical tab, so separators cannot conceal top-level transaction control or COPY commands. Quoted bodies and comments remain opaque. SQL remains trusted transaction-compatible project code; sequence changes and external effects are not covered by rollback. Binary COPY and a public query DSL are deferred. See [research](../research/initial-design.md) for release and source evidence.

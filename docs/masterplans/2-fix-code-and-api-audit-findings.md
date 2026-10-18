@@ -15,6 +15,11 @@ provenance:
       at: 2026-10-18T21:23:51Z
       mode: "other"
       note: "Complete audit remediation scope, regression acceptance, integration ownership, and Mina intention linkage."
+    - model: "gpt-6.1-sol"
+      harness: "codex-cli"
+      at: 2026-10-18T21:27:02Z
+      mode: "implement"
+      note: "Implement audit repairs in serial child order and reconcile acceptance evidence."
 intention: "intention_01m58e4vxke9stryg9na9xc9em"
 ---
 
@@ -51,7 +56,7 @@ Relevant local decisions are [ADR 1](../adr/1-library-boundary-and-service-owned
 
 | # | Title | Path | Hard Deps | Soft Deps | Status |
 |---|-------|------|-----------|-----------|--------|
-| 8 | SQL transaction protection | [8-preserve-fixture-atomicity-across-sql-whitespace.md](../plans/8-preserve-fixture-atomicity-across-sql-whitespace.md) | None | None | Not Started |
+| 8 | SQL transaction protection | [8-preserve-fixture-atomicity-across-sql-whitespace.md](../plans/8-preserve-fixture-atomicity-across-sql-whitespace.md) | None | None | Complete |
 | 9 | Explicit connection targets | [9-honor-explicit-postgresql-connection-targets.md](../plans/9-honor-explicit-postgresql-connection-targets.md) | None | EP-8 | Not Started |
 | 10 | Cancellation and resource lifetimes | [10-propagate-cancellation-through-commands-and-resource-lifetimes.md](../plans/10-propagate-cancellation-through-commands-and-resource-lifetimes.md) | None | EP-9 | Not Started |
 | 11 | Role-setting semantics and cache identity | [11-apply-postgresql-role-settings-without-changing-their-meaning.md](../plans/11-apply-postgresql-role-settings-without-changing-their-meaning.md) | None | None | Not Started |
@@ -85,7 +90,7 @@ Durable exception/ownership rules belong in ADRs 1–3 when implemented. Endpoin
 ## Progress
 
 
-Planning is complete; all five child implementations are Not Started. None is blocked by a hard dependency. The next default work is EP-8. This master plan is not complete until every child is accepted and the combined integration gate below passes.
+EP-8 is accepted with core/native regressions and ADR 2 updated. Four children remain; EP-9 is next. No child is blocked by a hard dependency. This master plan is not complete until every child is accepted and the combined integration gate below passes.
 
 The final gate runs from the repository root in the development environment with `HINAGATA_TEST_PGHOST` unset. Use fresh disposable clusters and retain concise evidence on the final combined tree:
 

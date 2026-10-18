@@ -32,7 +32,7 @@ scan :: Bool -> Bool -> Maybe Prefix -> String -> Either SqlPolicyError ()
 scan _ _ _ [] = Right ()
 scan statementStart lineStart prefix input@(character : rest)
   | character == '\n' = scan statementStart True prefix rest
-  | character == ' ' || character == '\t' || character == '\r' = scan statementStart lineStart prefix rest
+  | character `elem` [' ', '\t', '\r', '\f', '\v'] = scan statementStart lineStart prefix rest
   | "--" `isPrefixOf` input = scan statementStart True prefix (dropLine (drop 2 input))
   | "/*" `isPrefixOf` input = do
       (remaining, nextLineStart) <- dropBlock 1 lineStart (drop 2 input)

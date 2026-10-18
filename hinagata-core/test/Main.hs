@@ -104,6 +104,29 @@ regressionTests = do
         ["START TRANSACTION", "COMMIT", "END", "ROLLBACK", "ABORT", "SAVEPOINT x", "RELEASE SAVEPOINT x"]
     )
   assert "standard string and quoted identifier are opaque" (checkSqlPolicy (ByteString.pack "SELECT 'BEGIN; COPY', \"COMMIT;\" FROM x;") == Right ())
+  let whitespace = [" ", "\t", "\n", "\r", "\f", "\v"]
+      forbidden = ["BEGIN", "COMMIT", "END", "ROLLBACK", "ABORT", "SAVEPOINT x", "RELEASE SAVEPOINT x", "COPY x FROM STDIN"]
+  assert
+    "all PostgreSQL ASCII whitespace preserves statement starts"
+    ( all
+        (isSqlPolicyError . checkSqlPolicy . ByteString.pack)
+        [prefix ++ gap ++ statement | gap <- whitespace, statement <- forbidden, prefix <- ["", "SELECT 1;", "/* comment */", "-- comment\n"]]
+    )
+  assert
+    "all PostgreSQL whitespace preserves transaction prefixes"
+    ( all
+        (isSqlPolicyError . checkSqlPolicy . ByteString.pack)
+        [prefix ++ gap ++ "TRANSACTION 'x'" | gap <- whitespace, prefix <- ["START", "PREPARE"]]
+    )
+  assert
+    "whitespace before psql commands preserves line start"
+    (all ((== Left PsqlCommand) . checkSqlPolicy . ByteString.pack . (++ "\\i fixture.sql")) whitespace)
+  assert
+    "whitespace and forbidden words remain opaque inside literals and comments"
+    ( all
+        ((== Right ()) . checkSqlPolicy . ByteString.pack)
+        ["SELECT '" ++ gap ++ "COMMIT;'; SELECT E'" ++ gap ++ "ROLLBACK;'; SELECT \"" ++ gap ++ "COPY\"; SELECT $$" ++ gap ++ "BEGIN;$$; /*" ++ gap ++ "COMMIT;*/ SELECT 1; --ROLLBACK" ++ gap ++ "\n" | gap <- whitespace]
+    )
   configTests
   bundleTests
   revisionTests
