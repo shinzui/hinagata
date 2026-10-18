@@ -4,9 +4,10 @@ title: "Expose clone preparation hooks through the CLI"
 description: "Expose the existing library clone-preparation hook in CLI configuration so each disposable clone can be seeded through service-owned command APIs before scenario fixtures and consumer startup."
 generated:
   by: codex-cli/gpt-6.1-sol
-  at: "2026-10-11T16:18:19Z"
+  at: "2026-10-18T18:30:53Z"
 requestId: IR-1
-status: proposed
+status: accepted
+targetPlan: docs/plans/6-expose-clone-preparation-hooks-through-the-cli.md
 origin: mori://shinzui/rei/masterplans/29-close-rei-cli-and-http-api-gaps-on-the-haskell-jitsurei-contract
 acceptanceCriteria:
   - id: AC-1
@@ -59,3 +60,7 @@ This hook executes for every clone and is not baseline construction. Changing it
 
 Useful before adopting Hinagata through its CLI for command-backed fixture families. Direct Haskell consumers can already use the library hook. Keep migrations and domain seeding service-owned; PostgreSQL startup and projection-worker supervision remain caller responsibilities.
 
+
+## Implementation plan
+
+Accepted for implementation in [ExecPlan 6: Expose clone preparation hooks through the CLI](../plans/6-expose-clone-preparation-hooks-through-the-cli.md). The plan covers AC-1 through AC-5; implementation and acceptance verification have not started.
