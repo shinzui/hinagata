@@ -237,6 +237,16 @@ Use `FILE_COPY` only after measurements on your server.
 Database grants accept `CONNECT`, `CREATE`, and `TEMPORARY`.
 Schema grants accept `SCHEMA:USAGE` and `SCHEMA:CREATE`.
 Role settings accept `NAME=VALUE` entries.
+Use a YAML array for list values, for example `setup.settings: ["search_path=public,pg_catalog"]`.
+PostgreSQL interprets this as two schemas; an explicitly quoted name such as `"comma,schema"` remains one schema.
+Each role persists its own declaration atomically under its existing parameter permissions.
+List values use PostgreSQL interpretation; scalar declarations do not change the session applying them.
+Custom parameter placeholders require PostgreSQL's normal `SET` permission.
+
+Baseline identity uses `hinagata-fingerprint-v2` for these corrected setting semantics.
+Version-1 generations remain inspectable but are not reused; preparation builds a new generation and then reuses it normally.
+Comparisons against version-1 manifests report `FingerprintVersion` along with any changed inputs.
+This invalidation does not modify or delete old sealed databases, or change the maintenance catalog format.
 Service migrations must supply required table and sequence grants.
 
 For the complete machine-readable declaration, run:

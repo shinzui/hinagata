@@ -16,6 +16,11 @@ provenance:
       at: 2026-10-18T21:23:51Z
       mode: "other"
       note: "Complete audit remediation scope, regression acceptance, integration ownership, and Mina intention linkage."
+    - model: "gpt-6.1-sol"
+      harness: "codex-cli"
+      at: 2026-10-18T21:43:25Z
+      mode: "implement"
+      note: "Preserve server-interpreted role settings and invalidate legacy fingerprint semantics."
 intention: "intention_01m58e4vxke9stryg9na9xc9em"
 ---
 
@@ -34,20 +39,22 @@ Fix audit finding F6 (P2): a configured search_path containing multiple schemas 
 ## Progress
 
 
-- [ ] M1: Setup/application role settings retain PostgreSQL semantics and apply under the existing role permissions.
-- [ ] M2: Correct settings are observed in migrations and clones, and old-semantics baselines are excluded from reuse.
+- [x] M1: Setup/application role settings retain PostgreSQL semantics and apply under the existing role permissions.
+- [x] M2: Correct settings are observed in migrations and clones, and old-semantics baselines are excluded from reuse.
 
-Implementation has not started. The audit observations below describe the original defect, not acceptance of a fix.
+Accepted 2026-10-18: the old setter fails `setup search_path is a schema list before migration`; the corrected implementation passes the disposable PostgreSQL suite. It verifies role-owned migration lookup, quoted comma-schema lookup on cold/warm clones, $user preservation, custom apostrophe/backslash data under PostgreSQL parameter permissions, scalar/read-only declarations, and rollback of all settings after a later invalid parameter. Synthetic legacy manifest/digest tests prove version comparison, v1 exclusion, v2 build/reuse, and preservation of the sealed old database. Core tests, CLI build/integration, conventions, and docs validation also pass.
 
 
 ## Surprises & Discoveries
 
 
-None recorded during implementation yet.
+A native prototype proved that set_config(transaction_read_only, on, true) makes ALTER ROLE fail with SQLSTATE 25006, while scalar ALTER ROLE assignment succeeds. PostgreSQL 18 also requires an explicit SET parameter grant for an unregistered custom placeholder; the custom-setting regression supplies that existing server permission rather than granting cluster-wide privileges to Hinagata roles.
 
 
 ## Decision Log
 
+
+2026-10-18: Refine the prototype to server-interpreted quoted lists and literal scalar assignment, after observing SQLSTATE 25006 for an active read-only setting. This preserves existing scalar support while correcting list semantics; all settings still persist atomically.
 
 2026-10-18: Version the baseline fingerprint with the semantics repair. Otherwise unchanged declarations could select a sealed database prepared under the previous, incorrect search_path interpretation. Use server interpretation rather than ad hoc list parsing.
 
@@ -55,7 +62,7 @@ None recorded during implementation yet.
 ## Outcomes & Retrospective
 
 
-Pending implementation and acceptance evidence.
+F6 is fixed without changing RoleSetting or adding administrative privileges. Server interpretation repairs quoted list settings; scalar assignment avoids activating declarations in the persistence session. Fingerprint v2 prevents stale semantic reuse while supporting v1/v2 comparisons. ADR 3 and the configuration reference document the boundary. The legacy comparison fixture changes only the manifest marker while retaining an opaque public handle, then installs the actual v1 digest for the non-reuse proof.
 
 
 ## Context and Orientation
@@ -73,7 +80,7 @@ The working directory for this plan is the Hinagata repository root, `/Users/shi
 ## Plan of Work
 
 
-M1 keeps the existing Text-based public configuration contract initially and uses PostgreSQL to interpret parameterized setting values rather than splitting commas or accepting raw SQL. Prove the representative path first: on a role-owned temporary session, use a transaction, `pg_catalog.set_config` with parameters for name/value, and ALTER ROLE ... IN DATABASE ... SET the quoted name FROM CURRENT. Temporary session/local state must not leak beyond the dedicated session, and failure must roll back the persistent change. Verify FROM CURRENT preserves quoted schema names, the $user token, and lists before applying this strategy to every setting. Check a scalar such as client_min_messages, a custom dotted setting, and default_transaction_read_only: avoid making the persistence statement run in a newly read-only transaction. Choose transaction boundaries and local state accordingly. No input may be concatenated as executable value SQL. If upstream rules prevent this approach for an otherwise previously supported setting, document the concrete case and refine the persistence helper before declaring M1 complete; do not silently narrow the supported settings.
+M1 keeps the existing Text-based public configuration contract and uses PostgreSQL to interpret quoted list settings rather than splitting commas or accepting raw SQL. Preserve scalar ALTER ROLE literal assignment, since activating read-only, encoding, role, or timeout values in the persistence session can prevent its own update. Enumerate PostgreSQL built-in GUC_LIST_QUOTE names consistently with upstream pg_dump; list values use parameterized set_config and FROM CURRENT. Apply the entire role declaration in one transaction, stopping and rolling back at the first failure. Prove the representative path first: on a role-owned temporary session, use a transaction, `pg_catalog.set_config` with parameters for name/value, and ALTER ROLE ... IN DATABASE ... SET the quoted name FROM CURRENT. Temporary session/local state must not leak beyond the dedicated session, and failure must roll back the persistent change. Verify FROM CURRENT preserves quoted schema names, the $user token, and lists before applying this strategy to the quoted list settings. Check a scalar such as client_min_messages, a custom dotted setting, and default_transaction_read_only: avoid making the persistence statement run in a newly read-only transaction. Choose transaction boundaries and local state accordingly. No input may be concatenated as executable value SQL. If upstream rules prevent this approach for an otherwise previously supported setting, document the concrete case and refine the persistence helper before declaring M1 complete; do not silently narrow the supported settings.
 
 M2 exercises the public baseline/lease API with separate admin, setup, and application roles. A migration must observe the declared multi-schema path and successfully resolve a table in its expected schema; a clone application connection must observe its own path. Verify custom/scalar values and quoted/comma-containing schema names using server reads and actual relation lookup, not only generated SQL strings.
 
@@ -115,3 +122,5 @@ The tests must be repeatable with fresh temporary fixture directories, unique da
 No hard prerequisite. This stream can be implemented independently; default ordering follows cancellation work to avoid simultaneous edits to lifecycle tests. It owns role-setting interpretation, `Access.setRoleSetting`, fingerprint format compatibility in `Baseline`, and corresponding configuration docs. `RoleSetting` source shape should remain unchanged unless the early native proof demonstrates a necessary API change, which must be reflected in this plan and all callers. Integration with `docs/plans/12-preserve-structured-fixture-errors-across-lifecycle-apis.md` concerns BaselineError construction and output; that plan owns error shape, this plan owns semantic identity. Preserve missing-hook-revision reuse rules, credential-rotation behavior, and the existing catalog schema.
 
 Use `mori registry search <dependency>`, `mori registry show <qualified-project> --full`, and `mori registry docs <qualified-project>` before selecting dependency APIs. Read located source; if the registry has no source, consult authoritative upstream documentation and record the gap. Do not search `/nix/store` or the filesystem root. Keep cross-repository durable references canonical. No dependency bounds or pins change under this plan; if one becomes necessary, first verify the released registry version and upstream tags. Implementation commits use Conventional Commits and include this file's `ExecPlan:` trailer, `MasterPlan: docs/masterplans/2-fix-code-and-api-audit-findings.md`, and `Intention: intention_01m58e4vxke9stryg9na9xc9em`.
+
+Revision 2026-10-18: Keep scalar persistence unchanged after the native read-only prototype demonstrated that activating every declaration would narrow supported settings.

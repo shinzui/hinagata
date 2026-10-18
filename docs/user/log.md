@@ -1,6 +1,7 @@
 # Bundle Update Log
 
 ## 2026-10-18
+* **Update**: Document PostgreSQL role-setting list semantics, atomic persistence, and permissions.
 * **Update**: Document native command cancellation, first-signal cleanup, and transaction limits.
 * **Update**: Document explicit native endpoint precedence and preserved authentication/TLS defaults.
 * **Update**: Clarified example-only Keiro dependencies and workspace resolution in DOC-1 and DOC-5; updated DOC-6 with content-derived revisions and per-clone preparation.

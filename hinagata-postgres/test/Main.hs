@@ -681,6 +681,7 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   bulkRequested <- (== Just "1") <$> lookupEnv "HINAGATA_TEST_BULK_BASELINE"
   when bulkRequested (bulkBaselineTests lifecycleConfig fixtureRoot bundleRoot connection)
   missingCreatedbTests lifecycleConfig baselineSpec connection database
+  roleSettingTests lifecycleConfig baselineSpec scenarioPlan connection
   generationLifecycleTests lifecycleConfig baselineSpec firstRef scenarioPlan fixtureRoot bundleRoot connection migrationCalls messageSetting target catalogSchema
 
 missingCreatedbTests :: HinagataConfig -> BaselineSpec -> PQ.Connection -> DatabaseName -> IO ()
@@ -1265,6 +1266,70 @@ cleanupLifecycleTests lifecycleConfig catalog firstRef scenarioPlan connection d
   execCheck connection (Encoding.encodeUtf8 ("INSERT INTO hinagata_test.allocations (id, project_id, generation_id, run_id, database_name, ownership_token, state) VALUES ('" <> protectedId <> "', 'baseline-test', '" <> generationText <> "', 'recovery-run', '" <> databaseNameText database <> "', '" <> ambiguousToken <> "', 'Allocating')"))
   protectedApply <- applyCleanup lifecycleConfig IncludeRetained [protectedId]
   assert "maintenance database is protected even with a catalog allocation" (case protectedApply of Right [Refused identifier _] -> identifier == protectedId; _ -> False)
+
+roleSettingTests :: HinagataConfig -> BaselineSpec -> FixturePlan -> PQ.Connection -> IO ()
+roleSettingTests configuration specification scenario observer = do
+  searchPath <- orFail (mkSqlIdentifier "search_path")
+  custom <- orFail (mkSqlIdentifier "hinagata.setting_probe")
+  readOnly <- orFail (mkSqlIdentifier "default_transaction_read_only")
+  transactionReadOnly <- orFail (mkSqlIdentifier "transaction_read_only")
+  messages <- orFail (mkSqlIdentifier "client_min_messages")
+  execCheck observer "GRANT SET ON PARAMETER \"hinagata.setting_probe\" TO hinagata_app"
+  project <- orFail (mkProjectId "setting-semantics-test")
+  let customValue = "apostrophe' backslash\\; SELECT secret_setting_probe;"
+      appPath = "\"$user\", \"comma,schema\", public, pg_catalog"
+      selected =
+        configuration
+          { project,
+            setupSettings = [RoleSetting messages "warning", RoleSetting searchPath "public, pg_catalog"],
+            applicationSettings = [RoleSetting searchPath appPath, RoleSetting custom customValue, RoleSetting readOnly "on", RoleSetting transactionReadOnly "on", RoleSetting messages "notice"]
+          }
+      migrate target = bracket (PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString target)))) PQ.finish $ \connection -> do
+        schemas <- queryText connection "SELECT array_to_string(current_schemas(false), ',')"
+        assert "setup search_path is a schema list before migration" (schemas == "public,pg_catalog")
+        execCheck connection "CREATE TABLE items (id integer PRIMARY KEY, note text NOT NULL)"
+        execCheck connection "GRANT SELECT, INSERT ON items TO hinagata_app"
+        execCheck connection "CREATE SCHEMA \"comma,schema\""
+        execCheck connection "CREATE TABLE \"comma,schema\".setting_relation (value integer)"
+        execCheck connection "INSERT INTO \"comma,schema\".setting_relation VALUES (42)"
+        execCheck connection "GRANT USAGE ON SCHEMA \"comma,schema\" TO hinagata_app"
+        execCheck connection "GRANT SELECT ON \"comma,schema\".setting_relation TO hinagata_app"
+        pure (Right ())
+      spec = specification {configuration = selected, migrationHook = migrate, verificationHook = const (pure (Right ()))}
+      consume LeaseInfo {applicationTarget} = bracket (PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString applicationTarget)))) PQ.finish $ \connection -> do
+        path <- queryText connection "SHOW search_path"
+        assert "application path preserves user token and quoted comma schema" (path == Encoding.encodeUtf8 appPath)
+        assert "quoted comma schema resolves as one name" =<< ((== 42) <$> queryInt connection "SELECT value FROM setting_relation")
+        assert "custom setting preserves apostrophe and backslash as data" =<< ((== Encoding.encodeUtf8 customValue) <$> queryText connection "SHOW hinagata.setting_probe")
+        assert "default read-only setting persists without blocking its own ALTER" =<< ((== "on") <$> queryText connection "SHOW default_transaction_read_only")
+        assert "scalar setting retains meaning" =<< ((== "notice") <$> queryText connection "SHOW client_min_messages")
+  (baseline, built) <- orFail =<< ensureBaseline spec
+  assert "setting semantics baseline built" (kind built == Built)
+  (_, warm) <- orFail =<< ensureBaseline spec
+  assert "corrected settings baseline reuses" (kind warm == Reused)
+  void (orFail =<< withDatabase selected baseline scenario consume)
+  let database = databaseNameText (baselineDatabase baseline)
+      selector = " WHERE database_name='" <> database <> "'"
+      legacyManifest = "replace(fingerprint_manifest->>'manifest', 'hinagata-fingerprint-v2', 'hinagata-fingerprint-v1')"
+  assert "corrected fingerprints have v2 marker" =<< ((== 1) <$> queryInt observer (Encoding.encodeUtf8 ("SELECT count(*) FROM hinagata_test.generations" <> selector <> " AND fingerprint_manifest->>'manifest' LIKE 'hinagata-fingerprint-v2%'")))
+  -- Exercise supported old-manifest comparison through an opaque public handle;
+  -- keep its selected digest stable while changing only the stored format marker.
+  execCheck observer (Encoding.encodeUtf8 ("UPDATE hinagata_test.generations SET fingerprint_manifest=jsonb_set(fingerprint_manifest, '{manifest}', to_jsonb(" <> legacyManifest <> "))" <> selector))
+  (_, compared) <- orFail =<< ensureBaseline spec {compareAgainst = Just baseline}
+  assert "v1 comparison identifies only fingerprint version" (fmap changedComponents (comparison compared) == Just [FingerprintVersion])
+  -- Now give that synthetic legacy generation its genuine v1 manifest digest.
+  execCheck observer (Encoding.encodeUtf8 ("UPDATE hinagata_test.generations SET fingerprint=encode(sha256(convert_to(fingerprint_manifest->>'manifest','UTF8')), 'hex')" <> selector))
+  (corrected, rebuilt) <- orFail =<< ensureBaseline spec
+  assert "legacy semantics generation is not reused" (kind rebuilt == Built && baselineDatabase corrected /= baselineDatabase baseline)
+  (_, reused) <- orFail =<< ensureBaseline spec
+  assert "new semantics reuse after legacy invalidation" (kind reused == Reused)
+  assert "legacy baseline stays sealed and inspectable" =<< ((== 1) <$> queryInt observer (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname='" <> database <> "' AND NOT datallowconn")))
+  void (orFail =<< withDatabase selected corrected scenario consume)
+  invalid <- orFail (mkSqlIdentifier "hinagata_unknown_parameter")
+  let invalidSpec = spec {configuration = selected {applicationSettings = [RoleSetting custom "half-persisted-probe", RoleSetting invalid "bad"]}}
+  failed <- ensureBaseline invalidSpec
+  assert "invalid role setting fails preparation" (case failed of Left _ -> True; _ -> False)
+  assert "failed role-setting transaction leaves no partial setting" =<< ((== 0) <$> queryInt observer "SELECT count(*) FROM pg_db_role_setting WHERE setconfig @> ARRAY['hinagata.setting_probe=half-persisted-probe']")
 
 completionCancellationTests :: HinagataConfig -> BaselineRef -> FixturePlan -> PQ.Connection -> ConnectionTarget -> IO ()
 completionCancellationTests configuration baseline scenario observer target =

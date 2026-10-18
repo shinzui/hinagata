@@ -61,8 +61,25 @@ applyRoleSettings configuration options database access settings =
       opened <- withSession target options $ \session ->
         runExclusive session $ \connection sessionOptions -> do
           deadline <- deadlineAfter (operationDeadlineMs sessionOptions)
-          results <- traverse (setRoleSetting connection deadline role database) settings
-          pure (Keep (sequence results))
+          let apply [] = pure (Right ())
+              apply (entry : rest) = do
+                result <- setRoleSetting connection deadline role database entry
+                either (pure . Left) (const (apply rest)) result
+          begun <- query connection deadline Begin "BEGIN"
+          case begun of
+            Left failure -> pure (Retire (Left (accessNativeFailure failure)))
+            Right () -> do
+              result <- apply settings
+              case result of
+                Right () -> do
+                  committed <- query connection deadline Commit "COMMIT"
+                  pure $ either (Retire . Left . accessNativeFailure) (const (Keep (Right ()))) committed
+                Left failure -> do
+                  cleanup <- deadlineAfter (cleanupDeadlineMs sessionOptions)
+                  rolled <- query connection cleanup Rollback "ROLLBACK"
+                  pure $ case rolled of
+                    Right () -> Keep (Left failure)
+                    Left _ -> Retire (Left failure)
       pure $ case opened of
         Left failure -> Left (accessSessionFailure failure)
         Right (Left failure) -> Left (accessSessionFailure failure)
@@ -72,8 +89,31 @@ setRoleSetting :: PQ.Connection -> Deadline -> Text -> DatabaseName -> RoleSetti
 setRoleSetting connection deadline role database RoleSetting {name, value}
   | Text.any (== '\0') value = pure (Left (AccessError "role setting contains NUL" Nothing))
   | otherwise = do
-      let statement = Encoding.encodeUtf8 ("ALTER ROLE " <> role <> " IN DATABASE " <> quoteDatabase database <> " SET " <> quoteSqlIdentifier name <> " TO " <> quoteLiteral value)
-      either (Left . accessNativeFailure) Right <$> query connection deadline Sql statement
+      let prefix = "ALTER ROLE " <> role <> " IN DATABASE " <> quoteDatabase database <> " SET " <> quoteSqlIdentifier name
+          persist suffix = either (Left . accessNativeFailure) Right <$> query connection deadline Sql (Encoding.encodeUtf8 (prefix <> suffix))
+      if Text.toLower (sqlIdentifierText name) `elem` quotedListSettings
+        then do
+          interpreted <- queryParamRows connection deadline Sql "SELECT pg_catalog.set_config($1, $2, true)" (map (Just . Encoding.encodeUtf8) [sqlIdentifierText name, value]) 1
+          case interpreted of
+            Left failure -> pure (Left (accessNativeFailure failure))
+            Right _ -> persist " FROM CURRENT"
+        else persist (" TO " <> quoteLiteral value)
+
+-- PostgreSQL's GUC_LIST_QUOTE parameters (also enumerated by pg_dump).
+-- A single SQL literal would quote the entire list as one item. Other settings
+-- keep scalar assignment so read-only, role, encoding, and timeout declarations
+-- cannot change the persistence session before ALTER ROLE executes.
+quotedListSettings :: [Text]
+quotedListSettings =
+  [ "search_path",
+    "temp_tablespaces",
+    "session_preload_libraries",
+    "local_preload_libraries",
+    "shared_preload_libraries",
+    "unix_socket_directories",
+    "oauth_validator_libraries",
+    "output_plugin_libraries"
+  ]
 
 grantDatabase :: PQ.Connection -> Deadline -> DatabaseName -> AccessConfig -> [DatabaseGrant] -> IO (Either AccessError ())
 grantDatabase connection deadline database access grants =

@@ -265,12 +265,12 @@ comparePrevious connection configuration identity (Just previous) manifest deadl
           | recordedFingerprint == Encoding.encodeUtf8 (baselineFingerprint previous) ->
               let before = Text.lines (Encoding.decodeUtf8 recordedManifest)
                   after = Text.lines manifest
-               in if length before /= length fingerprintComponents || length after /= length fingerprintComponents || listToMaybe before /= Just "hinagata-fingerprint-v1"
+               in if length before /= length fingerprintComponents || length after /= length fingerprintComponents || listToMaybe before `notElem` map Just ["hinagata-fingerprint-v1", "hinagata-fingerprint-v2"]
                     then Left (BaselineError "comparison generation has an unsupported fingerprint manifest" Nothing)
                     else Right (Just (FingerprintComparison (baselineFingerprint previous) [component | (component, old, new) <- zip3 fingerprintComponents before after, old /= new]))
         Right _ -> Left (BaselineError "comparison generation is missing or has changed fingerprint identity" Nothing)
 
--- | Ordered category names represented in a version-1 fingerprint manifest.
+-- | Ordered category names shared by version-1 and version-2 fingerprint manifests.
 fingerprintComponents :: [FingerprintComponent]
 fingerprintComponents =
   [ FingerprintVersion,
@@ -451,7 +451,7 @@ fingerprintManifest :: Int -> BaselineSpec -> Text
 fingerprintManifest server BaselineSpec {configuration, basePlan, migrationRevision, verificationRevision, requiredExtensions, requiredLocale} =
   Text.intercalate
     "\n"
-    [ "hinagata-fingerprint-v1",
+    [ "hinagata-fingerprint-v2",
       render (server `div` 10000),
       render (projectIdText (project configuration)),
       render (planDigest basePlan),
