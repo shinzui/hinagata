@@ -6,7 +6,7 @@ docId: DOC-2
 tags: ["integration", "access", "lifecycle"]
 generated:
   by: process:codex
-  at: 2026-10-02T16:49:46Z
+  at: 2026-10-18T19:08:35Z
 ---
 
 # Integrate a service
@@ -30,11 +30,43 @@ Replace all uppercase placeholders before execution.
 4. Set truthful `migration.revision` and `verification.revision` values.
 5. Make each executable close its database connections before exit.
 6. Put shared data in `baseline.fixtures`.
-7. Put test-specific changes in scenario fixtures.
+7. Configure optional `clone.preparation` for per-clone state that must be created through domain commands.
+8. Put test-specific independent changes in scenario fixtures.
 
    A scenario can include a base fixture when its captured identity is unchanged.
    Hinagata does not load the shared base fixture twice.
    Service migrations must grant application access to tables and sequences.
+
+## Seed domain state before service startup
+
+The lifecycle is baseline migration/fixtures/verification → clone/access → preparation command → scenario suffix → application handoff.
+The setup endpoint is available to the preparation executable before the service starts.
+Use the service's public command/store APIs to create event-backed state and close its pools before exit.
+Fixture SQL should not fabricate runtime event, outbox, or workflow rows.
+
+For example, the packaged `hinagata-keiro-seed seeded 2` calls `addCounter` twice.
+Configure its executable with `HINAGATA_CLONE_PREPARATION_EXECUTABLE` and use:
+
+```yaml
+clone:
+  preparation:
+    argv: [seeded, "2"]
+    environment: []
+    deadline_ms: "10000"
+```
+
+The complete [configuration reference](../user/configuration.md#per-clone-preparation) shows executable and cwd settings.
+Preparation runs once per new clone and does not contribute to baseline identity.
+Changing a seed total keeps a truthful unchanged baseline reusable; the next clone receives the new seed.
+Omitting preparation preserves the original lifecycle.
+A seed failure, deadline, or cancellation prevents service startup.
+Bounded supervision releases the database only after process stoppage is proven; otherwise inspect the preserved lease.
+The private `PGPASSFILE` supplies setup authentication when needed, and managed variables cannot be overridden by the seed overlay.
+The seed executable owns its diagnostic output, which goes to stderr.
+
+PostgreSQL bootstrap, service startup/readiness, and projection workers remain caller responsibilities.
+The example's workbench suites later read `/counters/seeded` through HTTP using the application role,
+with totals `2` and `5` in separate clones of the same reused baseline.
 
 ## Validate the setup
 

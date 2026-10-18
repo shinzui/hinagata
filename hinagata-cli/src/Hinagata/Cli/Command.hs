@@ -6,11 +6,11 @@ module Hinagata.Cli.Command
   )
 where
 
-import Control.Exception (Handler (..), IOException, catches, throwIO, try)
+import Control.Exception (Handler (..), IOException, catches, mask_, throwIO, try)
 import Data.Text qualified as Text
 import Hinagata.Cli.Config (CliSettings (..), HookSettings (..))
 import Hinagata.Cli.Output (CliError (..), bundleError)
-import Hinagata.Cli.Process (CancellationScope, ChildCleanupException (..), ChildFailure (..), ChildReport (..), ChildSpec (..), CommandCancelled (..), parseOverlay, runChild)
+import Hinagata.Cli.Process (CancellationScope, ChildCleanupException (..), ChildFailure (..), ChildReport (..), ChildSpec (..), CommandCancelled (..), checkCancellation, parseOverlay, runChild)
 import Hinagata.Config (HinagataConfig (..))
 import Hinagata.Connection (ConnectionTarget)
 import Hinagata.Fixture.Bundle (BundleConfig (..), FixturePlan, compileFixtures)
@@ -26,6 +26,7 @@ prepareBaseline = prepareBaselineWithRunner runChild
 -- library/CLI boundary without a public configuration bypass.
 prepareBaselineWithRunner :: (CancellationScope -> ChildSpec -> IO (Either ChildFailure ChildReport)) -> CancellationScope -> HinagataConfig -> CliSettings -> IO (Either CliError (BaselineRef, PreparationReport))
 prepareBaselineWithRunner runner scope configuration settings = do
+  checkCancellation scope
   let migrationHook = hookRunner runner scope "migration" False (migration settings)
       verificationHook = hookRunner runner scope "verification" False (verification settings)
       clonePreparationHook = case clonePreparation settings of
@@ -61,8 +62,10 @@ compileScenario HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLimit, chunkSize
       compiled <- compileFixtures (BundleConfig fixtureRoot bundleRoot sqlSizeLimit chunkSize) names
       pure (either (Left . bundleError) Right compiled)
 
+-- Keep the supervision outcome and its release-safety classification masked
+-- together. Blocking process waits remain interruptible.
 hookRunner :: (CancellationScope -> ChildSpec -> IO (Either ChildFailure ChildReport)) -> CancellationScope -> Text.Text -> Bool -> HookSettings -> ConnectionTarget -> IO (Either Text.Text ())
-hookRunner runner scope name preparation HookSettings {executable, arguments, workingDirectory, environment, deadlineMs} target = case executable of
+hookRunner runner scope name preparation HookSettings {executable, arguments, workingDirectory, environment, deadlineMs} target = mask_ $ case executable of
   Nothing -> pure (Right ())
   Just program -> do
     let failWith kind safe =
@@ -89,10 +92,13 @@ hookRunner runner scope name preparation HookSettings {executable, arguments, wo
               Right result -> case result of
                 Left ChildSpawnFailed -> failWith PreparationSpawnFailed True
                 Left ChildIdentityUnavailable -> failWith PreparationIdentityUnavailable False
+                Right ChildReport {cleanupFailure = Just _, cancelledBy = Just signal} -> failWith (PreparationCancelled signal) False
+                Right ChildReport {cleanupFailure = Just _, timedOut = True} -> failWith PreparationTimeout False
+                Right ChildReport {cleanupFailure = Just _, childExit = Just (ExitFailure status)} -> failWith (PreparationExit status) False
                 Right ChildReport {cleanupFailure = Just _} -> failWith PreparationCleanupFailed False
                 Right ChildReport {cancelledBy = Just signal} -> failWith (PreparationCancelled signal) True
                 Right ChildReport {timedOut = True} -> failWith PreparationTimeout True
-                Right ChildReport {childExit = Just ExitSuccess} -> pure (Right ())
+                Right ChildReport {childExit = Just ExitSuccess} -> checkCancellation scope >> pure (Right ())
                 Right ChildReport {childExit = Just (ExitFailure status)} -> failWith (PreparationExit status) True
                 Right _ -> failWith PreparationSpawnFailed True
     run

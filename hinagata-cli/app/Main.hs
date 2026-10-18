@@ -2,9 +2,7 @@
 
 module Main (main) where
 
-import Control.Concurrent.Async qualified as Async
 import Control.Exception (IOException, catch, try)
-import Control.Exception qualified
 import Data.List (sort)
 import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
@@ -13,7 +11,8 @@ import Hinagata.Cli.Command (compileScenario, prepareBaseline)
 import Hinagata.Cli.Config
 import Hinagata.Cli.Options
 import Hinagata.Cli.Output
-import Hinagata.Cli.Process (CancellationScope, ChildCleanupException (..), ChildFailure (..), ChildReport (..), ChildSpec (..), CommandCancelled (..), cancellationSignal, checkCancellation, runChild, waitCancellation, withCancellationScope)
+import Hinagata.Cli.Process (CancellationScope, ChildCleanupException (..), ChildFailure (..), ChildReport (..), ChildSpec (..), CommandCancelled (..), cancellationSignal, checkCancellation, runChild, withCancellationScope)
+import Hinagata.Cli.Validation (cancelledError, validateBatches)
 import Hinagata.Config (AccessConfig (..), EndpointConfig (..), HinagataConfig (..))
 import Hinagata.Connection (mkConnectionTarget)
 import Hinagata.Fixture.Bundle
@@ -168,7 +167,12 @@ dispatch scope configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLim
                             deadlineMs = Nothing,
                             stdoutToStderr = jsonSelected
                           }
-                  started <- try @IOException (runChild scope child `catch` \ChildCleanupException -> pure (Right (ChildReport Nothing False Nothing (Just "child process cleanup uncertain"))))
+                  started <-
+                    try @IOException
+                      ( runChild scope child `catch` \ChildCleanupException -> do
+                          signal <- cancellationSignal scope
+                          pure (Right (ChildReport Nothing False signal (Just "child process cleanup uncertain")))
+                      )
                   pure (either (const (Left ChildSpawnFailed)) id started)
             completed <- withManager configuration $ \manager ->
               withManagedDatabaseClassified manager baseline scenarioPlan policy classify run
@@ -270,41 +274,6 @@ discoverScenarios root = do
           yaml <- doesFileExist (directory </> "fixture.yaml")
           sql <- doesFileExist (directory </> "fixture.sql")
           pure (yaml || sql)
-
-cancelledError :: Int -> CliError
-cancelledError signal = CliError "command" "command_cancelled" "command cancelled before completion" Nothing Nothing Nothing Nothing (128 + signal) Nothing Nothing
-
--- | A worker is joined even after cancellation. Its typed preparation result
--- takes precedence over a generic cancellation; completed results are retained.
-validateBatches :: CancellationScope -> Int -> (Text.Text -> IO ValidationResult) -> [Text.Text] -> IO [ValidationResult]
-validateBatches scope size validate names = go (chunksOf size names)
-  where
-    cancelled name signal = ValidationResult name (Left (cancelledError signal))
-    run name = Async.withAsync (validate name) $ \worker -> do
-      raced <- Async.race (Async.waitCatch worker) (waitCancellation scope)
-      result <- case raced of
-        Left completed -> pure completed
-        Right signal -> do
-          Async.cancelWith worker (CommandCancelled signal)
-          Async.waitCatch worker
-      case result of
-        Right value -> pure value
-        Left exception -> case Control.Exception.fromException exception of
-          Just (CommandCancelled signal) -> pure (cancelled name signal)
-          Nothing -> Control.Exception.throwIO exception
-    go [] = pure []
-    go (batch : pending) = do
-      signal <- cancellationSignal scope
-      case signal of
-        Just number -> pure (map (\name -> cancelled name number) (concat (batch : pending)))
-        Nothing -> do
-          results <- Async.mapConcurrently run batch
-          rest <- go pending
-          pure (results <> rest)
-
-chunksOf :: Int -> [a] -> [[a]]
-chunksOf _ [] = []
-chunksOf size values = let (first, rest) = splitAt size values in first : chunksOf size rest
 
 buildRevision :: String
 #ifdef GIT_HASH

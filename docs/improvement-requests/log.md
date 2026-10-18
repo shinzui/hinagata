@@ -1,6 +1,7 @@
 # Bundle Update Log
 
 ## 2026-10-18
+* **Update**: Completed IR-1 with AC-1 through AC-5 evidence: offline configuration, native per-clone ordering/reuse and cancellation/cleanup faults, Keiro HTTP seed totals 2/5, and all regression/archive gates passed under ExecPlan 6.
 * **Update**: Started IR-1 implementation under ExecPlan 6; acceptance evidence remains pending.
 * **Update**: Accepted IR-2 and linked targetPlan to docs/plans/7-derive-baseline-hook-revisions-from-declared-content-inputs.md. The implementation plan covers AC-1 through AC-5; implementation and verification have not started.
 * **Update**: Accepted IR-1 and linked targetPlan to docs/plans/6-expose-clone-preparation-hooks-through-the-cli.md. The implementation plan covers AC-1 through AC-5; implementation and verification have not started.

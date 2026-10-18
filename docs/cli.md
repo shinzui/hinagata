@@ -18,6 +18,20 @@ cabal run hinagata -- --config path/to/hinagata.yaml fixture validate --all --js
 
 `db prepare` builds or reuses a sealed baseline. `baseline.fixtures` is the YAML list of base fixtures. The `migration` and `verification` settings each accept `executable`, `argv` (a YAML array), `cwd` (an absolute directory), `environment` (a YAML array of `NAME=VALUE` entries), `revision`, and positive `deadline_ms`. Executables receive the setup endpoint through `PGHOST`, `PGPORT`, `PGUSER`, and `PGDATABASE`, with an optional private `PGPASSFILE`; they must close their connections before exiting. A revision without its executable is rejected. If either revision is absent, persistent baseline reuse is disabled. A command path alone never authorizes reuse. Hook execution has a deadline and invokes argv directly without a shell.
 
+Optional `clone.preparation` accepts `executable`, YAML `argv`, absolute `cwd`, YAML `environment`, and positive `deadline_ms` (default 300000). Its scalar bindings are `HINAGATA_CLONE_PREPARATION_EXECUTABLE`, `HINAGATA_CLONE_PREPARATION_CWD`, and `HINAGATA_CLONE_PREPARATION_DEADLINE_MS`. It has no revision and does not change baseline identity. Omit its command settings to disable it. `--check-config` rejects invalid combinations offline, and explanations redact argv/environment. Arrays use YAML; scalar values follow the normal source precedence.
+
+```yaml
+clone:
+  preparation:
+    executable: /absolute/path/to/hinagata-keiro-seed
+    argv: [seeded, "2"]
+    cwd: /absolute/path/to/service-workspace
+    environment: []
+    deadline_ms: "10000"
+```
+
+The order is baseline → clone/access → preparation using the setup endpoint → scenario suffix → application handoff. Preparation runs once per clone for `db acquire`, `db with`, and `fixture validate`, including reused baselines. `db prepare`, offline commands, and direct `fixture load` never invoke it. The remaining acquisition deadline can expire before the hook deadline. The managed setup environment and private password-file rules match baseline hooks; overlays cannot replace `PG*` or `HINAGATA_*`. Seed output goes to stderr, while structured reports contain only safe reasons and generated IDs.
+
 ```bash
 cabal run hinagata -- --config path/to/hinagata.yaml db prepare --json
 cabal run hinagata -- --config path/to/hinagata.yaml db acquire --fixture seeded-member --json
@@ -41,3 +55,5 @@ cabal run hinagata -- --config path/to/hinagata.yaml clean --apply --include-ret
 JSON responses use `formatVersion: 1`, `ok`, and a command `kind` or stable `error.code`, with phase, fixture/step, SQLSTATE, and safe target context when available. Usage errors exit 2, configuration source errors 3, resolution errors 4, and operational errors 1. `db with` returns the child's nonzero status, including cancellation codes 130/143. Diagnostics are written to stderr when JSON is selected.
 
 `just test-cli` is offline. `just test-cli-postgres` and `just example-workbench` each start and stop their own disposable socket cluster; neither targets an external PostgreSQL server.
+
+Preparation errors report phase `clone-preparation`, optional `runId`/`leaseId`, and codes `clone_preparation_failed`, `clone_preparation_timeout`, `clone_preparation_cancelled`, or `clone_preparation_cleanup_failed`. Spawn/nonzero seed exits return 1. Failed preparation prevents startup and releases only after bounded process cleanup proves stoppage; uncertainty preserves the lease regardless of consumer retention settings. Establish stoppage before explicit release. A failed database drop remains a separate cleanup diagnostic. One command owns signal handlers for all workers/children; the first INT/TERM stops pending validation admission, settles active cleanup, and returns 130/143 even when siblings fail or a seed exits zero after handling a signal.

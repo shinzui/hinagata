@@ -2,7 +2,6 @@
 import json
 import os
 from pathlib import Path
-import shutil
 import signal
 import subprocess
 import sys
@@ -18,6 +17,8 @@ base = [binary, "--config", config]
 def call(args, extra=(), status=0):
     result = subprocess.run(base + list(extra) + list(args), capture_output=True, text=True, timeout=25)
     assert result.returncode == status, (args, result.returncode, result.stdout, result.stderr)
+    if list(args[:2]) == ["db", "acquire"] and "requires-seed" in args and status == 0:
+        assert "hinagata-scenario-started" in result.stderr, "scenario marker must be observable"
     return json.loads(result.stdout)
 
 
@@ -38,6 +39,7 @@ def wait_for(predicate, process=None):
 helper = root / "seed.py"
 helper.write_text('''import fcntl, json, os, pathlib, signal, subprocess, sys, time
 root, mode, value = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+assert pathlib.Path.cwd() == root.resolve()
 assert sys.argv[4:] == ["space argument", "$(touch never-evaluate)"]
 assert os.environ["SEED_SECRET"] == "secret-env-sentinel"
 assert "PGPASSWORD" not in os.environ
@@ -70,14 +72,14 @@ assert value == sys.argv[2], value
 ''')
 scenario = fixtures / "requires-seed"
 scenario.mkdir()
-(scenario / "fixture.sql").write_text("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM cli_items WHERE id=10) THEN RAISE EXCEPTION 'seed missing'; END IF; END $$; INSERT INTO cli_items SELECT 11, note FROM cli_items WHERE id=10;\n")
+(scenario / "fixture.sql").write_text("DO $$ BEGIN RAISE WARNING 'hinagata-scenario-started'; IF NOT EXISTS (SELECT 1 FROM cli_items WHERE id=10) THEN RAISE EXCEPTION 'seed missing'; END IF; END $$; INSERT INTO cli_items SELECT 11, note FROM cli_items WHERE id=10;\n")
 
 
 def hook(label, mode="seed", value="first", deadline=10000, program=None):
     run = root / label
     run.mkdir()
     overlay = run / "hook.yaml"
-    overlay.write_text("clone:\n  preparation:\n    executable: " + json.dumps(program or sys.executable) + "\n    argv: " + json.dumps([str(helper), str(run), mode, value, "space argument", "$(touch never-evaluate)"]) + "\n    environment: [SEED_SECRET=secret-env-sentinel]\n    deadline_ms: \"" + str(deadline) + "\"\n")
+    overlay.write_text("clone:\n  preparation:\n    executable: " + json.dumps(program or sys.executable) + "\n    argv: " + json.dumps([str(helper), str(run), mode, value, "space argument", "$(touch never-evaluate)"]) + "\n    cwd: " + json.dumps(str(run)) + "\n    environment: [SEED_SECRET=secret-env-sentinel]\n    deadline_ms: \"" + str(deadline) + "\"\n")
     return run, ["--config", str(overlay), "--set", "setup.password=setup-secret-sentinel"]
 
 
@@ -125,7 +127,10 @@ for _ in range(2):
 assert leases[0]["database"] != leases[1]["database"] and len(records(run)) == 2
 assert len({record["database"] for record in records(run)}) == 2
 
-for label, value, program in (("changed-argv", "second", None), ("changed-executable", "third", shutil.which("python3"))):
+alternate = root / "alternate-seed"
+alternate.write_text('#!/bin/sh\nexec python3 "$@"\n')
+alternate.chmod(0o700)
+for label, value, program in (("changed-argv", "second", None), ("changed-executable", "third", str(alternate))):
     changed, selected = hook(label, value=value, program=program)
     report = call(["db", "prepare", "--json"], selected)
     assert report["result"] == "Reused" and report["fingerprint"] == fingerprint
@@ -149,7 +154,7 @@ for label, mode, deadline, overrides, expected, program in (
 ):
     failed, selected = hook(label, mode, deadline=deadline, program=program)
     marker = failed / "consumer"
-    report = call(["db", "with", "--json", "--", sys.executable, str(consumer), str(marker), "first"], selected + overrides, status=1)
+    report = call(["db", "with", "--preserve-on-failure", "--json", "--", sys.executable, str(consumer), str(marker), "first"], selected + overrides, status=1)
     error = report["error"]
     assert error["phase"] == "clone-preparation" and error["code"] == expected, report
     assert error["leaseId"] and error["runId"]
@@ -164,6 +169,21 @@ for label, mode, deadline, overrides, expected, program in (
         assert inspected["state"] == "Released", inspected
     assert_stopped(failed)
 
+# A seed that exits zero in its signal handler still blocks application startup.
+for number in (signal.SIGINT, signal.SIGTERM):
+    run, selected = hook(f"with-signal-{number}", "sleep")
+    marker = run / "consumer"
+    process = subprocess.Popen(base + selected + ["db", "with", "--json", "--", sys.executable, str(consumer), str(marker), "first"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    wait_for(lambda: len(records(run)) == 1, process)
+    process.send_signal(number)
+    stdout, stderr = process.communicate(timeout=12)
+    assert process.returncode == 128 + number, (stdout, stderr)
+    error = json.loads(stdout)["error"]
+    assert error["phase"] == "clone-preparation" and error["code"] == "clone_preparation_cancelled"
+    assert not marker.exists()
+    assert call(["inspect", error["leaseId"], "--json"])["candidate"]["state"] == "Released"
+    assert_stopped(run)
+
 # Both signals, both completion orders, and fully overlapping hooks. A third
 # selection remains pending; ready/release files avoid timing-based overlap.
 for number in (signal.SIGINT, signal.SIGTERM):
@@ -176,6 +196,7 @@ for number in (signal.SIGINT, signal.SIGTERM):
             if finish is not None:
                 (run / f"release-{finish}").touch()
                 wait_for(lambda: call(["clean", "--json"])["candidates"] and sql(maintenance, "SELECT count(*) FROM hinagata.allocations WHERE database_name='" + records(run)[finish]["database"] + "' AND state='Released'") == "1", process)
+            scenario_offset = (run / "err").stat().st_size
             process.send_signal(number)
             # Repeated signals preserve the first signal and the original budget.
             process.send_signal(number)
@@ -189,6 +210,10 @@ for number in (signal.SIGINT, signal.SIGTERM):
         report = json.loads((run / "out.json").read_text())
         assert len(records(run)) == 2
         assert not report["ok"] and len(report["results"]) == 3
+        assert "hinagata-scenario-started" not in (run / "err").read_bytes()[scenario_offset:].decode(), "scenario SQL started after cancellation"
+        active = report["results"][:2]
+        assert sum(result["ok"] for result in active) == int(finish is not None), report
+        assert all(result["ok"] or result["error"]["code"] == "clone_preparation_cancelled" for result in active), report
         pending = report["results"][2]["error"]
         assert pending["code"] == "command_cancelled" and pending["leaseId"] is None
         for record in records(run):

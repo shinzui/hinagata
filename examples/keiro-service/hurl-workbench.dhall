@@ -3,11 +3,13 @@ let Schema = https://raw.githubusercontent.com/shinzui/hurl-workbench/a29d26ad5e
 in  Schema.Workspace::{
     , schemaVersion = Schema.schemaVersion
     , parameters =
-      [ Schema.Parameter::{ name = "base_url", defaultValue = Some "http://127.0.0.1:18081" }
+      [ Schema.Parameter::{ name = "seed_total", defaultValue = Some "2" }
+      , Schema.Parameter::{ name = "base_url", defaultValue = Some "http://127.0.0.1:18081" }
       , Schema.Parameter::{ name = "service_port", defaultValue = Some "18081" }
       ]
     , fragments =
-      [ Schema.Fragment::{ name = "health", path = "hurl/health.hurl" }
+      [ Schema.Fragment::{ name = "counter-seeded", path = "hurl/counter-seeded.hurl" }
+      , Schema.Fragment::{ name = "health", path = "hurl/health.hurl" }
       , Schema.Fragment::{ name = "references", path = "hurl/references.hurl" }
       , Schema.Fragment::{ name = "references-alternate", path = "hurl/references-alternate.hurl" }
       , Schema.Fragment::{ name = "counter-write", path = "hurl/counter-write.hurl" }
@@ -15,7 +17,8 @@ in  Schema.Workspace::{
       , Schema.Fragment::{ name = "hold", path = "hurl/hold.hurl" }
       ]
     , workflows =
-      [ Schema.Workflow::{ name = "health", fragments = [ "health" ], parameters = [ "base_url" ] }
+      [ Schema.Workflow::{ name = "counter-seeded", fragments = [ "counter-seeded" ], parameters = [ "base_url", "seed_total" ] }
+      , Schema.Workflow::{ name = "health", fragments = [ "health" ], parameters = [ "base_url" ] }
       , Schema.Workflow::{ name = "references", fragments = [ "references" ], parameters = [ "base_url" ] }
       , Schema.Workflow::{ name = "references-alternate", fragments = [ "references-alternate" ], parameters = [ "base_url" ] }
       , Schema.Workflow::{ name = "counter-write", fragments = [ "counter-write" ], parameters = [ "base_url" ] }
@@ -23,7 +26,8 @@ in  Schema.Workspace::{
       , Schema.Workflow::{ name = "hold", fragments = [ "hold" ], parameters = [ "base_url" ] }
       ]
     , recipes =
-      [ Schema.Recipe::{ name = "health", workflow = "health", safety = Schema.Safety.ReadOnly }
+      [ Schema.Recipe::{ name = "counter-seeded", workflow = "counter-seeded", safety = Schema.Safety.ReadOnly }
+      , Schema.Recipe::{ name = "health", workflow = "health", safety = Schema.Safety.ReadOnly }
       , Schema.Recipe::{ name = "references", workflow = "references", safety = Schema.Safety.ReadOnly }
       , Schema.Recipe::{ name = "references-alternate", workflow = "references-alternate", safety = Schema.Safety.ReadOnly }
       , Schema.Recipe::{ name = "counter-write", workflow = "counter-write", safety = Schema.Safety.Mutating }
@@ -43,13 +47,13 @@ in  Schema.Workspace::{
     , suites =
       [ Schema.Suite::{
         , name = "default"
-        , runs = [ Schema.RunReference.Recipe "health", Schema.RunReference.Recipe "references" ]
+        , runs = [ Schema.RunReference.Recipe "health", Schema.RunReference.Recipe "references", Schema.RunReference.Recipe "counter-seeded" ]
         , service = Some "keiro-service"
         , failFast = True
         }
       , Schema.Suite::{
         , name = "alternate"
-        , runs = [ Schema.RunReference.Recipe "health", Schema.RunReference.Recipe "references-alternate" ]
+        , runs = [ Schema.RunReference.Recipe "health", Schema.RunReference.Recipe "references-alternate", Schema.RunReference.Recipe "counter-seeded" ]
         , service = Some "keiro-service"
         , failFast = True
         }

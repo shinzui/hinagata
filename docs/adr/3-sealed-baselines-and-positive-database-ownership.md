@@ -30,6 +30,8 @@ Amended: 2026-10-02 (ownership heartbeat completes cooperatively before release)
 
 Amended: 2026-10-02 (verify only the scenario suffix on repeated leases)
 
+Amended: 2026-10-18 (supervised CLI clone preparation and uncertain-stop preservation)
+
 ## Context
 
 Reuse must not silently test stale migrations or share scenario state. CREATE/DROP DATABASE are nontransactional, and copying a template requires no connected sessions.
@@ -49,7 +51,7 @@ A caller-supplied classifier identifies failure values without changing them. Th
 
 While a callback runs, Hinagata probes its existing maintenance session for liveness. Losing that session cancels the callback and returns a lease error after the callback has unwound; the clone stays cataloged as an orphan for explicit ownership-checked recovery. A timed heartbeat adds no database connection and does not turn elapsed time into cleanup authority. When a callback completes or is cancelled, it signals the watcher to stop and waits for any bounded in-flight heartbeat query before ownership-checked release. Cancelling that query directly can retire the shared session even under ordinary asynchronous-exception masking, because socket waits remain interruptible.
 
-An optional trusted clone preparation hook uses setup access after clone grants and settings and before scenario fixtures. It runs for every new clone, including clones of a reused baseline. The hook is kept on the in-memory baseline handle and does not affect the sealed template fingerprint; a hook failure prevents callback handoff and triggers ownership-checked release.
+An optional trusted clone preparation hook uses setup access after clone grants and settings and before scenario fixtures. It runs for every new clone, including clones of a reused baseline. The hook is kept on the in-memory baseline handle and does not affect the sealed template fingerprint; a hook failure prevents callback handoff and triggers ownership-checked release when its process group is proven stopped. CLI preparation uses typed failure categories and generated run/lease identifiers without changing the legacy hook signature. If process cleanup is uncertain, preserve the clone with a bounded non-secret diagnostic, regardless of consumer failure policy; lost ownership leaves an inspectable orphan. Never drop a database under a possibly live seed. Both hook and remaining acquisition deadlines prevent handoff, and timeout unwinding must retain uncertain cleanup evidence. Database release failures remain separate diagnostics. Changing the executable or argv, or removing preparation, changes only subsequent clones; it never seeds or unseals the template.
 
 Baseline retirement takes the generation lock exclusively, rechecks the generation record and positive database identity, records Retiring before the nontransactional drop, and leaves that record as a tombstone for issued clone references. Existing clones remain independent of the removed template. A stale handle fails the Ready check, while a later ensure call may build a new generation for the same fingerprint.
 

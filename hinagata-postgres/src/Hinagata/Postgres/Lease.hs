@@ -68,6 +68,8 @@ data PreparationFailureKind
   | PreparationCleanupFailed
   deriving stock (Eq, Show)
 
+-- | A supervised preparation outcome, with an independent proof that releasing
+-- the clone cannot race a still-running process. Unproven stoppage retains it.
 data PreparationFailure = PreparationFailure
   { failureKind :: !PreparationFailureKind,
     releaseSafe :: !Bool
@@ -75,6 +77,8 @@ data PreparationFailure = PreparationFailure
   deriving stock (Eq, Show)
   deriving anyclass (Exception)
 
+-- | Generated correlation identifiers attached after a clone has been allocated.
+-- The context contains no endpoint, child output, arguments, or credentials.
 data PreparationContext = PreparationContext
   { preparationFailure :: !PreparationFailure,
     preparationRunId :: !Text,

@@ -6,7 +6,7 @@ docId: DOC-2
 tags: ["cli", "operations"]
 generated:
   by: process:codex
-  at: 2026-10-02T16:49:46Z
+  at: 2026-10-18T19:08:35Z
 ---
 
 # Command reference
@@ -50,6 +50,11 @@ A repeated load can fail because rows already exist.
 Use either explicit names or `--all`.
 `--all` finds fixture directories in sorted order.
 Results keep the selection order when workers run concurrently.
+One command scope owns SIGINT/SIGTERM for all concurrent children and workers.
+Cancellation stops active work and prevents pending scenarios from starting.
+Results retain completed scenarios and per-lease failures; unstarted selections report `command_cancelled` without lease/run IDs.
+The command joins bounded child and lease cleanup before returning `130` for SIGINT or `143` for SIGTERM.
+The first signal determines that status even if another scenario or cleanup also fails.
 
 ## Database commands
 
@@ -66,6 +71,12 @@ cabal run hinagata -- --config CONFIG db release LEASE_ID --json
 `with` runs one child command with a lease.
 Repeat `--fixture NAME` to select more than one scenario fixture.
 `release` uses a lease ID and checks database ownership again.
+
+Configured `clone.preparation` runs with setup access after clone/access creation,
+before scenario fixtures, and before the detached or application handoff.
+It runs for `acquire`, `with`, and every validation clone, including reused baselines.
+`prepare`, `fixture plan`, and direct `fixture load` never seed a clone.
+See [Per-clone preparation](configuration.md#per-clone-preparation) for YAML, bindings, and deadlines.
 
 The child receives the application connection through `PGHOST`, `PGPORT`, `PGUSER`, and `PGDATABASE`.
 It also receives `HINAGATA_RUN_ID` and `HINAGATA_LEASE_ID`.
@@ -117,3 +128,13 @@ Reports omit credentials.
 A later cleanup failure does not replace that code.
 If the child succeeds but cleanup fails, Hinagata returns `1`.
 The report keeps child failure and cleanup failure separate.
+
+Preparation failures have phase `clone-preparation`, optional generated `runId` and `leaseId`,
+and one of `clone_preparation_failed`, `clone_preparation_timeout`,
+`clone_preparation_cancelled`, or `clone_preparation_cleanup_failed`.
+Spawn and nonzero seed exits return `1`; the seed's exit status is diagnostic rather than an application exit code.
+SIGINT/SIGTERM return `130`/`143` even before the application starts or when a seed handles a signal by exiting zero.
+A failing or timed-out seed prevents consumer startup and releases the clone once its processes are proven stopped.
+An uncertain process stop preserves the database regardless of `--preserve-on-failure`.
+Establish process stoppage before explicit release; a lost ownership session leaves an inspectable orphan.
+Database release failure remains separate from the preparation cause and leaves an inspectable cleanup record.

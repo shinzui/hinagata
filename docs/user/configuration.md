@@ -6,7 +6,7 @@ docId: DOC-3
 tags: ["configuration", "access"]
 generated:
   by: process:codex
-  at: 2026-10-02T16:49:46Z
+  at: 2026-10-18T19:08:35Z
 ---
 
 # Configuration reference
@@ -47,6 +47,8 @@ For example, `fixture.root` becomes `HINAGATA_FIXTURE_ROOT`.
 CLI hook bindings cover `executable`, `cwd`, `revision`, and `deadline_ms` for `migration` and `verification`.
 Use YAML for `baseline.fixtures`, hook `argv`, and hook `environment` arrays.
 These arrays have no environment binding.
+Clone preparation binds its scalar settings to `HINAGATA_CLONE_PREPARATION_EXECUTABLE`,
+`HINAGATA_CLONE_PREPARATION_CWD`, and `HINAGATA_CLONE_PREPARATION_DEADLINE_MS`.
 
 ```sh
 cabal run hinagata -- --config CONFIG --check-config
@@ -76,6 +78,49 @@ A revision requires an executable.
 If either revision is absent, Hinagata builds a new baseline on each preparation.
 A program path alone does not establish a reusable revision.
 Change the revision when the hook's effects change.
+
+## Per-clone preparation
+
+Use `clone.preparation` to seed domain state through a service-owned command before startup.
+Layer this fragment over a complete configuration; replace the paths with existing executables and directories:
+
+```yaml
+clone:
+  preparation:
+    executable: /absolute/path/to/hinagata-keiro-seed
+    argv: [seeded, "2"]
+    cwd: /absolute/path/to/service-workspace
+    environment: []
+    deadline_ms: "10000"
+```
+
+The record accepts the baseline hook command keys above except `revision`.
+Changing the executable, arguments, or other preparation settings leaves an unchanged baseline reusable.
+The command runs once on each new clone, including clones of a reused baseline.
+It runs after clone access is configured, before the scenario suffix loads, and before application handoff.
+`db acquire`, `db with`, and each `fixture validate` acquisition invoke it.
+`db prepare`, offline diagnostics/planning, and direct `fixture load` do not invoke it.
+
+Omit the executable, argv, cwd, and environment to disable preparation.
+A deadline alone is harmless; other settings without an executable are invalid.
+Executables must be nonempty and executable/argv/cwd/environment values cannot contain NUL.
+The working directory must be absolute, and environment entries must be valid `NAME=VALUE` pairs.
+Overlays cannot replace managed `PG*` or `HINAGATA_*` variables.
+`--check-config` rejects invalid combinations offline.
+
+The default deadline is `300000` milliseconds; a configured deadline must be positive.
+The remaining `limits.acquisition_deadline_ms` can end preparation sooner.
+Both limits prevent application startup on expiry and include bounded process shutdown before safe release.
+The command receives only the setup endpoint in `PGHOST`, `PGPORT`, `PGUSER`, and `PGDATABASE`,
+plus an optional private mode-0600 `PGPASSFILE` removed after supervision ends.
+Ambient `PG*` and `HINAGATA_*` variables are removed; arguments remain literal and no shell is introduced.
+Arguments and environment values are redacted from explanations.
+Executable output goes to stderr and is never embedded in JSON errors; the executable must protect its own output.
+
+Use baseline fixtures for shared reference data, preparation for domain commands on each clone,
+and scenario fixtures for independent test-specific data or SQL that depends on those commands.
+Close all seed pools before exiting. Service startup, readiness, and projection workers remain caller-owned.
+See [Integrate a service](../guides/integrate-service.md) and the [Keiro example](../../examples/keiro-service/README.md).
 
 ## Defaults
 

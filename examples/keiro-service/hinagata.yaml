@@ -8,3 +8,7 @@ migration:
 verification:
   argv: [verify]
   deadline_ms: "120000"
+clone:
+  preparation:
+    argv: [seeded, "2"]
+    deadline_ms: "10000"

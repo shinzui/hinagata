@@ -4,9 +4,17 @@ title: "Expose clone preparation hooks through the CLI"
 description: "Expose the existing library clone-preparation hook in CLI configuration so each disposable clone can be seeded through service-owned command APIs before scenario fixtures and consumer startup."
 generated:
   by: codex-cli/gpt-6.1-sol
-  at: "2026-10-18T18:58:49Z"
+  at: "2026-10-18T19:18:49Z"
 requestId: IR-1
-status: in-progress
+status: completed
+completedAt: "2026-10-18T19:18:49Z"
+resolution: >-
+  Implemented optional clone.preparation CLI configuration and supervised per-clone commands.
+  Offline configuration tests prove AC-1; native PostgreSQL ordering, baseline reuse,
+  deadline/cancellation, blocked-drop, and internal cleanup-fault tests prove AC-2 through AC-4.
+  The Keiro/workbench example reads command-seeded totals 2 and 5 over HTTP in independent
+  clones of one reused baseline (AC-5). All required regression, documentation, formatting,
+  and isolated source-archive build/test/Haddock gates passed under ExecPlan 6.
 targetPlan: docs/plans/6-expose-clone-preparation-hooks-through-the-cli.md
 origin: mori://shinzui/rei/masterplans/29-close-rei-cli-and-http-api-gaps-on-the-haskell-jitsurei-contract
 acceptanceCriteria:
@@ -63,4 +71,4 @@ Useful before adopting Hinagata through its CLI for command-backed fixture famil
 
 ## Implementation plan
 
-Accepted for implementation in [ExecPlan 6: Expose clone preparation hooks through the CLI](../plans/6-expose-clone-preparation-hooks-through-the-cli.md). The plan covers AC-1 through AC-5; implementation and acceptance verification are in progress.
+Completed in [ExecPlan 6: Expose clone preparation hooks through the CLI](../plans/6-expose-clone-preparation-hooks-through-the-cli.md). AC-1 through AC-5 passed the offline, native PostgreSQL, cleanup-fault, and Keiro HTTP example gates. The plan records final regression and source-archive evidence. Existing author assessment provenance remains separate from implementation verification.

@@ -6,6 +6,7 @@ example="$project/examples/keiro-service"
 export hinagata_postgres_datadir="$project/hinagata-postgres"
 binary="$(cabal list-bin hinagata)"
 migrate_binary="$(cabal list-bin hinagata-keiro-migrate)"
+export HINAGATA_CLONE_PREPARATION_EXECUTABLE="$(cabal list-bin hinagata-keiro-seed)"
 export EXAMPLE_SERVICE_BINARY="$(cabal list-bin hinagata-keiro-service)"
 workspace="$(mktemp -d)"
 cleanup() {
@@ -84,15 +85,18 @@ test "$first_port" != "$second_port"
 
 workbench_ref='github:shinzui/hurl-workbench/a29d26ad5e90aa762de88be18f06fddf67b6d02f#default'
 run_suite() {
-  local label="$1" suite="$2" port="$3" mutating="$4" fixture="${5:-service-scenario}"
+  local label="$1" suite="$2" port="$3" mutating="$4" fixture="${5:-service-scenario}" seed_total="${6:-2}"
   local -a mutation_flag=()
   if test "$mutating" = yes; then mutation_flag=(--allow-mutating); fi
   local started elapsed
   started="$(python3 -c 'import time; print(time.monotonic_ns())')"
-  "$binary" --config "$example/hinagata.yaml" db with --fixture "$fixture" --json -- \
+  printf 'clone:\n  preparation:\n    argv: [seeded, "%s"]\n' "$seed_total" > "$workspace/seed-$label.yaml"
+  "$binary" --config "$example/hinagata.yaml" --config "$workspace/seed-$label.yaml" db prepare --json > "$workspace/prepare-$label.json"
+  "$binary" --config "$example/hinagata.yaml" --config "$workspace/seed-$label.yaml" db with --fixture "$fixture" --json -- \
     nix shell "$workbench_ref" -c hurl-workbench \
       --workspace "$example/hurl-workbench.dhall" \
       test suite "$suite" "${mutation_flag[@]}" \
+      --variable "seed_total=$seed_total" \
       --variable "service_port=$port" \
       --variable "base_url=http://127.0.0.1:$port" \
       --report json --report-dir "$workspace/reports-$label" \
@@ -120,7 +124,7 @@ PY
 export EXAMPLE_SERVICE_START_BARRIER="$workspace/service-start-barrier"
 run_suite first default "$first_port" no > "$workspace/first-lease" &
 first_suite_pid=$!
-run_suite second alternate "$second_port" no service-scenario-alternate > "$workspace/second-lease" &
+run_suite second alternate "$second_port" no service-scenario-alternate 5 > "$workspace/second-lease" &
 second_suite_pid=$!
 overlap_observed=no
 for attempt in $(seq 1 200); do
@@ -148,6 +152,15 @@ test "$second_suite_status" -eq 0
 first_lease="$(cat "$workspace/first-lease")"
 second_lease="$(cat "$workspace/second-lease")"
 test "$first_lease" != "$second_lease"
+python3 - "$workspace/prepare-warm.json" "$workspace/prepare-first.json" "$workspace/prepare-second.json" <<'PYSEED'
+import json
+import pathlib
+import sys
+
+warm, first, second = [json.loads(pathlib.Path(path).read_text()) for path in sys.argv[1:]]
+assert first["result"] == second["result"] == "Reused"
+assert warm["fingerprint"] == first["fingerprint"] == second["fingerprint"]
+PYSEED
 run_suite command counter-write "$first_port" yes > "$workspace/command-lease"
 run_suite generated generated-id "$second_port" yes > "$workspace/generated-lease"
 
@@ -248,5 +261,19 @@ assert result["status"] == 130 and result["child"]["outcome"] == "cancelled"
 assert result["disposition"] == "LeaseReleased"
 PY
 
-echo "Keiro example passed isolated reads, durable command/read, generated IDs, readiness failure, and cancellation"
+for pid_file in "$workspace"/pids/*; do
+  test -f "$pid_file" || continue
+  ! kill -0 "$(cat "$pid_file")" 2>/dev/null
+  lease="$(basename "$pid_file")"
+  "$binary" --config "$example/hinagata.yaml" inspect "$lease" --json > "$workspace/final-inspect-$lease.json"
+  python3 - "$workspace/final-inspect-$lease.json" <<'PYRELEASE'
+import json
+import pathlib
+import sys
+
+assert json.loads(pathlib.Path(sys.argv[1]).read_text())["candidate"]["state"] == "Released"
+PYRELEASE
+done
+
+echo "Keiro example passed command-backed clone seeds (2/5), isolated reads, durable command/read, generated IDs, readiness failure, and cancellation"
 cat "$workspace/suite-times.csv"

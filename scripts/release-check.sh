@@ -14,6 +14,9 @@ done
 keiro_source=("$workspace"/unpacked/hinagata-keiro-example-*)
 test "${#keiro_source[@]}" -eq 1
 test -f "${keiro_source[0]}/hurl-workbench.dhall"
+test -f "${keiro_source[0]}/seed/Main.hs"
+test -f "${keiro_source[0]}/service/Counter.hs"
+test -f "${keiro_source[0]}/hurl/counter-seeded.hurl"
 test -f "${keiro_source[0]}/fixtures/reference-seed/fixture.sql"
 test -f "${keiro_source[0]}/fixtures/service-scenario/fixture.yaml"
 test -f "${keiro_source[0]}/fixtures/service-scenario-alternate/fixture.yaml"

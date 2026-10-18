@@ -12,6 +12,7 @@ module Hinagata.Cli.Process
     waitCancellation,
     runChild,
     runChildWithCleanupCheck,
+    withRegistration,
     parseOverlay,
   )
 where
@@ -183,10 +184,12 @@ runChildWithCleanupCheck cleanupCheck scope specification@ChildSpec {target} = d
             Just pid -> do
               let stop = do
                     signal <- cancellationSignal scope
-                    stopped <- stopGroup (maybe sigTERM (\number -> if number == 2 then sigINT else sigTERM) signal) pid handle
-                    _ <- timeout 2000000 (try @IOException (waitForProcess handle))
+                    attempted <- try @IOException $ do
+                      stopped <- stopGroup (maybe sigTERM (\number -> if number == 2 then sigINT else sigTERM) signal) pid handle
+                      _ <- timeout 2000000 (try @IOException (waitForProcess handle))
+                      pure stopped
                     proven <- cleanupCheck
-                    pure (if proven then stopped else Just "child process group could not be proven stopped")
+                    pure (if proven then either (const (Just "child process cleanup could not be observed")) id attempted else Just "child process group could not be proven stopped")
                   wait = do
                     signal <- tryReadMVar marker
                     case signal of
