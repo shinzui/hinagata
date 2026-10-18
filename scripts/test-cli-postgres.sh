@@ -316,6 +316,8 @@ PY
 
 cabal test hinagata-cli-process-test --test-show-details=direct --test-options="$workspace/hinagata.yaml"
 
+python3 scripts/test-hook-revisions.py "$binary" "$workspace/hinagata.yaml" "$workspace"
+
 python3 scripts/test-clone-preparation.py "$binary" "$workspace/hinagata.yaml" "$workspace"
 
 echo "CLI direct-load integration test passed"

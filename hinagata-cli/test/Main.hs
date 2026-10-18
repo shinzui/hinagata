@@ -95,7 +95,7 @@ postgresTests path = do
           if index == 0
             then runChildWithCleanupCheck (pure False) commandScope child
             else pure (Right (ChildReport (Just (ExitFailure 17)) False Nothing Nothing))
-        hook = HookSettings (Just "/bin/sh") ["-c", "sleep 30"] Nothing [] Nothing 10000
+        hook = HookSettings (Just "/bin/sh") ["-c", "sleep 30"] Nothing [] Nothing False [] [] 10000
         selected = settings {clonePreparation = hook}
     (baseline, _) <- require =<< prepareBaselineWithRunner runner scope configuration selected
     Async.withAsync
@@ -122,7 +122,7 @@ postgresTests path = do
     preservation configuration settings scenario outerDeadline = withCancellationScope $ \scope -> do
       called <- newIORef False
       limit <- require (mkPositive "test deadline" 600)
-      let hook = HookSettings (Just "/bin/sh") ["-c", if outerDeadline then "sleep 30" else "exit 0"] Nothing [] Nothing 10000
+      let hook = HookSettings (Just "/bin/sh") ["-c", if outerDeadline then "sleep 30" else "exit 0"] Nothing [] Nothing False [] [] 10000
           selected = settings {clonePreparation = hook}
           bounded = if outerDeadline then configuration {Config.acquisitionDeadlineMs = limit} else configuration
       (baseline, _) <- require =<< prepareBaselineWithRunner (runChildWithCleanupCheck (pure False)) scope bounded selected

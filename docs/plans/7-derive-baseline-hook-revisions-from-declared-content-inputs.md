@@ -16,6 +16,11 @@ provenance:
       at: 2026-10-18T18:59:54Z
       mode: "update"
       note: "Correct example hook precedence and verifier inputs; specify offline validation, array overrides, and scoped redaction acceptance."
+    - model: "gpt-6.1-sol"
+      harness: "codex-cli"
+      at: 2026-10-18T19:39:30Z
+      mode: "implement"
+      note: "Implement declared-input revisions, CLI preparation checks, service proof, and acceptance documentation."
   reviews:
     - model: "gpt-6-astra"
       harness: "codex-cli"
@@ -40,15 +45,17 @@ This plan implements [IR-2: Derive baseline hook revisions from declared content
 ## Progress
 
 
-- [ ] Milestone 1: A reusable helper derives versioned revisions from named file contents and values, with deterministic ordering, relocation-independent results, and safe input failures (AC-1, helper portion of AC-3).
-- [ ] Milestone 2: CLI declarations feed derived revisions into existing baseline preparation, validate inputs before reuse, reject conflicting modes, and preserve manual/missing-revision behavior (AC-2, AC-3, AC-4).
+- [x] (2026-10-18; `nix develop -c just core-test` passed fixed vectors, relocation/order/mtime, exact-byte, pipe, symlink, and unprivileged permission checks.) Milestone 1: A reusable helper derives versioned revisions from named file contents and values, with deterministic ordering, relocation-independent results, and safe input failures (AC-1, helper portion of AC-3).
+- [x] (2026-10-18; `nix develop -c just test-cli` and `nix develop -c just test-cli-postgres` passed offline declarations/redaction and native SQL, manual/missing/mixed revisions, pre-capture failures, hook mutation/deletion, original-failure preservation, and advisory-lock-wait revalidation.) Milestone 2: CLI declarations feed derived revisions into existing baseline preparation, validate inputs before reuse, reject conflicting modes, and preserve manual/missing-revision behavior (AC-2, AC-3, AC-4).
 - [ ] Milestone 3: A disposable service example demonstrates independent executable, SQL, manifest, verification-code, and non-secret configuration invalidation, including unchanged-executable external SQL changes (AC-2, AC-5).
 - [ ] Milestone 4: Documentation, ADRs, packaged sources, and regression evidence establish the declared-input boundary; IR-2 is completed only after AC-1 through AC-5 pass.
 
-Implementation has not started. IR-2 is accepted and linked to this plan; no acceptance criterion is claimed verified.
+Milestones 1 and 2 are verified. The service example and final documentation/archive gates remain in progress. IR-2 remains `in-progress` until all acceptance evidence is complete.
 
 
 ## Surprises & Discoveries
+
+2026-10-18 implementation: Regular-file checks use a nonblocking POSIX open followed by inspection of the opened descriptor. This rejects pipes even when a symlink or path changes during open, rather than risking a blocked preparation. Core now directly declares the existing `unix >=2.8 && <2.9` cohort; no pin changes. Mori had no registered Unix/filepath corpus, so upstream source and authoritative Hackage release lists/tags were checked. Current releases are Unix 2.8.8.0, filepath 1.5.5.0, and Aeson 2.3.2.0; the example retains its existing Aeson 2.2 cohort and established filepath bounds.
 
 
 2026-10-18 review: `scripts/example-keiro.sh` exports `HINAGATA_VERIFICATION_EXECUTABLE`, and environment bindings override YAML. Leaving that export in place would bypass the proposed verification wrapper. Also, `examples/keiro-service/migration/Main.hs` constructs the complete migration plan for verification, so after externalization the verifier will consume the application SQL and manifest as well as its own SQL. Both hook declarations must cover those shared inputs.

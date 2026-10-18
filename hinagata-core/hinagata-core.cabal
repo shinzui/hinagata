@@ -30,6 +30,7 @@ library
     Hinagata.Fixture.Manifest
     Hinagata.Fixture.SqlPolicy
     Hinagata.Fixture.Types
+    Hinagata.Hook.Revision
     Hinagata.Prelude
     Hinagata.Types
 
@@ -48,6 +49,7 @@ library
     text >=2.1 && <2.3,
     time >=1.14 && <1.16,
     transformers >=0.6 && <0.8,
+    unix >=2.8 && <2.9,
     yaml >=0.11.11.2 && <0.12,
 
 test-suite hinagata-core-test
@@ -66,3 +68,4 @@ test-suite hinagata-core-test
     settei-env >=0.2 && <0.3,
     temporary >=1.3 && <1.4,
     text >=2.1 && <2.3,
+    unix >=2.8 && <2.9,

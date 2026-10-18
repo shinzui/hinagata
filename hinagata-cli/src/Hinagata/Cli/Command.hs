@@ -7,16 +7,19 @@ module Hinagata.Cli.Command
 where
 
 import Control.Exception (Handler (..), IOException, catches, mask_, throwIO, try)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text qualified as Text
-import Hinagata.Cli.Config (CliSettings (..), HookSettings (..))
+import Hinagata.Cli.Config (CliSettings (..), HookSettings (..), validateHook)
 import Hinagata.Cli.Output (CliError (..), bundleError)
 import Hinagata.Cli.Process (CancellationScope, ChildCleanupException (..), ChildFailure (..), ChildReport (..), ChildSpec (..), CommandCancelled (..), checkCancellation, parseOverlay, runChild)
+import Hinagata.Cli.Revision (captureHookRevision, effectiveRevision, verifyHookRevisions)
 import Hinagata.Config (HinagataConfig (..))
 import Hinagata.Connection (ConnectionTarget)
 import Hinagata.Fixture.Bundle (BundleConfig (..), FixturePlan, compileFixtures)
 import Hinagata.Fixture.Types (mkFixtureName)
 import Hinagata.Postgres.Baseline (BaselineError (..), BaselineRef, BaselineSpec (..), PreparationReport, ensureBaseline)
 import Hinagata.Postgres.Lease (PreparationFailure (..), PreparationFailureKind (..))
+import System.Directory (getCurrentDirectory)
 import System.Exit (ExitCode (..))
 
 prepareBaseline :: CancellationScope -> HinagataConfig -> CliSettings -> IO (Either CliError (BaselineRef, PreparationReport))
@@ -27,32 +30,61 @@ prepareBaseline = prepareBaselineWithRunner runChild
 prepareBaselineWithRunner :: (CancellationScope -> ChildSpec -> IO (Either ChildFailure ChildReport)) -> CancellationScope -> HinagataConfig -> CliSettings -> IO (Either CliError (BaselineRef, PreparationReport))
 prepareBaselineWithRunner runner scope configuration settings = do
   checkCancellation scope
-  let migrationHook = hookRunner runner scope "migration" False (migration settings)
-      verificationHook = hookRunner runner scope "verification" False (verification settings)
-      clonePreparationHook = case clonePreparation settings of
-        HookSettings {executable = Nothing} -> Nothing
-        _ -> Just (hookRunner runner scope "clone preparation" True (clonePreparation settings))
-  compiled <- compileScenario configuration (baseFixtures settings)
-  case compiled of
-    Left problem -> pure (Left problem)
-    Right basePlan -> do
-      let specification =
-            BaselineSpec
-              { configuration,
-                basePlan,
-                migrationRevision = revision (migration settings),
-                verificationRevision = revision (verification settings),
-                requiredExtensions = [],
-                requiredLocale = Nothing,
-                migrationHook,
-                verificationHook,
-                clonePreparationHook,
-                compareAgainst = Nothing
-              }
-      prepared <- ensureBaseline specification
-      pure $ case prepared of
-        Left BaselineError {cause, sqlState} -> Left (CliError "baseline-prepare" "baseline_failed" cause Nothing Nothing sqlState Nothing 1 Nothing Nothing)
-        Right value -> Right value
+  case traverse (uncurry validateHook) [("migration", migration settings), ("verification", verification settings), ("clone.preparation", clonePreparation settings)] of
+    Left problem -> pure (Left (CliError "config-resolution" "config_resolution_invalid" problem Nothing Nothing Nothing Nothing 4 Nothing Nothing))
+    Right _ -> do
+      invocation <- getCurrentDirectory
+      migrationIdentity <- captureHookRevision invocation "migration" (migration settings)
+      verificationIdentity <- captureHookRevision invocation "verification" (verification settings)
+      case (migrationIdentity, verificationIdentity) of
+        (Left problem, _) -> pure (Left problem)
+        (_, Left problem) -> pure (Left problem)
+        (Right migrationCaptured, Right verificationCaptured) -> do
+          let identities = [migrationCaptured, verificationCaptured]
+          revisionFailure <- newIORef Nothing
+          let checked hook target = do
+                before <- verifyHookRevisions identities
+                case before of
+                  Left problem -> writeIORef revisionFailure (Just problem) >> pure (Left "hook revision inputs changed")
+                  Right () -> do
+                    outcome <- hook target
+                    -- Preserve an original command or cleanup failure.
+                    case outcome of
+                      Left _ -> pure outcome
+                      Right () -> do
+                        after <- verifyHookRevisions identities
+                        case after of
+                          Left problem -> writeIORef revisionFailure (Just problem) >> pure (Left "hook revision inputs changed")
+                          Right () -> pure (Right ())
+              migrationHook = checked (hookRunner runner scope "migration" False (migration settings))
+              verificationHook = checked (hookRunner runner scope "verification" False (verification settings))
+              clonePreparationHook = case clonePreparation settings of
+                HookSettings {executable = Nothing} -> Nothing
+                _ -> Just (hookRunner runner scope "clone preparation" True (clonePreparation settings))
+          compiled <- compileScenario configuration (baseFixtures settings)
+          case compiled of
+            Left problem -> pure (Left problem)
+            Right basePlan -> do
+              let specification =
+                    BaselineSpec
+                      { configuration,
+                        basePlan,
+                        migrationRevision = effectiveRevision migrationCaptured,
+                        verificationRevision = effectiveRevision verificationCaptured,
+                        requiredExtensions = [],
+                        requiredLocale = Nothing,
+                        migrationHook,
+                        verificationHook,
+                        clonePreparationHook,
+                        compareAgainst = Nothing
+                      }
+              prepared <- ensureBaseline specification
+              specific <- readIORef revisionFailure
+              case prepared of
+                Left BaselineError {cause, sqlState} -> pure (Left (maybe (CliError "baseline-prepare" "baseline_failed" cause Nothing Nothing sqlState Nothing 1 Nothing Nothing) id specific))
+                Right value -> do
+                  final <- verifyHookRevisions identities
+                  pure (value <$ final)
 
 compileScenario :: HinagataConfig -> [Text.Text] -> IO (Either CliError FixturePlan)
 compileScenario HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLimit, chunkSize} roots =

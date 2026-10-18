@@ -152,4 +152,6 @@ hook.write_text('clone:\n  preparation:\n    deadline_ms: "1"\n')
 assert subprocess.run(base + ["--config", str(hook), "--check-config"], capture_output=True).returncode == 0
 PYTEST
 
+python3 scripts/test-hook-revision-config.py "$binary" "$workspace"
+
 echo "CLI offline smoke test passed"

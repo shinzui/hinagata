@@ -4,9 +4,9 @@ title: "Derive baseline hook revisions from declared content inputs"
 description: "Provide deterministic content-derived migration and verification revisions from explicit executable, SQL, manifest, and configuration inputs so fixture authors can keep reusable baselines aligned with changing schema effects."
 generated:
   by: codex-cli/gpt-6.1-sol
-  at: "2026-10-18T18:46:32Z"
+  at: "2026-10-18T19:39:30Z"
 requestId: IR-2
-status: accepted
+status: in-progress
 targetPlan: docs/plans/7-derive-baseline-hook-revisions-from-declared-content-inputs.md
 origin: mori://shinzui/rei/masterplans/29-close-rei-cli-and-http-api-gaps-on-the-haskell-jitsurei-contract
 acceptanceCriteria:
@@ -62,4 +62,4 @@ Recommended before relying on persistent baseline reuse during rapid schema deve
 
 ## Implementation plan
 
-Accepted for implementation in [ExecPlan 7: Derive baseline hook revisions from declared content inputs](../plans/7-derive-baseline-hook-revisions-from-declared-content-inputs.md). The plan covers AC-1 through AC-5; implementation and acceptance verification have not started.
+Accepted for implementation in [ExecPlan 7: Derive baseline hook revisions from declared content inputs](../plans/7-derive-baseline-hook-revisions-from-declared-content-inputs.md). The plan covers AC-1 through AC-5; implementation and acceptance verification are in progress.

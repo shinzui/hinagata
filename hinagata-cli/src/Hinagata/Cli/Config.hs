@@ -5,6 +5,7 @@ module Hinagata.Cli.Config
     cliConfiguration,
     resolveConfig,
     validateHook,
+    revisionDeclarations,
   )
 where
 
@@ -13,6 +14,7 @@ import Data.Text qualified as Text
 import Hinagata.Cli.Options (CliOptions (..))
 import Hinagata.Cli.Process (parseOverlay)
 import Hinagata.Config (HinagataConfig, hinagataConfig, hinagataEnvironmentBindings)
+import Hinagata.Hook.Revision qualified as Revision
 import Settei qualified
 import Settei.Env qualified as Env
 import Settei.Optparse qualified as SetteiOptions
@@ -32,6 +34,9 @@ data HookSettings = HookSettings
     workingDirectory :: !(Maybe Text.Text),
     environment :: ![Text.Text],
     revision :: !(Maybe Text.Text),
+    revisionExecutable :: !Bool,
+    revisionInputs :: ![Text.Text],
+    revisionValues :: ![Text.Text],
     deadlineMs :: !Int
   }
   deriving stock (Eq)
@@ -63,6 +68,15 @@ hookSettings prefix =
     <*> optionalText (prefix <> ".cwd") "Working directory for the hook"
     <*> secretListSetting (prefix <> ".environment") "Explicit NAME=VALUE child environment overlay"
     <*> (if prefix == "clone.preparation" then pure Nothing else optionalText (prefix <> ".revision") "Declared revision identifying the hook's effects")
+    <*> ( if prefix == "clone.preparation"
+            then pure False
+            else
+              Settei.withDefault
+                (Settei.publicShowSetting (settingKey (prefix <> ".revision_executable")) "Select absolute executable bytes for hook identity" Settei.boolDecoder)
+                (Settei.constantDefault (Settei.RuleName (prefix <> "-revision-executable")) "Executable bytes are not selected" False)
+        )
+    <*> (if prefix == "clone.preparation" then pure [] else secretListSetting (prefix <> ".revision_inputs") "Named NAME=PATH content inputs for hook identity")
+    <*> (if prefix == "clone.preparation" then pure [] else secretListSetting (prefix <> ".revision_values") "Named NAME=VALUE non-secret identity values")
     <*> Settei.withDefault
       (Settei.publicShowSetting (settingKey (prefix <> ".deadline_ms")) "Hook deadline in milliseconds" deadlineDecoder)
       (Settei.constantDefault (Settei.RuleName (prefix <> "-deadline")) "Bound hook execution" (300000 :: Int))
@@ -101,7 +115,7 @@ resolveConfig CliOptions {configPaths, overrides, diagnosticMode} = do
       let cliBindings =
             Env.bindings
               [ Env.binding (Env.EnvName ("HINAGATA_" <> Text.toUpper (Text.replace "." "_" name))) (settingKey name)
-              | name <- ["migration.executable", "migration.cwd", "migration.revision", "migration.deadline_ms", "verification.executable", "verification.cwd", "verification.revision", "verification.deadline_ms", "clone.preparation.executable", "clone.preparation.cwd", "clone.preparation.deadline_ms"]
+              | name <- ["migration.executable", "migration.cwd", "migration.revision", "migration.deadline_ms", "migration.revision_executable", "verification.executable", "verification.cwd", "verification.revision", "verification.deadline_ms", "verification.revision_executable", "clone.preparation.executable", "clone.preparation.cwd", "clone.preparation.deadline_ms"]
               ]
       case cliBindings of
         Left problems -> pure (Left (SourceFailure (Env.renderEnvErrorsText problems)))
@@ -130,7 +144,12 @@ resolveConfig CliOptions {configPaths, overrides, diagnosticMode} = do
 
 -- | Semantic checks also run for offline diagnostics, before any database work.
 validateHook :: Text.Text -> HookSettings -> Either Text.Text ()
-validateHook name HookSettings {executable, arguments, workingDirectory, environment, revision, deadlineMs}
+validateHook name hook = do
+  either (Left . ((name <> ": ") <>)) (const (Right ())) (revisionDeclarations hook)
+  validateCommand name hook
+
+validateCommand :: Text.Text -> HookSettings -> Either Text.Text ()
+validateCommand name HookSettings {executable, arguments, workingDirectory, environment, revision, deadlineMs}
   | deadlineMs <= 0 = invalid "hook deadline must be positive"
   | otherwise = case executable of
       Nothing
@@ -143,3 +162,45 @@ validateHook name HookSettings {executable, arguments, workingDirectory, environ
         | otherwise -> either invalid (const (Right ())) (void (parseOverlay environment))
   where
     invalid message = Left (name <> ": " <> message)
+
+-- | Parse and validate effective declarations without reading files. Config
+-- explanations use sensitive arrays; failures never retain rejected entries.
+revisionDeclarations :: HookSettings -> Either Text.Text [Revision.RevisionInput]
+revisionDeclarations HookSettings {executable, revision, revisionExecutable, revisionInputs, revisionValues}
+  | derived && revision /= Nothing = Left "revision conflicts with derived revision selectors"
+  | derived && executable == Nothing = Left "derived revision requires a hook executable"
+  | revisionExecutable && maybe True (not . isAbsolute . Text.unpack) executable = Left "revision_executable requires an absolute executable"
+  | otherwise = do
+      files <- traverse (entry "revision_inputs" True) revisionInputs
+      values <- traverse (entry "revision_values" False) revisionValues
+      selected <-
+        if revisionExecutable
+          then case executable of
+            Just path -> do
+              name <- logicalName "revision_executable" "executable"
+              pure [Revision.FileInput name (Text.unpack path)]
+            Nothing -> Left "revision_executable requires an executable"
+          else pure []
+      let inputs = selected <> files <> values
+      if null inputs
+        then Right []
+        else case Revision.validateRevisionInputs inputs of
+          Left (Revision.DuplicateInput name) -> Left ("revision inputs contain duplicate logical name " <> Revision.inputNameText name)
+          Left _ -> Left "revision inputs are invalid"
+          Right () -> Right inputs
+  where
+    derived = revisionExecutable || not (null revisionInputs) || not (null revisionValues)
+    logicalName setting label = either (const (Left (setting <> " requires normalized logical names"))) Right (Revision.mkInputName label)
+    entry setting isFile raw = do
+      let (label, suffix) = Text.breakOn "=" raw
+      if Text.null suffix
+        then Left (setting <> " entries require NAME=PAYLOAD")
+        else do
+          name <- logicalName setting label
+          let payload = Text.drop 1 suffix
+          if isFile
+            then
+              if Text.null payload || Text.any (== '\0') payload
+                then Left (setting <> " requires nonempty paths without NUL")
+                else Right (Revision.FileInput name (Text.unpack payload))
+            else Right (Revision.ValueInput name payload)

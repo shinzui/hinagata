@@ -11,16 +11,19 @@ import Hinagata.Fixture.Graph
 import Hinagata.Fixture.Manifest
 import Hinagata.Fixture.SqlPolicy
 import Hinagata.Fixture.Types
+import Hinagata.Hook.Revision qualified as Revision
 import Hinagata.Prelude
 import Hinagata.Types
 import Settei qualified
 import Settei.Env qualified as Env
-import System.Directory (createDirectoryIfMissing, createFileLink)
+import System.Directory (createDirectoryIfMissing, createFileLink, getModificationTime, removeFile, setModificationTime)
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.FilePath ((</>))
 import System.IO (IOMode (WriteMode), withBinaryFile)
 import System.IO.Temp (withSystemTempDirectory)
+import System.Posix.Files (createNamedPipe, setFileMode)
+import System.Posix.User (getEffectiveUserID)
 
 main :: IO ()
 main = do
@@ -103,6 +106,7 @@ regressionTests = do
   assert "standard string and quoted identifier are opaque" (checkSqlPolicy (ByteString.pack "SELECT 'BEGIN; COPY', \"COMMIT;\" FROM x;") == Right ())
   configTests
   bundleTests
+  revisionTests
 
 -- | Run this in a fresh process with +RTS -s. The fixture data is generated
 -- and captured in fixed chunks so maximum live residency can be compared for
@@ -310,3 +314,68 @@ isManifestError (Right _) = False
 isSqlPolicyError :: Either SqlPolicyError () -> Bool
 isSqlPolicyError (Left _) = True
 isSqlPolicyError (Right ()) = False
+
+-- Fixed vectors are independently calculated from the version-1 binary format.
+revisionTests :: IO ()
+revisionTests = withSystemTempDirectory "hook-revision" $ \root -> do
+  let name = either (error . show) id . Revision.mkInputName
+      file label path = Revision.FileInput (name label) path
+      value label text = Revision.ValueInput (name label) text
+      derive inputs = Revision.deriveHookRevision inputs >>= either (fail . show) pure
+      digest inputs = Revision.hookRevision <$> derive inputs
+      rejected label inputs = Revision.deriveHookRevision inputs >>= assert label . either (const True) (const False)
+      a = root </> "a"
+      b = root </> "b"
+  createDirectoryIfMissing True a
+  createDirectoryIfMissing True b
+  ByteString.writeFile (a </> "sql") "abc"
+  ByteString.writeFile (b </> "sql") "abc"
+  captured <- derive [file "sql" (a </> "sql"), value "marker" "é=\n"]
+  let original = Revision.hookRevision captured
+  assert "revision known answer file and UTF8 value" (original == "hinagata-hook-revision-v1:sha256:a63a56ff32994b9b2808afb2ff6378008b60208554fa07208dce418c4e0d88af")
+  emptyValue <- digest [value "value" ""]
+  assert "revision known answer empty value" (emptyValue == "hinagata-hook-revision-v1:sha256:2c43685f19a86f7630b96a5899b145d85c55a6a2c00c285ddb45dcf107e7cea6")
+  relocated <- digest [value "marker" "é=\n", file "sql" (b </> "sql")]
+  assert "revision order and relocation independent" (original == relocated)
+  before <- getModificationTime (a </> "sql")
+  setModificationTime (a </> "sql") (read "2000-01-01 00:00:00 UTC")
+  after <- getModificationTime (a </> "sql")
+  same <- digest [file "sql" (a </> "sql"), value "marker" "é=\n"]
+  assert "revision excludes timestamps" (before /= after && same == original)
+  unchanged <- Revision.verifyHookRevisionInputs captured
+  assert "revision verifies stable bytes" (unchanged == Right ())
+  mapM_
+    (\inputs -> digest inputs >>= assert "revision changes with identity" . (/= original))
+    [ [file "renamed" (a </> "sql"), value "marker" "é=\n"],
+      [file "sql" (a </> "sql"), value "marker" "é="],
+      [value "sql" "abc", value "marker" "é=\n"]
+    ]
+  boundaryA <- digest [value "a" "b=c\nd"]
+  boundaryB <- digest [value "a" "b=c", value "d" ""]
+  assert "revision framing distinguishes delimiters" (boundaryA /= boundaryB)
+  ByteString.writeFile (a </> "sql") "abd"
+  changed <- digest [file "sql" (a </> "sql"), value "marker" "é=\n"]
+  assert "revision hashes exact bytes" (changed /= original)
+  Revision.verifyHookRevisionInputs captured >>= assert "revision detects changed content" . either (const True) (const False)
+  rejected "revision requires inputs" []
+  rejected "revision rejects duplicate kinds" [file "sql" (a </> "sql"), value "sql" "x"]
+  rejected "revision rejects duplicate executable" [value "executable" "a", value "executable" "b"]
+  mapM_
+    (\label -> assert "revision invalid name" (Revision.mkInputName label == Left Revision.InvalidInputName))
+    ["", "A", "a//b", "a/./b", "a/../b", "a/", "a=b", "a\nb", "é"]
+  rejected "revision missing file" [file "missing" (root </> "private-missing-sentinel")]
+  rejected "revision directory" [file "directory" a]
+  createNamedPipe (root </> "pipe") 0o600
+  rejected "revision refuses pipe without blocking" [file "pipe" (root </> "pipe")]
+  createFileLink (a </> "sql") (root </> "link")
+  linked <- derive [file "sql" (root </> "link")]
+  ByteString.writeFile (a </> "sql") "abe"
+  Revision.verifyHookRevisionInputs linked >>= assert "revision detects changed symlink target" . either (const True) (const False)
+  removeFile (a </> "sql")
+  Revision.verifyHookRevisionInputs linked >>= assert "revision detects deleted symlink target" . either (const True) (const False)
+  rejected "revision dangling symlink" [file "sql" (root </> "link")]
+  uid <- getEffectiveUserID
+  assert "permission regression must run unprivileged" (uid /= 0)
+  setFileMode (b </> "sql") 0o000
+  rejected "revision unreadable file with real permission boundary" [file "sql" (b </> "sql")]
+  setFileMode (b </> "sql") 0o600
