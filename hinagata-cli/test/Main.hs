@@ -3,7 +3,7 @@ module Main (main) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async qualified as Async
 import Control.Concurrent.MVar
-import Control.Exception (bracket, try)
+import Control.Exception (bracket, finally, try)
 import Control.Monad (unless, void)
 import Data.IORef
 import Hinagata.Cli.Command (compileScenario, prepareBaselineWithRunner)
@@ -72,6 +72,26 @@ main = bracket (mkdtemp "/tmp/hinagata-process-XXXXXX") removePathForcibly $ \di
       raiseSignal sigTERM
       result <- timeout 6000000 (Async.wait child)
       assert "zero-exit signal handler cannot turn cancellation into success" (case result of Just (Right ChildReport {cancelledBy = Just 15, cleanupFailure = Nothing}) -> True; _ -> False)
+  withCancellationScope $ \scope -> do
+    entered <- newEmptyMVar
+    cleaned <- newEmptyMVar
+    Async.withAsync (try @CommandCancelled (withCommandCancellation scope (putMVar entered () >> threadDelay 30000000 `finally` putMVar cleaned ()))) $ \command -> do
+      takeMVar entered
+      raiseSignal sigTERM
+      result <- timeout 2000000 (Async.wait command)
+      assert "root supervisor cancels native work" (case result of Just (Left (CommandCancelled 15)) -> True; _ -> False)
+      assert "root supervisor joins cleanup" =<< ((== Just ()) <$> tryReadMVar cleaned)
+  withCancellationScope $ \scope -> do
+    entered <- newEmptyMVar
+    finish <- newEmptyMVar
+    Async.withAsync (withCommandCancellation scope (withCooperativeCancellation scope (putMVar entered () >> waitCancellation scope >> takeMVar finish >> pure (17 :: Int)))) $ \command -> do
+      takeMVar entered
+      raiseSignal sigINT
+      _ <- waitCancellation scope
+      raiseSignal sigTERM
+      putMVar finish ()
+      result <- timeout 2000000 (Async.wait command)
+      assert "root preserves delegated outcome through repeated signals" (result == Just 17)
   getArgs >>= \case
     [] -> pure ()
     [path] -> postgresTests path
@@ -99,7 +119,7 @@ postgresTests path = do
         selected = settings {clonePreparation = hook}
     (baseline, _) <- require =<< prepareBaselineWithRunner runner scope configuration selected
     Async.withAsync
-      ( withManager configuration $ \manager ->
+      ( withCommandCancellation scope $ withManager configuration $ \manager ->
           validateBatches
             scope
             2

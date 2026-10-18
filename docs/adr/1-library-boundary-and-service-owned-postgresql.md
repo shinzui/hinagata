@@ -30,6 +30,8 @@ The [standards applicability audit](../research/haskell-standards-audit.md) defi
 
 Hinagata core exposes a reusable versioned named-content revision helper, while CLI configuration and subprocess assembly remain adapters. Services declare every relevant file and non-secret value and pass those inputs to their commands themselves. The CLI selects executable bytes only on request and derives ordinary revision strings for the existing baseline interface. Selected files are read with bounded memory through a nonblocking open and regular-file descriptor check, so a pipe cannot hang identity capture. Clone preparation stays outside this identity. Manual revisions remain supported for remote or secret-controlled effects; neither mode may imply discovery of arbitrary dependencies or protection of hashed secrets.
 
+A root command supervisor covers native work and catalog waits. First-signal delivery ownership is captured atomically with the signal: active child and validation supervisors finish through their typed outcomes, while the root interrupts other work exactly once. The root joins cleanup before reporting 130/143. Repeated signals cannot interrupt shutdown again or erase uncertain child-stoppage evidence. A signal after a confirmed commit cannot undo that commit.
+
 ## Consequences
 
 Existing PostgreSQL is reused without startup cost. Services receive clone settings before startup. No Hurl parser, invented workbench hook, or private runtime-table mutation is introduced. Portable dump snapshots, provisioning, and general orchestration are deferred. Cluster-local baseline snapshots are included under [ADR 3](3-sealed-baselines-and-positive-database-ownership.md).

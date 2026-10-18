@@ -140,7 +140,8 @@ withDatabase configuration baseline scenario callback = do
 -- | Classify a returned value without changing it. A classified failure is
 -- preserved only under 'PreserveFailures'; synchronous callback exceptions
 -- follow the same policy. Asynchronous cancellation instead attempts release
--- and rethrows the original exception.
+-- and rethrows the original exception, including cancellation during completion.
+-- An interrupted completion may leave an inspectable orphan for explicit recovery.
 withDatabaseClassified :: HinagataConfig -> BaselineRef -> FixturePlan -> RetentionPolicy -> (a -> Bool) -> (LeaseInfo -> IO a) -> IO (Either LeaseError (LeaseOutcome a))
 withDatabaseClassified configuration baseline scenario policy classifyResult callback = do
   expiry <- acquisitionExpiry configuration
@@ -225,7 +226,9 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
                                   (finished, duration) <- measure (try @SomeException (completeValue session target identity clone failed))
                                   modifyIORef' timingRef (\record -> record {completionMs = duration})
                                   recorded <- readIORef timingRef
-                                  pure (Right (outcomeFor recorded info value finished))
+                                  case finished of
+                                    Left exception | isJust (fromException @SomeAsyncException exception) -> throwIO exception
+                                    _ -> pure (Right (outcomeFor recorded info value finished))
                     pure $ case opened of
                       Left problem -> Left (sessionFailure problem)
                       Right result -> result

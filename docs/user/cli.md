@@ -125,6 +125,10 @@ Reports omit credentials.
 | `3` | A configuration source failed. |
 | `4` | Configuration resolution failed. |
 
+SIGINT/SIGTERM interrupt native fixture loading and catalog waits as well as child commands.
+Hinagata joins cleanup before returning `130`/`143`; repeated signals preserve the first signal and do not restart cancellation.
+Uncommitted direct-load writes roll back. A signal after a confirmed commit cannot undo committed work.
+
 `db with` returns a failed child's exit code, including cancellation codes `130` and `143`.
 A later cleanup failure does not replace that code.
 If the child succeeds but cleanup fails, Hinagata returns `1`.

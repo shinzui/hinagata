@@ -16,6 +16,11 @@ provenance:
       at: 2026-10-18T21:23:51Z
       mode: "other"
       note: "Complete audit remediation scope, regression acceptance, integration ownership, and Mina intention linkage."
+    - model: "gpt-6.1-sol"
+      harness: "codex-cli"
+      at: 2026-10-18T21:35:23Z
+      mode: "implement"
+      note: "Repair native handle ownership, completion cancellation, and command supervision with deterministic regressions."
 intention: "intention_01m58e4vxke9stryg9na9xc9em"
 ---
 
@@ -34,17 +39,17 @@ Fix audit findings F2 (P1), F4 (P2), and F5 (P2) as one end-to-end cancellation 
 ## Progress
 
 
-- [ ] M1: Interrupted connection acquisition closes its socket before returning, including the acquisition-to-bracket boundary.
-- [ ] M2: Cancellation during lease completion propagates while preserving recoverable ownership state and synchronous cleanup diagnostics.
-- [ ] M3: Command-wide cancellation stops direct loads and database waits, settles child/lease cleanup, and reports 130/143 without success output.
+- [x] M1: Interrupted connection acquisition closes its socket before returning, including the acquisition-to-bracket boundary.
+- [x] M2: Cancellation during lease completion propagates while preserving recoverable ownership state and synchronous cleanup diagnostics.
+- [x] M3: Command-wide cancellation stops direct loads and database waits, settles child/lease cleanup, and reports 130/143 without success output.
 
-Implementation has not started. The audit observations below describe the original defect, not acceptance of a fix.
+Accepted 2026-10-18: original implementations fail stalled-peer EOF, completion ThreadKilled, and CLI direct-load cancellation regressions. Repaired code passes core/process tests, disposable socket and TCP native suites, CLI build, offline CLI suite, CLI/PostgreSQL suite, conventions, and docs validation. Native tests run acquisition kill/timeout against a controlled peer without idle GC under conflicting routing defaults; completion tests cover all three policies, explicit orphan recovery, and manager permit reuse. CLI barriers verify rollback and 130/143 within eight seconds of signalling a 30-second query, repeated signals, blocked prepare/acquire, and existing typed/unsafe preparation and child cleanup outcomes.
 
 
 ## Surprises & Discoveries
 
 
-None recorded during implementation yet.
+The stalled-peer test initially passed on the old adapter because idle GC finalized the leaked handle. The PostgreSQL test executable now disables idle GC; the old adapter fails the EOF assertion and the repaired adapter passes without forced collection. A cancellation-only fixture initially affected `fixture validate --all`; its separate fixture root now avoids changing that existing selection test.
 
 
 ## Decision Log
@@ -52,11 +57,13 @@ None recorded during implementation yet.
 
 2026-10-18: Treat CLI signal propagation, exception-safe connection ownership, and cancellation during lease completion as one functional stream. Fixing only the command supervisor would expose the native leaks and swallowed exceptions to more callers.
 
+2026-10-18: Latch delivery ownership with the first signal. An existing child or validation supervisor owns cooperative cancellation and its typed cleanup result; otherwise the root interrupts the command worker once. Joining that worker avoids a second interruption of unsafe-child bookkeeping. Root supervision begins before configuration file resolution.
+
 
 ## Outcomes & Retrospective
 
 
-Pending implementation and acceptance evidence.
+F2/F4/F5 are fixed. Native allocation and callback ownership transfer are masked with exception cleanup installed; socket waits remain interruptible. Completion cancellation rethrows instead of returning a normal outcome, with owned orphan recovery where needed. Root supervision spans configuration/file work, native loads, and catalog waits while preserving delegated child/validation cleanup. ADRs 1–3 and CLI/API documentation record these contracts.
 
 
 ## Context and Orientation

@@ -11,7 +11,7 @@ import Hinagata.Cli.Command (compileScenario, prepareBaseline)
 import Hinagata.Cli.Config
 import Hinagata.Cli.Options
 import Hinagata.Cli.Output
-import Hinagata.Cli.Process (CancellationScope, ChildCleanupException (..), ChildFailure (..), ChildReport (..), ChildSpec (..), CommandCancelled (..), cancellationSignal, checkCancellation, runChild, withCancellationScope)
+import Hinagata.Cli.Process (CancellationScope, ChildCleanupException (..), ChildFailure (..), ChildReport (..), ChildSpec (..), CommandCancelled (..), cancellationSignal, checkCancellation, runChild, withCancellationScope, withCommandCancellation)
 import Hinagata.Cli.Validation (cancelledError, validateBatches)
 import Hinagata.Config (AccessConfig (..), EndpointConfig (..), HinagataConfig (..))
 import Hinagata.Connection (mkConnectionTarget)
@@ -38,6 +38,15 @@ import System.IO (stderr)
 main :: IO ()
 main = do
   options <- Options.execParser (parserInfo ("hinagata " <> showVersion Package.version <> " (" <> buildRevision <> ")"))
+  withCancellationScope $ \scope -> do
+    completed <- try @ExitCode (withCommandCancellation scope (resolveAndDispatch scope options) `catch` \(CommandCancelled signal) -> abort (jsonOutput options) (cancelledError signal))
+    signal <- cancellationSignal scope
+    case signal of
+      Just number -> exitWith (ExitFailure (128 + number))
+      Nothing -> either exitWith pure completed
+
+resolveAndDispatch :: CancellationScope -> CliOptions -> IO ()
+resolveAndDispatch scope options =
   case command options of
     Just (Completions shell) -> do
       name <- getProgName
@@ -52,12 +61,7 @@ main = do
             TextIO.hPutStr stderr (Settei.renderWarningsText (Settei.warnings result))
             case SetteiOptions.resolutionDiagnostic (diagnosticMode options) result of
               Just output -> TextIO.putStr output
-              Nothing -> withCancellationScope $ \scope -> do
-                completed <- try @ExitCode (dispatch scope configuration settings options `catch` \(CommandCancelled signal) -> abort (jsonOutput options) (cancelledError signal))
-                signal <- cancellationSignal scope
-                case signal of
-                  Just number -> exitWith (ExitFailure (128 + number))
-                  Nothing -> either exitWith pure completed
+              Nothing -> dispatch scope configuration settings options
 
 dispatch :: CancellationScope -> HinagataConfig -> CliSettings -> CliOptions -> IO ()
 dispatch scope configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLimit, chunkSize} settings options = case command options of
@@ -89,7 +93,7 @@ dispatch scope configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLim
                 loaded <- loadInto target sessionOptions plan
                 case loaded of
                   Left problem -> abort jsonSelected (loadError problem)
-                  Right report -> emitLoad jsonSelected database report
+                  Right report -> checkCancellation scope >> emitLoad jsonSelected database report
   Just (FixtureValidate roots allSelected jsonSelected)
     | allSelected && not (null roots) -> abort jsonSelected (CliError "options" "validate_selection_invalid" "choose names or --all" Nothing Nothing Nothing Nothing 2 Nothing Nothing)
     | not allSelected && null roots -> abort jsonSelected (CliError "options" "validate_selection_required" "choose scenario names or --all" Nothing Nothing Nothing Nothing 2 Nothing Nothing)

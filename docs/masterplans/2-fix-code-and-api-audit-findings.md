@@ -58,7 +58,7 @@ Relevant local decisions are [ADR 1](../adr/1-library-boundary-and-service-owned
 |---|-------|------|-----------|-----------|--------|
 | 8 | SQL transaction protection | [8-preserve-fixture-atomicity-across-sql-whitespace.md](../plans/8-preserve-fixture-atomicity-across-sql-whitespace.md) | None | None | Complete |
 | 9 | Explicit connection targets | [9-honor-explicit-postgresql-connection-targets.md](../plans/9-honor-explicit-postgresql-connection-targets.md) | None | EP-8 | Complete |
-| 10 | Cancellation and resource lifetimes | [10-propagate-cancellation-through-commands-and-resource-lifetimes.md](../plans/10-propagate-cancellation-through-commands-and-resource-lifetimes.md) | None | EP-9 | Not Started |
+| 10 | Cancellation and resource lifetimes | [10-propagate-cancellation-through-commands-and-resource-lifetimes.md](../plans/10-propagate-cancellation-through-commands-and-resource-lifetimes.md) | None | EP-9 | Complete |
 | 11 | Role-setting semantics and cache identity | [11-apply-postgresql-role-settings-without-changing-their-meaning.md](../plans/11-apply-postgresql-role-settings-without-changing-their-meaning.md) | None | None | Not Started |
 | 12 | Structured lifecycle errors | [12-preserve-structured-fixture-errors-across-lifecycle-apis.md](../plans/12-preserve-structured-fixture-errors-across-lifecycle-apis.md) | None | EP-10, EP-11 | Not Started |
 
@@ -90,7 +90,7 @@ Durable exception/ownership rules belong in ADRs 1–3 when implemented. Endpoin
 ## Progress
 
 
-EP-8 and EP-9 are accepted with core, socket/TCP, and CLI/native regressions. Three children remain; EP-10 is next. No child is blocked by a hard dependency. This master plan is not complete until every child is accepted and the combined integration gate below passes.
+EP-8 and EP-9 are accepted with core, socket/TCP, and CLI/native regressions. EP-10 is also accepted, including cancelled acquisition under conflicting endpoint defaults and recovery after interrupted completion. Two children remain; EP-11 is next. No child is blocked by a hard dependency. This master plan is not complete until every child is accepted and the combined integration gate below passes.
 
 The final gate runs from the repository root in the development environment with `HINAGATA_TEST_PGHOST` unset. Use fresh disposable clusters and retain concise evidence on the final combined tree:
 

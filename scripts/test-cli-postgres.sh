@@ -92,6 +92,7 @@ test "$count" = 2
 
 PGHOSTADDR=127.0.0.2 "$binary" --config "$workspace/hinagata.yaml" db prepare --json > "$workspace/prepare-cold.json"
 "$binary" --config "$workspace/hinagata.yaml" db prepare --json > "$workspace/prepare-warm.json"
+python3 scripts/test-command-cancellation.py "$binary" "$workspace/hinagata.yaml" "$workspace"
 python3 - "$workspace/prepare-cold.json" "$workspace/prepare-warm.json" <<'PY'
 import json
 import pathlib

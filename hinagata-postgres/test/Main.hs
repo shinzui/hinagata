@@ -2,7 +2,7 @@ module Main (main) where
 
 import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, readMVar, takeMVar, tryReadMVar)
-import Control.Exception (SomeException, bracket, try)
+import Control.Exception (AsyncException (ThreadKilled), SomeException, bracket, fromException, try)
 import Control.Monad (forM_)
 import Data.ByteString.Char8 qualified as ByteString
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
@@ -43,6 +43,7 @@ main = do
   arguments <- getArgs
   case arguments of
     ["--crash-lease-worker", fixtureRoot, bundleRoot, mode, readyFile] -> crashLeaseWorker fixtureRoot bundleRoot mode readyFile
+    ["--acquisition-cancellation"] -> acquisitionCancellationTests
     ["--endpoint-worker", fixtureRoot, bundleRoot, selectedHost, expected] -> do
       (target, _, _, _, _) <- environmentTarget selectedHost
       plan <- bundleOrFail =<< compileFixtures (BundleConfig fixtureRoot bundleRoot (positive 1048576) (positive 65536)) [fixtureName "endpoint-probe"]
@@ -50,6 +51,7 @@ main = do
       assert "isolated explicit endpoint load" (case (expected, result) of ("success", Right _) -> True; ("failure", Left _) -> True; _ -> False)
     ["--lifecycle-worker", fixtureRoot, bundleRoot] -> do
       socket <- requiredEnv "HINAGATA_TEST_PGHOST"
+      acquisitionCancellationTests
       (target, host, port, user, database) <- environmentTarget socket
       bracket (PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString target)))) PQ.finish $ \connection -> do
         plan <- bundleOrFail =<< compileFixtures (BundleConfig fixtureRoot bundleRoot (positive 1048576) (positive 65536)) [fixtureName "good"]
@@ -244,6 +246,33 @@ integrationTests socket = withSystemTempDirectory "hinagata-postgres-test-" $ \w
   assert "final COPY result error is reported" (case finalCopy of Left LoadError {phase = ExecuteCopy, sqlState = Just "P0001"} -> True; _ -> False)
   assert "final COPY result error rolls back" =<< ((== 0) <$> queryInt setupConnection "SELECT count(*) FROM final_copy_items")
   PQ.finish setupConnection
+
+acquisitionCancellationTests :: IO ()
+acquisitionCancellationTests = forM_ [False, True] $ \useTimeout ->
+  withSystemTempDirectory "hinagata-stalled-peer-" $ \directory -> do
+    peerScript <- getDataFileName "test/stalled-postgres-peer.py"
+    withCreateProcess (proc "python3" [peerScript, directory]) $ \_ _ _ peer -> do
+      waitForChild peer (doesFileExist (directory </> "port") >>= \ready -> pure (if ready then Just () else Nothing))
+      port <- orFail . mkPort . read =<< readFile (directory </> "port")
+      host <- orFail (tcpHost "127.0.0.1")
+      database <- orFail (mkDatabaseName "unused")
+      target <- orFail (mkConnectionTarget host port "unused" database Nothing)
+      finished <- newEmptyMVar
+      worker <-
+        forkIO $
+          try @SomeException
+            ( if useTimeout
+                then void (timeout 500000 (withSession target defaultSessionOptions (const (pure ()))))
+                else void (withSession target defaultSessionOptions (const (pure ())))
+            )
+            >>= putMVar finished
+      waitForChild peer (doesFileExist (directory </> "accepted") >>= \ready -> pure (if ready then Just () else Nothing))
+      unless useTimeout (killThread worker)
+      result <- timeout 2000000 (takeMVar finished)
+      assert "stalled connection cancellation returns promptly" (case (useTimeout, result) of (True, Just (Right ())) -> True; (False, Just (Left exception)) -> fromException exception == Just ThreadKilled; _ -> False)
+      closed <- timeout 1000000 (waitForProcess peer)
+      assert "cancelled acquisition closes native socket without GC" (closed == Just ExitSuccess)
+      assert "stalled peer records EOF" =<< doesFileExist (directory </> "closed")
 
 -- Child environments keep conflicting libpq defaults away from concurrent tests.
 environmentTarget :: FilePath -> IO (ConnectionTarget, Host, Port, Text, DatabaseName)
@@ -647,6 +676,7 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   eightWarmTest lifecycleConfig firstRef scenarioPlan connection
   processCrashTests lifecycleConfig baselineSpec connection fixtureRoot bundleRoot
   cleanupLifecycleTests lifecycleConfig catalog firstRef scenarioPlan connection database
+  completionCancellationTests lifecycleConfig firstRef scenarioPlan connection target
   retentionLifecycleTests lifecycleConfig firstRef scenarioPlan connection catalog
   bulkRequested <- (== Just "1") <$> lookupEnv "HINAGATA_TEST_BULK_BASELINE"
   when bulkRequested (bulkBaselineTests lifecycleConfig fixtureRoot bundleRoot connection)
@@ -1235,6 +1265,37 @@ cleanupLifecycleTests lifecycleConfig catalog firstRef scenarioPlan connection d
   execCheck connection (Encoding.encodeUtf8 ("INSERT INTO hinagata_test.allocations (id, project_id, generation_id, run_id, database_name, ownership_token, state) VALUES ('" <> protectedId <> "', 'baseline-test', '" <> generationText <> "', 'recovery-run', '" <> databaseNameText database <> "', '" <> ambiguousToken <> "', 'Allocating')"))
   protectedApply <- applyCleanup lifecycleConfig IncludeRetained [protectedId]
   assert "maintenance database is protected even with a catalog allocation" (case protectedApply of Right [Refused identifier _] -> identifier == protectedId; _ -> False)
+
+completionCancellationTests :: HinagataConfig -> BaselineRef -> FixturePlan -> PQ.Connection -> ConnectionTarget -> IO ()
+completionCancellationTests configuration baseline scenario observer target =
+  withManager configuration {activeLeases = positive 1, setupWorkers = positive 1} $ \manager ->
+    forM_ [ReleaseAlways, DetachAlways, PreserveFailures] $ \policy -> do
+      infoReady <- newEmptyMVar
+      allowReturn <- newEmptyMVar
+      finished <- newEmptyMVar
+      worker <-
+        forkIO $
+          try @SomeException
+            (withManagedDatabaseClassified manager baseline scenario policy (const True) (\info -> putMVar infoReady info >> takeMVar allowReturn))
+            >>= putMVar finished
+      LeaseInfo {leaseId} <- takeMVar infoReady
+      bracket (PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString target)))) PQ.finish $ \controller ->
+        bracket (execCheck controller "BEGIN") (const (execCheck controller "ROLLBACK")) $ \_ -> do
+          _ <- queryText controller (Encoding.encodeUtf8 ("SELECT a.id::text FROM hinagata_test.allocations a JOIN hinagata_test.leases l ON l.allocation_id=a.id WHERE l.id='" <> leaseId <> "' FOR UPDATE OF a"))
+          putMVar allowReturn ()
+          let waitBlocked attempts = do
+                count <- queryInt observer "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'UPDATE %allocations%' AND pid <> pg_backend_pid()"
+                if count > 0 then pure () else if attempts <= (0 :: Int) then fail "completion never reached blocked update" else threadDelay 10000 >> waitBlocked (attempts - 1)
+          waitBlocked 500
+          killThread worker
+          result <- timeout 3000000 (takeMVar finished)
+          assert "completion cancellation preserves ThreadKilled" (case result of Just (Left exception) -> fromException exception == Just ThreadKilled; _ -> False)
+      inspected <- orFail =<< inspectLease configuration leaseId
+      assert "interrupted completion leaves recoverable orphan" (case inspected of Just CleanupCandidate {disposition = Orphaned} -> True; _ -> False)
+      released <- orFail =<< releaseLease configuration leaseId
+      assert "interrupted completion recovers with ownership checks" (case released of Released _ -> True; _ -> False)
+      reused <- withManagedDatabase manager baseline scenario (const (pure ()))
+      assert "completion cancellation returns manager permits" (reused == Right ())
 
 retentionLifecycleTests :: HinagataConfig -> BaselineRef -> FixturePlan -> PQ.Connection -> CatalogIdentity -> IO ()
 retentionLifecycleTests lifecycleConfig firstRef scenarioPlan connection catalog = do

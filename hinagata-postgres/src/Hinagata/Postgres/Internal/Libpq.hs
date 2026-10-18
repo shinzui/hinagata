@@ -21,7 +21,7 @@ where
 
 import Control.Concurrent (forkIOWithUnmask)
 import Control.Concurrent.MVar
-import Control.Exception (IOException, SomeException, bracket, finally, mask, throwIO, try)
+import Control.Exception (IOException, SomeException, finally, mask, onException, throwIO, try)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
 import Data.Text qualified as Text
@@ -77,36 +77,40 @@ deadlineAfter milliseconds = do
 
 -- | Open and bracket a connection to the explicit target. A failed Unix socket
 -- connection does not retry through TCP. Callback exceptions propagate after
--- the connection closes.
+-- the connection closes. Interrupted acquisition finishes its native handle
+-- before returning, without relying on garbage collection.
 withSession :: ConnectionTarget -> SessionOptions -> (Session -> IO a) -> IO (Either SessionError a)
-withSession target options action = do
+withSession target options action = mask $ \restore -> do
   opened <- openSession target options
   case opened of
     Left failure -> pure (Left failure)
-    Right session -> Right <$> bracket (pure session) closeSession action
+    Right session -> Right <$> (restore (action session) `finally` closeSession session)
 
 openSession :: ConnectionTarget -> SessionOptions -> IO (Either SessionError Session)
 openSession target options
   | any (<= 0) [connectDeadlineMs options, operationDeadlineMs options, statementDeadlineMs options, lockDeadlineMs options, cleanupDeadlineMs options] = pure (Left InvalidSessionOptions)
-  | otherwise = do
+  | otherwise = mask $ \restore -> do
       let identity = Text.pack (show target)
           connectionInfo = Encoding.encodeUtf8 (connectionStringText (renderConnectionString target))
       started <- try @IOException (PQ.connectStart connectionInfo)
       case started of
         Left _ -> pure (Left (ConnectionFailed identity))
-        Right connection -> do
-          deadline <- deadlineAfter (connectDeadlineMs options)
-          outcome <- try @IOException (poll connection deadline)
-          case outcome of
-            Left _ -> PQ.finish connection >> pure (Left (ConnectionFailed identity))
-            Right False -> PQ.finish connection >> pure (Left (ConnectionTimedOut identity))
-            Right True -> do
-              nonblocking <- PQ.setnonblocking connection True
-              if not nonblocking
-                then PQ.finish connection >> pure (Left (ConnectionFailed identity))
-                else do
-                  gate <- newMVar Open
-                  pure (Right Session {connection, gate, options, identity})
+        Right connection ->
+          ( do
+              deadline <- deadlineAfter (connectDeadlineMs options)
+              outcome <- try @IOException (restore (poll connection deadline))
+              case outcome of
+                Left _ -> PQ.finish connection >> pure (Left (ConnectionFailed identity))
+                Right False -> PQ.finish connection >> pure (Left (ConnectionTimedOut identity))
+                Right True -> do
+                  nonblocking <- PQ.setnonblocking connection True
+                  if not nonblocking
+                    then PQ.finish connection >> pure (Left (ConnectionFailed identity))
+                    else do
+                      gate <- newMVar Open
+                      pure (Right Session {connection, gate, options, identity})
+          )
+            `onException` PQ.finish connection
   where
     poll connection deadline = do
       status <- PQ.connectPoll connection

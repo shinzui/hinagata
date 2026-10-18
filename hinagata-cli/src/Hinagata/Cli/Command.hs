@@ -11,7 +11,7 @@ import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text qualified as Text
 import Hinagata.Cli.Config (CliSettings (..), HookSettings (..), validateHook)
 import Hinagata.Cli.Output (CliError (..), bundleError)
-import Hinagata.Cli.Process (CancellationScope, ChildCleanupException (..), ChildFailure (..), ChildReport (..), ChildSpec (..), CommandCancelled (..), checkCancellation, parseOverlay, runChild)
+import Hinagata.Cli.Process (CancellationScope, ChildCleanupException (..), ChildFailure (..), ChildReport (..), ChildSpec (..), CommandCancelled (..), checkCancellation, parseOverlay, runChild, withCooperativeCancellation)
 import Hinagata.Cli.Revision (captureHookRevision, effectiveRevision, verifyHookRevisions)
 import Hinagata.Config (HinagataConfig (..))
 import Hinagata.Connection (ConnectionTarget)
@@ -97,7 +97,7 @@ compileScenario HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLimit, chunkSize
 -- Keep the supervision outcome and its release-safety classification masked
 -- together. Blocking process waits remain interruptible.
 hookRunner :: (CancellationScope -> ChildSpec -> IO (Either ChildFailure ChildReport)) -> CancellationScope -> Text.Text -> Bool -> HookSettings -> ConnectionTarget -> IO (Either Text.Text ())
-hookRunner runner scope name preparation HookSettings {executable, arguments, workingDirectory, environment, deadlineMs} target = mask_ $ case executable of
+hookRunner runner scope name preparation HookSettings {executable, arguments, workingDirectory, environment, deadlineMs} target = withCooperativeCancellation scope $ mask_ $ case executable of
   Nothing -> pure (Right ())
   Just program -> do
     let failWith kind safe =

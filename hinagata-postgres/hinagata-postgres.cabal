@@ -11,6 +11,7 @@ data-files:
   sql/catalog-v1.sql
   sql/catalog-v2.sql
   sql/upgrade-v1-v2.sql
+  test/stalled-postgres-peer.py
 
 build-type: Simple
 
@@ -74,6 +75,8 @@ test-suite hinagata-postgres-test
   ghc-options:
     -O0
     -threaded
+    -rtsopts
+    -with-rtsopts=-I0
 
   build-depends:
     base >=4.21 && <5,

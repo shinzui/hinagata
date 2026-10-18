@@ -7,6 +7,8 @@ module Hinagata.Cli.Process
     CommandCancelled (..),
     ChildCleanupException (..),
     withCancellationScope,
+    withCommandCancellation,
+    withCooperativeCancellation,
     cancellationSignal,
     checkCancellation,
     waitCancellation,
@@ -19,8 +21,9 @@ where
 
 import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async qualified as Async
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, readMVar, tryPutMVar, tryReadMVar)
-import Control.Exception (Exception (..), IOException, SomeException, asyncExceptionFromException, asyncExceptionToException, bracket, finally, mask, throwIO, try)
+import Control.Exception (Exception (..), IOException, SomeException, asyncExceptionFromException, asyncExceptionToException, bracket, bracket_, finally, mask, throwIO, try)
 import Control.Monad (unless, void)
 import Data.List (isPrefixOf)
 import Data.Text qualified as Text
@@ -84,7 +87,13 @@ parseOverlay = traverse parseOne
 
 -- | One command owns process-wide handlers. Registration and first-signal
 -- observation share a lock, so spawning cannot miss concurrent cancellation.
-data ScopeState = ScopeState !(Maybe Int) !Int ![(Int, MVar Int)]
+data ScopeState = ScopeState
+  { selectedSignal :: !(Maybe Int),
+    nextRegistration :: !Int,
+    registrations :: ![(Int, MVar Int)],
+    cooperative :: !Int,
+    deferRoot :: !Bool
+  }
 
 newtype CancellationScope = CancellationScope (MVar ScopeState)
 
@@ -101,13 +110,16 @@ data ChildCleanupException = ChildCleanupException
 
 withCancellationScope :: (CancellationScope -> IO a) -> IO a
 withCancellationScope callback = mask $ \restore -> do
-  scope@(CancellationScope state) <- CancellationScope <$> newMVar (ScopeState Nothing 0 [])
-  let notify number = modifyMVar_ state $ \(ScopeState previous next children) -> do
-        let selected = previous <|> Just number
-        mapM_ (\(_, marker) -> void (tryPutMVar marker (maybe number id selected))) children
-        pure (ScopeState selected next children)
+  scope@(CancellationScope state) <- CancellationScope <$> newMVar (ScopeState Nothing 0 [] 0 False)
+  let notify number = modifyMVar_ state $ \record@ScopeState {selectedSignal, registrations, cooperative, deferRoot} -> do
+        let selected = selectedSignal <|> Just number
+            deferred = case selectedSignal of
+              Just _ -> deferRoot
+              Nothing -> cooperative > 0 || not (null registrations)
+        mapM_ (\(_, marker) -> void (tryPutMVar marker (maybe number id selected))) registrations
+        pure record {selectedSignal = selected, deferRoot = deferred}
       settle = do
-        ScopeState _ _ children <- readMVar state
+        ScopeState {registrations = children} <- readMVar state
         unless (null children) (threadDelay 10000 >> settle)
   previousInt <- installHandler sigINT (Catch (notify 2)) Nothing
   previousTerm <- installHandler sigTERM (Catch (notify 15)) Nothing
@@ -120,7 +132,7 @@ withCancellationScope callback = mask $ \restore -> do
 
 cancellationSignal :: CancellationScope -> IO (Maybe Int)
 cancellationSignal (CancellationScope state) = do
-  ScopeState signal _ _ <- readMVar state
+  ScopeState {selectedSignal = signal} <- readMVar state
   pure signal
 
 checkCancellation :: CancellationScope -> IO ()
@@ -129,16 +141,40 @@ checkCancellation scope = cancellationSignal scope >>= maybe (pure ()) (throwIO 
 waitCancellation :: CancellationScope -> IO Int
 waitCancellation scope = cancellationSignal scope >>= maybe (threadDelay 10000 >> waitCancellation scope) pure
 
+-- | The root cancels native work once and joins cleanup. If the first signal
+-- arrives inside an existing child/validation supervisor, that supervisor owns
+-- delivery through its typed outcome; the root only joins it. This decision is
+-- latched with the signal, so unregistering cannot cause a second interruption.
+withCommandCancellation :: CancellationScope -> IO a -> IO a
+withCommandCancellation scope@(CancellationScope state) action =
+  Async.withAsync (checkCancellation scope >> action) $ \worker -> do
+    raced <- Async.race (Async.waitCatch worker) (waitCancellation scope)
+    completed <- case raced of
+      Left result -> pure result
+      Right signal -> do
+        ScopeState {deferRoot} <- readMVar state
+        unless deferRoot (Async.cancelWith worker (CommandCancelled signal))
+        Async.waitCatch worker
+    either throwIO pure completed
+
+-- | Delegate first-signal delivery to an existing supervisor. Its cleanup and
+-- typed outcome must settle before leaving this region.
+withCooperativeCancellation :: CancellationScope -> IO a -> IO a
+withCooperativeCancellation (CancellationScope state) = bracket_ enter leave
+  where
+    enter = modifyMVar_ state (\record -> pure record {cooperative = cooperative record + 1})
+    leave = modifyMVar_ state (\record -> pure record {cooperative = cooperative record - 1})
+
 withRegistration :: CancellationScope -> (MVar Int -> IO a) -> IO a
 withRegistration (CancellationScope state) callback = bracket register unregister (callback . snd)
   where
     register = do
       marker <- newEmptyMVar
-      modifyMVar state $ \(ScopeState signal next children) -> do
-        mapM_ (void . tryPutMVar marker) signal
-        pure (ScopeState signal (next + 1) ((next, marker) : children), (next, marker))
-    unregister (key, _) = modifyMVar_ state $ \(ScopeState signal next children) ->
-      pure (ScopeState signal next (filter ((/= key) . fst) children))
+      modifyMVar state $ \record@ScopeState {selectedSignal, nextRegistration, registrations} -> do
+        mapM_ (void . tryPutMVar marker) selectedSignal
+        pure (record {nextRegistration = nextRegistration + 1, registrations = (nextRegistration, marker) : registrations}, (nextRegistration, marker))
+    unregister (key, _) = modifyMVar_ state $ \record@ScopeState {registrations} ->
+      pure record {registrations = filter ((/= key) . fst) registrations}
 
 runChild :: CancellationScope -> ChildSpec -> IO (Either ChildFailure ChildReport)
 runChild = runChildWithCleanupCheck (pure True)
