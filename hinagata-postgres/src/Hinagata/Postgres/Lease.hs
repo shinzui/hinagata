@@ -2,6 +2,9 @@
 module Hinagata.Postgres.Lease
   ( LeaseInfo (..),
     LeaseError (..),
+    PreparationFailure (..),
+    PreparationFailureKind (..),
+    PreparationContext (..),
     RetentionPolicy (..),
     LeaseDisposition (..),
     LeaseTimings (..),
@@ -14,9 +17,9 @@ where
 
 import Control.Concurrent.Async qualified as Async
 import Control.Concurrent.MVar (newEmptyMVar, readMVar, tryPutMVar)
-import Control.Exception (IOException, SomeAsyncException, SomeException, evaluate, fromException, mask, throwIO, try)
+import Control.Exception (Exception, IOException, SomeAsyncException, SomeException, evaluate, fromException, mask, throwIO, try)
 import Data.Bifunctor (first)
-import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Encoding
 import Data.Word (Word64)
@@ -49,7 +52,33 @@ data LeaseInfo = LeaseInfo
 data LeaseError = LeaseError
   { cause :: !Text,
     sqlState :: !(Maybe Text),
-    cleanupFailure :: !(Maybe Text)
+    cleanupFailure :: !(Maybe Text),
+    preparationContext :: !(Maybe PreparationContext)
+  }
+  deriving stock (Eq, Show)
+
+-- | Trusted adapters may raise only these credential-free outcomes. Legacy
+-- callbacks returning Left Text retain their generic diagnostic.
+data PreparationFailureKind
+  = PreparationSpawnFailed
+  | PreparationIdentityUnavailable
+  | PreparationExit !Int
+  | PreparationTimeout
+  | PreparationCancelled !Int
+  | PreparationCleanupFailed
+  deriving stock (Eq, Show)
+
+data PreparationFailure = PreparationFailure
+  { failureKind :: !PreparationFailureKind,
+    releaseSafe :: !Bool
+  }
+  deriving stock (Eq, Show)
+  deriving anyclass (Exception)
+
+data PreparationContext = PreparationContext
+  { preparationFailure :: !PreparationFailure,
+    preparationRunId :: !Text,
+    preparationLeaseId :: !Text
   }
   deriving stock (Eq, Show)
 
@@ -132,7 +161,7 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
         modifyIORef' timingRef (\record -> record {catalogMs = catalogDuration})
         let catalog = maybe (Left (CatalogError "acquisition deadline expired" Nothing Nothing)) id timedCatalog
         case catalog of
-          Left CatalogError {cause, sqlState} -> pure (Left (LeaseError cause sqlState Nothing))
+          Left CatalogError {cause, sqlState} -> pure (Left (LeaseError cause sqlState Nothing Nothing))
           Right identity
             | identity /= clusterIdentity baseline -> pure (Left (failure "baseline belongs to a different catalog or cluster"))
             | otherwise -> do
@@ -147,14 +176,26 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
                         Nothing -> pure (Left acquisitionTimeout)
                         Just (Left problem) -> pure (Left problem)
                         Just (Right clone) -> do
-                          prepared <- try @SomeException (restore (withinDeadline expiry (prepareClone timingRef session clone composed)))
+                          inHook <- newIORef False
+                          prepared <- try @SomeException (restore (withinDeadline expiry (prepareClone inHook timingRef session clone composed)))
                           case prepared of
-                            Left exception -> do
-                              _ <- try @SomeException (release configuration session target options identity clone)
-                              throwIO exception
+                            Left exception -> case fromException @PreparationFailure exception of
+                              Just detail -> do
+                                let problem = preparationError clone detail
+                                cleaned <-
+                                  try @SomeException $
+                                    if releaseSafe detail
+                                      then release configuration session target options identity clone
+                                      else markStateWithDiagnostic configuration session clone "Preserved" (Just "clone preparation process cleanup uncertain; establish process stoppage before release")
+                                pure (mergeCleanup (Left problem) cleaned)
+                              Nothing -> do
+                                _ <- try @SomeException (release configuration session target options identity clone)
+                                throwIO exception
                             Right Nothing -> do
+                              hookActive <- readIORef inHook
+                              let problem = if hookActive then preparationError clone (PreparationFailure PreparationTimeout True) else acquisitionTimeout
                               cleaned <- try @SomeException (release configuration session target options identity clone)
-                              pure (mergeCleanup (Left acquisitionTimeout) cleaned)
+                              pure (mergeCleanup (Left problem) cleaned)
                             Right (Just (Left problem)) -> do
                               cleaned <- try @SomeException (release configuration session target options identity clone)
                               pure (mergeCleanup (Left problem) cleaned)
@@ -234,7 +275,7 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
             Right True -> watchOwnership session stop
             _ -> pure (Just (failure "lease ownership connection was lost during callback"))
 
-    prepareClone timingRef session clone composed = do
+    prepareClone inHook timingRef session clone composed = do
       let OwnedDatabase {name = database} = owned clone
       prepared <- runExclusive session $ \connection sessionOptions -> do
         deadline <- deadlineAfter (operationDeadlineMs sessionOptions)
@@ -248,7 +289,9 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
             preparedHook <- case cloneHook baseline of
               Nothing -> pure (Right ())
               Just hook -> do
+                writeIORef inHook True
                 result <- hook setupTarget
+                writeIORef inHook False
                 pure $ case result of Left _ -> Left (failure "clone preparation hook failed"); Right () -> Right ()
             case preparedHook of
               Left problem -> pure (Left problem)
@@ -314,7 +357,7 @@ allocate timingRef configuration baseline session maintenance options identity =
                   pure (Keep created)
               )
         Right _ -> pure (Left (failure "baseline lost positive ownership"))
-        Left CatalogError {cause, sqlState} -> pure (Left (LeaseError cause sqlState Nothing))
+        Left CatalogError {cause, sqlState} -> pure (Left (LeaseError cause sqlState Nothing Nothing))
 
 createClone :: HinagataConfig -> BaselineRef -> PQ.Connection -> SessionOptions -> CatalogIdentity -> IO (Either LeaseError Clone)
 createClone configuration baseline connection sessionOptions identity = do
@@ -400,7 +443,7 @@ markStateWithDiagnostic configuration session clone state diagnostic =
                 rolled <- query connection cleanupDeadline Rollback "ROLLBACK"
                 pure $ case rolled of
                   Right () -> Keep (Left problem)
-                  Left _ -> case problem of LeaseError primaryCause primaryState _ -> Retire (Left (LeaseError primaryCause primaryState (Just "catalog state rollback failed")))
+                  Left _ -> Retire (Left (withCleanupDiagnostic problem "catalog state rollback failed"))
           begun <- query connection deadline Begin "BEGIN"
           case begun of
             Left problem -> pure (Retire (Left (nativeFailure problem)))
@@ -425,7 +468,7 @@ release :: HinagataConfig -> Session -> ConnectionTarget -> SessionOptions -> Ca
 release configuration session maintenance options identity clone = do
   evidence <- verifyOwnedDatabase maintenance options identity (owned clone)
   case evidence of
-    Left CatalogError {cause, sqlState} -> pure (Left (LeaseError cause sqlState Nothing))
+    Left CatalogError {cause, sqlState} -> pure (Left (LeaseError cause sqlState Nothing Nothing))
     Right OwnershipMismatch -> pure (Left (failure "clone ownership changed; release refused"))
     Right OwnershipMissing -> markState configuration session clone "Released"
     Right OwnershipMatches -> do
@@ -448,16 +491,16 @@ release configuration session maintenance options identity clone = do
               marked <- markStateWithDiagnostic configuration session clone "CleanupFailed" (Just dropCause)
               pure $ case marked of
                 Right () -> Left problem
-                Left LeaseError {cause = recordCause} -> Left (LeaseError dropCause dropState (Just ("could not record cleanup failure: " <> recordCause)))
+                Left LeaseError {cause = recordCause} -> Left (LeaseError dropCause dropState (Just ("could not record cleanup failure: " <> recordCause)) Nothing)
             Right () -> markState configuration session clone "Released"
 
 mergeCleanup :: Either LeaseError a -> Either SomeException (Either LeaseError ()) -> Either LeaseError a
 mergeCleanup result cleanup = case cleanup of
   Left _ -> case result of
-    Left (LeaseError primaryCause primaryState _) -> Left (LeaseError primaryCause primaryState (Just "clone release raised an exception"))
+    Left problem -> Left (withCleanupDiagnostic problem "clone release raised an exception")
     Right _ -> Left (failure "clone release raised an exception")
   Right (Left problem@LeaseError {cause = cleanupCause}) -> case result of
-    Left (LeaseError primaryCause primaryState _) -> Left (LeaseError primaryCause primaryState (Just cleanupCause))
+    Left primary -> Left (withCleanupDiagnostic primary cleanupCause)
     Right _ -> Left problem
   Right (Right ()) -> result
 
@@ -465,13 +508,13 @@ flatten :: Either SessionError (Either LeaseError a) -> Either LeaseError a
 flatten = either (Left . sessionFailure) id
 
 failure :: Text -> LeaseError
-failure cause = LeaseError cause Nothing Nothing
+failure cause = LeaseError cause Nothing Nothing Nothing
 
 nativeFailure :: NativeError -> LeaseError
-nativeFailure NativeError {reason, sqlState} = LeaseError reason sqlState Nothing
+nativeFailure NativeError {reason, sqlState} = LeaseError reason sqlState Nothing Nothing
 
 accessFailure :: Access.AccessError -> LeaseError
-accessFailure Access.AccessError {cause, sqlState} = LeaseError cause sqlState Nothing
+accessFailure Access.AccessError {cause, sqlState} = LeaseError cause sqlState Nothing Nothing
 
 sessionFailure :: SessionError -> LeaseError
 sessionFailure problem = failure (Text.pack (show problem))
@@ -511,3 +554,22 @@ withinDeadline expiry action = do
   if now >= expiry
     then pure Nothing
     else timeout (max 1 (fromIntegral (min (fromIntegral (maxBound :: Int)) ((expiry - now) `div` 1000)))) action
+
+preparationError :: Clone -> PreparationFailure -> LeaseError
+preparationError clone detail =
+  LeaseError
+    (reason (failureKind detail))
+    Nothing
+    (if releaseSafe detail then Nothing else Just "child process cleanup uncertain; clone preserved")
+    (Just (PreparationContext detail (cloneRunId clone) (cloneLeaseId clone)))
+  where
+    reason = \case
+      PreparationSpawnFailed -> "clone preparation command could not be started"
+      PreparationIdentityUnavailable -> "clone preparation process identity unavailable"
+      PreparationExit status -> "clone preparation command exited with status " <> Text.pack (show status)
+      PreparationTimeout -> "clone preparation deadline expired"
+      PreparationCancelled signal -> "clone preparation cancelled by signal " <> Text.pack (show signal)
+      PreparationCleanupFailed -> "clone preparation process cleanup could not be proven"
+
+withCleanupDiagnostic :: LeaseError -> Text -> LeaseError
+withCleanupDiagnostic LeaseError {cause, sqlState, preparationContext} diagnostic = LeaseError cause sqlState (Just diagnostic) preparationContext

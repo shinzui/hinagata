@@ -3,16 +3,24 @@ module Hinagata.Cli.Process
   ( ChildSpec (..),
     ChildReport (..),
     ChildFailure (..),
+    CancellationScope,
+    CommandCancelled (..),
+    ChildCleanupException (..),
+    withCancellationScope,
+    cancellationSignal,
+    checkCancellation,
+    waitCancellation,
     runChild,
+    runChildWithCleanupCheck,
     parseOverlay,
   )
 where
 
 import Control.Applicative ((<|>))
-import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
-import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
-import Control.Exception (IOException, bracket, finally, mask, onException, try)
-import Control.Monad (unless, void, when)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, readMVar, tryPutMVar, tryReadMVar)
+import Control.Exception (Exception (..), IOException, SomeException, asyncExceptionFromException, asyncExceptionToException, bracket, finally, mask, throwIO, try)
+import Control.Monad (unless, void)
 import Data.List (isPrefixOf)
 import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
@@ -20,12 +28,12 @@ import Hinagata.Connection
 import Hinagata.Types (databaseNameText, portNumber)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.Environment (getEnvironment)
-import System.Exit (ExitCode)
+import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (IOMode (ReadMode), hClose, hFlush, hIsClosed, stderr, withFile)
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files (ownerReadMode, ownerWriteMode, setFileMode, unionFileModes)
-import System.Posix.Signals (Handler (Catch), installHandler, nullSignal, sigINT, sigKILL, sigTERM, signalProcessGroup)
+import System.Posix.Signals (Handler (Catch), Signal, installHandler, nullSignal, sigINT, sigKILL, sigTERM, signalProcessGroup)
 import System.Posix.Temp (mkstemp)
 import System.Posix.Types qualified
 import System.Process (CreateProcess (..), ProcessHandle, StdStream (Inherit, UseHandle), createProcess, getPid, getProcessExitCode, proc, waitForProcess)
@@ -73,9 +81,73 @@ parseOverlay = traverse parseOne
     asciiLetter character = ('A' <= character && character <= 'Z') || ('a' <= character && character <= 'z')
     asciiDigit character = '0' <= character && character <= '9'
 
-runChild :: ChildSpec -> IO (Either ChildFailure ChildReport)
-runChild specification@ChildSpec {target} =
-  withPasswordFile target $ \passwordPath -> do
+-- | One command owns process-wide handlers. Registration and first-signal
+-- observation share a lock, so spawning cannot miss concurrent cancellation.
+data ScopeState = ScopeState !(Maybe Int) !Int ![(Int, MVar Int)]
+
+newtype CancellationScope = CancellationScope (MVar ScopeState)
+
+data CommandCancelled = CommandCancelled !Int
+  deriving stock (Show)
+
+instance Exception CommandCancelled where
+  toException = asyncExceptionToException
+  fromException = asyncExceptionFromException
+
+data ChildCleanupException = ChildCleanupException
+  deriving stock (Show)
+  deriving anyclass (Exception)
+
+withCancellationScope :: (CancellationScope -> IO a) -> IO a
+withCancellationScope callback = mask $ \restore -> do
+  scope@(CancellationScope state) <- CancellationScope <$> newMVar (ScopeState Nothing 0 [])
+  let notify number = modifyMVar_ state $ \(ScopeState previous next children) -> do
+        let selected = previous <|> Just number
+        mapM_ (\(_, marker) -> void (tryPutMVar marker (maybe number id selected))) children
+        pure (ScopeState selected next children)
+      settle = do
+        ScopeState _ _ children <- readMVar state
+        unless (null children) (threadDelay 10000 >> settle)
+  previousInt <- installHandler sigINT (Catch (notify 2)) Nothing
+  previousTerm <- installHandler sigTERM (Catch (notify 15)) Nothing
+  restore (callback scope)
+    `finally` ( settle `finally` do
+                  _ <- installHandler sigINT previousInt Nothing
+                  _ <- installHandler sigTERM previousTerm Nothing
+                  pure ()
+              )
+
+cancellationSignal :: CancellationScope -> IO (Maybe Int)
+cancellationSignal (CancellationScope state) = do
+  ScopeState signal _ _ <- readMVar state
+  pure signal
+
+checkCancellation :: CancellationScope -> IO ()
+checkCancellation scope = cancellationSignal scope >>= maybe (pure ()) (throwIO . CommandCancelled)
+
+waitCancellation :: CancellationScope -> IO Int
+waitCancellation scope = cancellationSignal scope >>= maybe (threadDelay 10000 >> waitCancellation scope) pure
+
+withRegistration :: CancellationScope -> (MVar Int -> IO a) -> IO a
+withRegistration (CancellationScope state) callback = bracket register unregister (callback . snd)
+  where
+    register = do
+      marker <- newEmptyMVar
+      modifyMVar state $ \(ScopeState signal next children) -> do
+        mapM_ (void . tryPutMVar marker) signal
+        pure (ScopeState signal (next + 1) ((next, marker) : children), (next, marker))
+    unregister (key, _) = modifyMVar_ state $ \(ScopeState signal next children) ->
+      pure (ScopeState signal next (filter ((/= key) . fst) children))
+
+runChild :: CancellationScope -> ChildSpec -> IO (Either ChildFailure ChildReport)
+runChild = runChildWithCleanupCheck (pure True)
+
+-- | Internal test seam: a negative proof forces retention after real cleanup.
+-- There is deliberately no environment or configuration switch for this.
+runChildWithCleanupCheck :: IO Bool -> CancellationScope -> ChildSpec -> IO (Either ChildFailure ChildReport)
+runChildWithCleanupCheck cleanupCheck scope specification@ChildSpec {target} = do
+  checkCancellation scope
+  withRegistration scope $ \marker -> withPasswordFile target $ \passwordPath -> do
     inherited <- getEnvironment
     let forwarded = filter (\(name, _) -> not ("PG" `isPrefixOf` name || "HINAGATA_" `isPrefixOf` name)) inherited
         connectionEnvironment =
@@ -91,6 +163,7 @@ runChild specification@ChildSpec {target} =
         overlayNames = map fst (environment specification)
         processEnvironment = environment specification <> connectionEnvironment <> identityEnvironment <> passwordEnvironment <> filter (\(name, _) -> name `notElem` overlayNames) forwarded
     withFile "/dev/null" ReadMode $ \nullInput -> mask $ \restore -> do
+      checkCancellation scope
       let child =
             (proc (executable specification) (arguments specification))
               { cwd = workingDirectory specification,
@@ -100,82 +173,65 @@ runChild specification@ChildSpec {target} =
                 create_group = True,
                 delegate_ctlc = False
               }
-      signalSeen <- newSignalMarker
-      processPid <- newMVar Nothing
-      forwardedSignal <- newMVar False
-      escalation <- newMVar (Nothing :: Maybe ThreadId)
-      finished <- newMVar False
-      let launch signal = do
-            maybePid <- readMVar processPid
-            case maybePid of
-              Nothing -> pure ()
-              Just pid -> do
-                firstForward <- modifyMVar forwardedSignal (\already -> pure (True, not already))
-                when firstForward $ do
-                  _ <- try @IOException (signalProcessGroup signal pid)
-                  timer <- forkIO $ do
-                    threadDelay 5000000
-                    done <- readMVar finished
-                    unless done $ do
-                      alive <- groupAlive pid
-                      when alive (void (try @IOException (signalProcessGroup sigKILL pid)))
-                  modifyMVar_ escalation (const (pure (Just timer)))
-          forward signal number = do
-            _ <- writeSignalMarker signalSeen number
-            launch signal
-      previousInt <- installHandler sigINT (Catch (forward sigINT 2)) Nothing
-      previousTerm <- installHandler sigTERM (Catch (forward sigTERM 15)) Nothing
-      let restoreHandlers = do
-            modifyMVar_ finished (const (pure True))
-            _ <- installHandler sigINT previousInt Nothing
-            _ <- installHandler sigTERM previousTerm Nothing
-            pending <- readMVar escalation
-            maybe (pure ()) killThread pending
-            pure ()
-          supervise = do
-            spawned <- try @IOException (createProcess child)
-            case spawned of
-              Left _ -> pure (Left ChildSpawnFailed)
-              Right (_, _, _, handle) -> do
-                maybePid <- getPid handle
-                case maybePid of
-                  Nothing -> do
-                    _ <- try @IOException (waitForProcess handle)
-                    pure (Left ChildIdentityUnavailable)
-                  Just pid -> do
-                    modifyMVar_ processPid (const (pure (Just pid)))
-                    pending <- readSignalMarker signalSeen
-                    maybe (pure ()) (\number -> launch (if number == 2 then sigINT else sigTERM)) pending
-                    let waitForChild = do
-                          waited <- case deadlineMs specification of
-                            Nothing -> Just <$> restore (waitExit handle)
-                            Just milliseconds -> restore (timeout (milliseconds * 1000) (waitExit handle))
-                          stopped <- stopGroup pid
-                          when (waited == Nothing) (void (timeout 2000000 (try @IOException (waitForProcess handle))))
-                          cancellation <- readSignalMarker signalSeen
-                          pure (Right (ChildReport waited (waited == Nothing) cancellation stopped))
-                    waitForChild `onException` (void (stopGroup pid) >> void (timeout 2000000 (try @IOException (waitForProcess handle))))
-      supervise `finally` restoreHandlers
+      spawned <- try @IOException (createProcess child)
+      case spawned of
+        Left _ -> pure (Left ChildSpawnFailed)
+        Right (_, _, _, handle) -> do
+          maybePid <- getPid handle
+          case maybePid of
+            Nothing -> pure (Left ChildIdentityUnavailable)
+            Just pid -> do
+              let stop = do
+                    signal <- cancellationSignal scope
+                    stopped <- stopGroup (maybe sigTERM (\number -> if number == 2 then sigINT else sigTERM) signal) pid handle
+                    _ <- timeout 2000000 (try @IOException (waitForProcess handle))
+                    proven <- cleanupCheck
+                    pure (if proven then stopped else Just "child process group could not be proven stopped")
+                  wait = do
+                    signal <- tryReadMVar marker
+                    case signal of
+                      Just _ -> pure Nothing
+                      Nothing -> do
+                        completed <- getProcessExitCode handle
+                        case completed of
+                          Just status -> pure (Just status)
+                          Nothing -> threadDelay 10000 >> wait
+                  supervise = do
+                    waited <- case deadlineMs specification of
+                      Nothing -> Just <$> restore wait
+                      Just milliseconds -> restore (timeout (milliseconds * 1000) wait)
+                    stopped <- stop
+                    signal <- cancellationSignal scope
+                    pure (Right (ChildReport (waited >>= id) (waited == Nothing) signal stopped))
+              result <- try @SomeException supervise
+              case result of
+                Right report -> pure report
+                Left exception -> do
+                  stopped <- stop
+                  case stopped of
+                    Just _ -> throwIO ChildCleanupException
+                    Nothing -> throwIO exception
 
-stopGroup :: System.Posix.Types.ProcessID -> IO (Maybe Text.Text)
-stopGroup groupId = do
+-- | Bounded escalation also reaps the leader while checking the group.
+stopGroup :: System.Posix.Signals.Signal -> System.Posix.Types.ProcessID -> ProcessHandle -> IO (Maybe Text.Text)
+stopGroup signal groupId handle = do
   alive <- groupAlive groupId
   if not alive
     then pure Nothing
     else do
-      _ <- try @IOException (signalProcessGroup sigTERM groupId)
-      stopped <- waitGone groupId 40
+      _ <- try @IOException (signalProcessGroup signal groupId)
+      stopped <- waitGone 40
       if stopped
         then pure Nothing
         else do
           _ <- try @IOException (signalProcessGroup sigKILL groupId)
-          killed <- waitGone groupId 40
+          killed <- waitGone 40
           pure (if killed then Nothing else Just "child process group could not be proven stopped")
-
-waitGone :: System.Posix.Types.ProcessID -> Int -> IO Bool
-waitGone groupId attempts = do
-  alive <- groupAlive groupId
-  if not alive then pure True else if attempts <= 0 then pure False else threadDelay 50000 >> waitGone groupId (attempts - 1)
+  where
+    waitGone attempts = do
+      _ <- getProcessExitCode handle
+      alive <- groupAlive groupId
+      if not alive then pure True else if attempts <= (0 :: Int) then pure False else threadDelay 50000 >> waitGone (attempts - 1)
 
 groupAlive :: System.Posix.Types.ProcessID -> IO Bool
 groupAlive groupId = do
@@ -183,13 +239,6 @@ groupAlive groupId = do
   pure $ case result of
     Right () -> True
     Left problem -> not (isDoesNotExistError problem)
-
-waitExit :: ProcessHandle -> IO ExitCode
-waitExit handle = do
-  completed <- getProcessExitCode handle
-  case completed of
-    Just status -> pure status
-    Nothing -> threadDelay 50000 >> waitExit handle
 
 withPasswordFile :: ConnectionTarget -> (Maybe FilePath -> IO a) -> IO a
 withPasswordFile target callback = case connectionPassword target of
@@ -213,14 +262,3 @@ passwordLine target password =
   Text.intercalate ":" (map escape [hostText (connectionHost target), Text.pack (show (portNumber (connectionPort target))), databaseNameText (connectionDatabase target), connectionUser target, secretText password])
   where
     escape = Text.concatMap (\character -> if character == ':' || character == '\\' then Text.pack ['\\', character] else Text.singleton character)
-
-newtype SignalMarker = SignalMarker (MVar (Maybe Int))
-
-newSignalMarker :: IO SignalMarker
-newSignalMarker = SignalMarker <$> newMVar Nothing
-
-writeSignalMarker :: SignalMarker -> Int -> IO Bool
-writeSignalMarker (SignalMarker variable) number = modifyMVar variable (\previous -> pure (previous <|> Just number, previous == Nothing))
-
-readSignalMarker :: SignalMarker -> IO (Maybe Int)
-readSignalMarker (SignalMarker variable) = readMVar variable

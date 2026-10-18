@@ -103,4 +103,53 @@ assert failure["formatVersion"] == 1
 assert failure["error"]["code"] == "config_resolution_invalid"
 PY
 
+python3 - "$binary" "$workspace" <<'PYTEST'
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+binary, workspace = sys.argv[1], pathlib.Path(sys.argv[2])
+base = [binary, "--config", str(workspace / "base.yaml")]
+schema = json.loads((workspace / "schema.json").read_text())
+settings = {entry["key"]: entry for entry in schema["settings"]}
+for suffix in ("executable", "argv", "cwd", "environment", "deadline_ms"):
+    assert "clone.preparation." + suffix in settings
+assert "clone.preparation.revision" not in settings
+for suffix in ("argv", "environment"):
+    assert settings["clone.preparation." + suffix]["sensitivity"] == "secret"
+
+hook = workspace / "hook.yaml"
+hook.write_text('clone:\n  preparation:\n    executable: /nonexistent/seed\n    argv: ["secret-argv-sentinel", "space argument", "$(touch should-never-exist)"]\n    environment: ["TOKEN=secret-env-sentinel"]\n    cwd: /tmp\n    deadline_ms: "2500"\n')
+for mode in ("--check-config", "--explain-config-json", "--explain-config"):
+    result = subprocess.run(base + ["--config", str(hook), mode], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "secret-argv-sentinel" not in result.stdout + result.stderr
+    assert "secret-env-sentinel" not in result.stdout + result.stderr
+# Invalid environment values would fail without the repeated scalar overrides.
+environment = dict(os.environ, HINAGATA_CLONE_PREPARATION_EXECUTABLE="", HINAGATA_CLONE_PREPARATION_CWD="relative", HINAGATA_CLONE_PREPARATION_DEADLINE_MS="0")
+result = subprocess.run(base + ["--config", str(hook), "--set", "clone.preparation.executable=/nonexistent/seed", "--set", "clone.preparation.cwd=/tmp", "--set", "clone.preparation.deadline_ms=1", "--set", "clone.preparation.deadline_ms=5000", "--check-config"], env=environment, capture_output=True, text=True)
+assert result.returncode == 0, result.stderr
+for overlay in (
+    'argv: ["secret-argv-sentinel"]',
+    'environment: ["TOKEN=secret-env-sentinel"]',
+    'cwd: /tmp',
+    'executable: ""',
+    'executable: /bin/true\n    cwd: relative',
+    'executable: /bin/true\n    argv: ["bad\\0argument"]',
+    'executable: /bin/true\n    environment: ["PGPASSWORD=secret-env-sentinel"]',
+    'executable: /bin/true\n    environment: ["HINAGATA_TOKEN=secret-env-sentinel"]',
+    'executable: /bin/true\n    environment: ["BAD-NAME=secret-env-sentinel"]',
+    'deadline_ms: "0"',
+):
+    hook.write_text('clone:\n  preparation:\n    ' + overlay + '\n')
+    result = subprocess.run(base + ["--config", str(hook), "--check-config"], capture_output=True, text=True)
+    assert result.returncode == 4, (overlay, result)
+    assert "secret-env-sentinel" not in result.stdout + result.stderr
+    assert "secret-argv-sentinel" not in result.stdout + result.stderr
+hook.write_text('clone:\n  preparation:\n    deadline_ms: "1"\n')
+assert subprocess.run(base + ["--config", str(hook), "--check-config"], capture_output=True).returncode == 0
+PYTEST
+
 echo "CLI offline smoke test passed"

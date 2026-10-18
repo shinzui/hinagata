@@ -22,6 +22,11 @@ provenance:
       at: 2026-10-18T18:52:33Z
       mode: "update"
       note: "Resolve concurrent cancellation review with command-scoped signal ownership, worker and child shutdown coordination, aggregate exit semantics, race coverage, and ADR 1 context."
+    - model: "gpt-6.1-sol"
+      harness: "codex-cli"
+      at: 2026-10-18T18:58:49Z
+      mode: "implement"
+      note: "Implement CLI clone preparation, supervised cancellation, and acceptance evidence"
 ---
 
 # Expose clone preparation hooks through the CLI
@@ -40,12 +45,12 @@ The hook must execute once per clone, including clones of a reused baseline. Sel
 ## Progress
 
 
-- [ ] Milestone 1: Optional clone-preparation configuration resolves through existing CLI sources, rejects invalid settings, redacts secrets, and preserves configurations that omit it (AC-1).
+- [x] Milestone 1 (2026-10-18): Optional clone-preparation configuration resolves through YAML, scalar environment bindings, and repeated overrides; offline semantic checks reject malformed settings and redact argv/environment. `nix develop -c just test-cli` passed, including original configurations and literal shell-syntax arguments (AC-1).
 - [ ] Milestone 2: Native CLI acquisitions execute the selected command once before scenario loading and handoff, reuse unchanged baselines, and handle failure, command-wide cancellation across concurrent validations, timeout, and uncertain cleanup safely (AC-2, AC-3, AC-4).
 - [ ] Milestone 3: The Keiro/workbench example seeds event-backed state through public command/store APIs and observes it through HTTP in independent clones (AC-5).
 - [ ] Milestone 4: User documentation, ADRs, package archives, and final regression evidence describe and verify the delivered behavior; IR-1 is completed only after all five criteria pass.
 
-Implementation has not started. The request is accepted and linked to this plan; acceptance criteria remain unverified.
+Milestone 2 is in progress. The native CLI gate passes ordering, two independent clones, callback replacement/removal on reused baselines, failure/spawn/deadline diagnostics, real blocked-drop recovery, and six concurrent INT/TERM cases with pending selections and both completion orders. Deterministic uncertain-cleanup/registration tests and the HTTP example remain.
 
 
 ## Surprises & Discoveries

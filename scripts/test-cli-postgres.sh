@@ -314,4 +314,6 @@ result = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert result["candidate"]["state"] == "Released"
 PY
 
+python3 scripts/test-clone-preparation.py "$binary" "$workspace/hinagata.yaml" "$workspace"
+
 echo "CLI direct-load integration test passed"

@@ -1,6 +1,7 @@
 module Hinagata.Cli.Output
   ( CliError (..),
     bundleError,
+    leaseError,
     loadError,
     cleanupError,
     emitError,
@@ -30,7 +31,7 @@ import Hinagata.Fixture.Types (fixtureNameText)
 import Hinagata.Postgres.Baseline (FingerprintComparison (..), PreparationKind (..), PreparationReport (..), fingerprintComponents)
 import Hinagata.Postgres.Cleanup (CleanupCandidate (..), CleanupDisposition (..), CleanupError (..), CleanupResult (..))
 import Hinagata.Postgres.Error (LoadError (..))
-import Hinagata.Postgres.Lease (LeaseError (..), LeaseInfo (..), LeaseOutcome (..), LeaseTimings (..))
+import Hinagata.Postgres.Lease (LeaseError (..), LeaseInfo (..), LeaseOutcome (..), LeaseTimings (..), PreparationContext (..), PreparationFailure (..), PreparationFailureKind (..))
 import Hinagata.Postgres.Load (LoadReport (..))
 import Hinagata.Types (DatabaseName, databaseNameText, portNumber)
 import System.Exit (ExitCode (..))
@@ -44,7 +45,9 @@ data CliError = CliError
     stepIndex :: !(Maybe Int),
     sqlState :: !(Maybe Text.Text),
     target :: !(Maybe Text.Text),
-    exitCode :: !Int
+    exitCode :: !Int,
+    errorRunId :: !(Maybe Text.Text),
+    errorLeaseId :: !(Maybe Text.Text)
   }
   deriving stock (Eq, Show)
 
@@ -64,14 +67,32 @@ bundleError problem = case problem of
   SqlStepTooLarge path -> failure "fixture_sql_too_large" (Text.pack path) Nothing
   InvalidSql path _ -> failure "fixture_sql_invalid" (Text.pack path) Nothing
   where
-    failure code message fixture = CliError "fixture-plan" code message fixture Nothing Nothing Nothing 1
+    failure code message fixture = CliError "fixture-plan" code message fixture Nothing Nothing Nothing 1 Nothing Nothing
 
 loadError :: LoadError -> CliError
 loadError LoadError {phase, targetIdentity, fixture, stepIndex, cause, sqlState} =
-  CliError (Text.pack (show phase)) "load_failed" cause (fixtureNameText <$> fixture) stepIndex sqlState targetIdentity 1
+  CliError (Text.pack (show phase)) "load_failed" cause (fixtureNameText <$> fixture) stepIndex sqlState targetIdentity 1 Nothing Nothing
 
 cleanupError :: CleanupError -> CliError
-cleanupError CleanupError {cause, sqlState} = CliError "cleanup" "cleanup_failed" cause Nothing Nothing sqlState Nothing 1
+cleanupError CleanupError {cause, sqlState} = CliError "cleanup" "cleanup_failed" cause Nothing Nothing sqlState Nothing 1 Nothing Nothing
+
+-- | Common acquisition mapping keeps per-lease failures independent of the
+-- command's shared cancellation status.
+leaseError :: Text.Text -> Maybe Text.Text -> LeaseError -> CliError
+leaseError fallback fixture LeaseError {cause, sqlState, cleanupFailure, preparationContext} =
+  let message = cause <> maybe "" ("; cleanup: " <>) cleanupFailure
+   in case preparationContext of
+        Nothing -> CliError fallback "lease_failed" message fixture Nothing sqlState Nothing 1 Nothing Nothing
+        Just PreparationContext {preparationFailure = PreparationFailure {failureKind, releaseSafe}, preparationRunId, preparationLeaseId} ->
+          let code =
+                if not releaseSafe
+                  then "clone_preparation_cleanup_failed"
+                  else case failureKind of
+                    PreparationTimeout -> "clone_preparation_timeout"
+                    PreparationCancelled _ -> "clone_preparation_cancelled"
+                    _ -> "clone_preparation_failed"
+              status = case failureKind of PreparationCancelled signal -> 128 + signal; _ -> 1
+           in CliError "clone-preparation" code message fixture Nothing sqlState Nothing status (Just preparationRunId) (Just preparationLeaseId)
 
 emitCandidate :: Bool -> Maybe CleanupCandidate -> IO ()
 emitCandidate jsonSelected found =
@@ -154,8 +175,8 @@ emitValidation jsonSelected results =
       Json.object ["queueWait" .= queueWaitMs, "catalog" .= catalogMs, "generationLock" .= generationLockMs, "clone" .= cloneMs, "scenarioLoad" .= scenarioLoadMs, "completion" .= completionMs]
 
 validationErrorValue :: CliError -> Json.Value
-validationErrorValue CliError {phase, code, message, fixture, stepIndex, sqlState, target} =
-  Json.object ["phase" .= phase, "code" .= code, "message" .= message, "fixture" .= fixture, "stepIndex" .= stepIndex, "sqlState" .= sqlState, "target" .= target]
+validationErrorValue CliError {phase, code, message, fixture, stepIndex, sqlState, target, errorRunId, errorLeaseId} =
+  Json.object ["phase" .= phase, "code" .= code, "message" .= message, "fixture" .= fixture, "stepIndex" .= stepIndex, "sqlState" .= sqlState, "target" .= target, "runId" .= errorRunId, "leaseId" .= errorLeaseId]
 
 emitPreparation :: Bool -> PreparationReport -> IO ()
 emitPreparation jsonSelected PreparationReport {kind, fingerprint, elapsedMs, comparison} =
@@ -207,29 +228,10 @@ emitWith jsonSelected outcome@LeaseOutcome {callbackValue, leaseInfo = LeaseInfo
     exitNumber (ExitFailure status) = if status < 0 then 128 - status else status
 
 emitError :: Bool -> CliError -> IO ()
-emitError jsonSelected CliError {phase, code, message, fixture, stepIndex, sqlState, target} = do
+emitError jsonSelected failure@CliError {phase, code, message} = do
   TextIO.hPutStrLn IO.stderr (phase <> ": " <> code <> ": " <> message)
   if jsonSelected
-    then
-      Lazy.putStr
-        ( Json.encode
-            ( Json.object
-                [ "formatVersion" .= (1 :: Int),
-                  "ok" .= False,
-                  "error"
-                    .= Json.object
-                      [ "phase" .= phase,
-                        "code" .= code,
-                        "message" .= message,
-                        "fixture" .= fixture,
-                        "stepIndex" .= stepIndex,
-                        "sqlState" .= sqlState,
-                        "target" .= target
-                      ]
-                ]
-            )
-            <> "\n"
-        )
+    then emitValue (Json.object ["formatVersion" .= (1 :: Int), "ok" .= False, "error" .= validationErrorValue failure])
     else pure ()
 
 emitLoad :: Bool -> DatabaseName -> LoadReport -> IO ()

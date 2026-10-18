@@ -3,7 +3,8 @@
 module Main (main) where
 
 import Control.Concurrent.Async qualified as Async
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, catch, try)
+import Control.Exception qualified
 import Data.List (sort)
 import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
@@ -12,7 +13,7 @@ import Hinagata.Cli.Command (compileScenario, prepareBaseline)
 import Hinagata.Cli.Config
 import Hinagata.Cli.Options
 import Hinagata.Cli.Output
-import Hinagata.Cli.Process (ChildFailure (..), ChildReport (..), ChildSpec (..), runChild)
+import Hinagata.Cli.Process (CancellationScope, ChildCleanupException (..), ChildFailure (..), ChildReport (..), ChildSpec (..), CommandCancelled (..), cancellationSignal, checkCancellation, runChild, waitCancellation, withCancellationScope)
 import Hinagata.Config (AccessConfig (..), EndpointConfig (..), HinagataConfig (..))
 import Hinagata.Connection (mkConnectionTarget)
 import Hinagata.Fixture.Bundle
@@ -52,13 +53,18 @@ main = do
             TextIO.hPutStr stderr (Settei.renderWarningsText (Settei.warnings result))
             case SetteiOptions.resolutionDiagnostic (diagnosticMode options) result of
               Just output -> TextIO.putStr output
-              Nothing -> dispatch configuration settings options
+              Nothing -> withCancellationScope $ \scope -> do
+                completed <- try @ExitCode (dispatch scope configuration settings options `catch` \(CommandCancelled signal) -> abort (jsonOutput options) (cancelledError signal))
+                signal <- cancellationSignal scope
+                case signal of
+                  Just number -> exitWith (ExitFailure (128 + number))
+                  Nothing -> either exitWith pure completed
 
-dispatch :: HinagataConfig -> CliSettings -> CliOptions -> IO ()
-dispatch configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLimit, chunkSize} settings options = case command options of
+dispatch :: CancellationScope -> HinagataConfig -> CliSettings -> CliOptions -> IO ()
+dispatch scope configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLimit, chunkSize} settings options = case command options of
   Just (FixturePlan roots jsonSelected) ->
     case traverse mkFixtureName roots of
-      Left problem -> abort jsonSelected (CliError "options" "fixture_name_invalid" problem Nothing Nothing Nothing Nothing 2)
+      Left problem -> abort jsonSelected (CliError "options" "fixture_name_invalid" problem Nothing Nothing Nothing Nothing 2 Nothing Nothing)
       Right names -> do
         let bundle = BundleConfig fixtureRoot bundleRoot sqlSizeLimit chunkSize
         compiled <- compileFixtures bundle names
@@ -67,8 +73,8 @@ dispatch configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLimit, ch
           Right plan -> emitPlan jsonSelected plan
   Just (FixtureLoad roots databaseText jsonSelected) ->
     case (traverse mkFixtureName roots, mkDatabaseName databaseText) of
-      (Left problem, _) -> abort jsonSelected (CliError "options" "fixture_name_invalid" problem Nothing Nothing Nothing Nothing 2)
-      (_, Left problem) -> abort jsonSelected (CliError "options" "target_database_invalid" problem Nothing Nothing Nothing Nothing 2)
+      (Left problem, _) -> abort jsonSelected (CliError "options" "fixture_name_invalid" problem Nothing Nothing Nothing Nothing 2 Nothing Nothing)
+      (_, Left problem) -> abort jsonSelected (CliError "options" "target_database_invalid" problem Nothing Nothing Nothing Nothing 2 Nothing Nothing)
       (Right names, Right database) -> do
         let bundle = BundleConfig fixtureRoot bundleRoot sqlSizeLimit chunkSize
         compiled <- compileFixtures bundle names
@@ -79,66 +85,66 @@ dispatch configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLimit, ch
                 AccessConfig {user = roleUser, password = rolePassword} = setup configuration
                 sessionOptions = defaultSessionOptions {operationDeadlineMs = positiveValue (setupDeadlineMs configuration), statementDeadlineMs = positiveValue (setupDeadlineMs configuration)}
             case mkConnectionTarget serverHost serverPort roleUser database rolePassword of
-              Left problem -> abort jsonSelected (CliError "options" "target_invalid" problem Nothing Nothing Nothing Nothing 2)
+              Left problem -> abort jsonSelected (CliError "options" "target_invalid" problem Nothing Nothing Nothing Nothing 2 Nothing Nothing)
               Right target -> do
                 loaded <- loadInto target sessionOptions plan
                 case loaded of
                   Left problem -> abort jsonSelected (loadError problem)
                   Right report -> emitLoad jsonSelected database report
   Just (FixtureValidate roots allSelected jsonSelected)
-    | allSelected && not (null roots) -> abort jsonSelected (CliError "options" "validate_selection_invalid" "choose names or --all" Nothing Nothing Nothing Nothing 2)
-    | not allSelected && null roots -> abort jsonSelected (CliError "options" "validate_selection_required" "choose scenario names or --all" Nothing Nothing Nothing Nothing 2)
+    | allSelected && not (null roots) -> abort jsonSelected (CliError "options" "validate_selection_invalid" "choose names or --all" Nothing Nothing Nothing Nothing 2 Nothing Nothing)
+    | not allSelected && null roots -> abort jsonSelected (CliError "options" "validate_selection_required" "choose scenario names or --all" Nothing Nothing Nothing Nothing 2 Nothing Nothing)
     | otherwise -> do
         selected <- if allSelected then discoverScenarios fixtureRoot else pure roots
         if null selected
-          then abort jsonSelected (CliError "options" "validate_selection_empty" "no scenario fixtures were found" Nothing Nothing Nothing Nothing 2)
+          then abort jsonSelected (CliError "options" "validate_selection_empty" "no scenario fixtures were found" Nothing Nothing Nothing Nothing 2 Nothing Nothing)
           else do
-            prepared <- prepareBaseline configuration settings
+            prepared <- prepareBaseline scope configuration settings
             case prepared of
               Left problem -> abort jsonSelected problem
               Right (baseline, _) -> do
                 let workerCount = max 1 (min (positiveValue (setupWorkers configuration)) (positiveValue (activeLeases configuration)))
                     validate manager name = do
+                      checkCancellation scope
                       compiled <- compileScenario configuration [name]
                       case compiled of
                         Left problem -> pure (ValidationResult name (Left problem))
                         Right scenarioPlan -> do
-                          completed <- withManagedDatabaseClassified manager baseline scenarioPlan ReleaseAlways (const False) (const (pure ()))
+                          completed <- withManagedDatabaseClassified manager baseline scenarioPlan ReleaseAlways (const False) (const (checkCancellation scope))
                           pure $ ValidationResult name $ case completed of
-                            Left LeaseError {cause, sqlState, cleanupFailure} -> Left (CliError "fixture-validate" "lease_failed" (cause <> maybe "" ("; cleanup: " <>) cleanupFailure) (Just name) Nothing sqlState Nothing 1)
-                            Right LeaseOutcome {cleanupDiagnostic = Just LeaseError {cause, sqlState}} -> Left (CliError "fixture-validate" "cleanup_failed" cause (Just name) Nothing sqlState Nothing 1)
+                            Left problem -> Left (leaseError "fixture-validate" (Just name) problem)
+                            Right LeaseOutcome {cleanupDiagnostic = Just LeaseError {cause, sqlState}} -> Left (CliError "fixture-validate" "cleanup_failed" cause (Just name) Nothing sqlState Nothing 1 Nothing Nothing)
                             Right LeaseOutcome {timings} -> Right timings
                 results <- withManager configuration $ \manager ->
-                  concat <$> traverse (Async.mapConcurrently (validate manager)) (chunksOf workerCount selected)
+                  validateBatches scope workerCount (validate manager) selected
                 emitValidation jsonSelected results
                 if any (\ValidationResult {result} -> either (const True) (const False) result) results then exitWith (ExitFailure 1) else pure ()
   Just (DbPrepare jsonSelected) -> do
-    prepared <- prepareBaseline configuration settings
+    prepared <- prepareBaseline scope configuration settings
     either (abort jsonSelected) (emitPreparation jsonSelected . snd) prepared
   Just (DbAcquire roots jsonSelected) -> do
     scenario <- compileScenario configuration roots
     case scenario of
       Left problem -> abort jsonSelected problem
       Right scenarioPlan -> do
-        prepared <- prepareBaseline configuration settings
+        prepared <- prepareBaseline scope configuration settings
         case prepared of
           Left problem -> abort jsonSelected problem
           Right (baseline, _) -> do
             acquired <- withManager configuration $ \manager ->
-              withManagedDatabaseClassified manager baseline scenarioPlan DetachAlways (const False) pure
+              withManagedDatabaseClassified manager baseline scenarioPlan DetachAlways (const False) (\info -> checkCancellation scope >> pure info)
             case acquired of
-              Left LeaseError {cause, sqlState, cleanupFailure} ->
-                abort jsonSelected (CliError "lease-acquire" "lease_failed" (cause <> maybe "" ("; cleanup: " <>) cleanupFailure) Nothing Nothing sqlState Nothing 1)
+              Left problem -> abort jsonSelected (leaseError "lease-acquire" Nothing problem)
               Right LeaseOutcome {cleanupDiagnostic = Just LeaseError {cause, sqlState}} ->
-                abort jsonSelected (CliError "lease-acquire" "lease_cleanup_failed" cause Nothing Nothing sqlState Nothing 1)
+                abort jsonSelected (CliError "lease-acquire" "lease_cleanup_failed" cause Nothing Nothing sqlState Nothing 1 Nothing Nothing)
               Right LeaseOutcome {leaseInfo, timings} -> emitAcquisition jsonSelected leaseInfo timings
-  Just (DbWith _ _ jsonSelected []) -> abort jsonSelected (CliError "options" "program_required" "db with requires a program after --" Nothing Nothing Nothing Nothing 2)
+  Just (DbWith _ _ jsonSelected []) -> abort jsonSelected (CliError "options" "program_required" "db with requires a program after --" Nothing Nothing Nothing Nothing 2 Nothing Nothing)
   Just (DbWith roots preserveOnFailure jsonSelected (program : programArguments)) -> do
     scenario <- compileScenario configuration roots
     case scenario of
       Left problem -> abort jsonSelected problem
       Right scenarioPlan -> do
-        prepared <- prepareBaseline configuration settings
+        prepared <- prepareBaseline scope configuration settings
         case prepared of
           Left problem -> abort jsonSelected problem
           Right (baseline, _) -> do
@@ -150,6 +156,7 @@ dispatch configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLimit, ch
                   Right ChildReport {childExit = Just ExitSuccess, timedOut = False, cancelledBy = Nothing} -> False
                   Right _ -> preserveOnFailure
                 run LeaseInfo {leaseId, runId, applicationTarget} = do
+                  checkCancellation scope
                   let child =
                         ChildSpec
                           { executable = program,
@@ -161,13 +168,12 @@ dispatch configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLimit, ch
                             deadlineMs = Nothing,
                             stdoutToStderr = jsonSelected
                           }
-                  started <- try @IOException (runChild child)
+                  started <- try @IOException (runChild scope child `catch` \ChildCleanupException -> pure (Right (ChildReport Nothing False Nothing (Just "child process cleanup uncertain"))))
                   pure (either (const (Left ChildSpawnFailed)) id started)
             completed <- withManager configuration $ \manager ->
               withManagedDatabaseClassified manager baseline scenarioPlan policy classify run
             case completed of
-              Left LeaseError {cause, sqlState, cleanupFailure} ->
-                abort jsonSelected (CliError "lease-acquire" "lease_failed" (cause <> maybe "" ("; cleanup: " <>) cleanupFailure) Nothing Nothing sqlState Nothing 1)
+              Left problem -> abort jsonSelected (leaseError "lease-acquire" Nothing problem)
               Right outcome -> do
                 emitWith jsonSelected outcome
                 let status = withExitCode outcome
@@ -187,11 +193,11 @@ dispatch configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLimit, ch
           _ -> pure ()
   Just (Clean apply includeRetained identifiers jsonSelected)
     | not apply && (includeRetained || not (null identifiers)) ->
-        abort jsonSelected (CliError "options" "clean_preview_options_invalid" "--id and --include-retained require --apply" Nothing Nothing Nothing Nothing 2)
+        abort jsonSelected (CliError "options" "clean_preview_options_invalid" "--id and --include-retained require --apply" Nothing Nothing Nothing Nothing 2 Nothing Nothing)
     | apply && null identifiers ->
-        abort jsonSelected (CliError "options" "clean_selection_required" "--apply requires one or more --id selections" Nothing Nothing Nothing Nothing 2)
+        abort jsonSelected (CliError "options" "clean_selection_required" "--apply requires one or more --id selections" Nothing Nothing Nothing Nothing 2 Nothing Nothing)
     | includeRetained && null identifiers ->
-        abort jsonSelected (CliError "options" "clean_retained_selection_required" "retained cleanup requires selected allocation IDs" Nothing Nothing Nothing Nothing 2)
+        abort jsonSelected (CliError "options" "clean_retained_selection_required" "retained cleanup requires selected allocation IDs" Nothing Nothing Nothing Nothing 2 Nothing Nothing)
     | apply -> do
         let selection = if includeRetained then IncludeRetained else OrphansOnly
         applied <- applyCleanup configuration selection identifiers
@@ -203,7 +209,7 @@ dispatch configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLimit, ch
     | otherwise -> do
         planned <- planCleanup configuration
         either (abort jsonSelected . cleanupError) (emitCleanupPlan jsonSelected) planned
-  Nothing -> abort False (CliError "options" "command_required" "choose a command or configuration diagnostic" Nothing Nothing Nothing Nothing 2)
+  Nothing -> abort False (CliError "options" "command_required" "choose a command or configuration diagnostic" Nothing Nothing Nothing Nothing 2 Nothing Nothing)
   Just (Completions _) -> pure ()
   where
     unsuccessful (Refused _ _) = True
@@ -212,24 +218,27 @@ dispatch configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLimit, ch
 
 reportConfigFailure :: CliOptions -> ConfigFailure -> IO ()
 reportConfigFailure options failure = do
-  let jsonSelected = case command options of
-        Just (FixturePlan _ selected) -> selected
-        Just (FixtureLoad _ _ selected) -> selected
-        Just (FixtureValidate _ _ selected) -> selected
-        Just (DbPrepare selected) -> selected
-        Just (DbAcquire _ selected) -> selected
-        Just (DbWith _ _ selected _) -> selected
-        Just (DbRelease _ selected) -> selected
-        Just (Inspect _ selected) -> selected
-        Just (Clean _ _ _ selected) -> selected
-        _ -> False
+  let jsonSelected = jsonOutput options
       outcome = case failure of
-        SourceFailure message -> CliError "configuration-source" "config_source_invalid" message Nothing Nothing Nothing Nothing 3
-        ResolutionFailure message _ -> CliError "configuration-resolution" "config_resolution_invalid" message Nothing Nothing Nothing Nothing 4
+        SourceFailure message -> CliError "configuration-source" "config_source_invalid" message Nothing Nothing Nothing Nothing 3 Nothing Nothing
+        ResolutionFailure message _ -> CliError "configuration-resolution" "config_resolution_invalid" message Nothing Nothing Nothing Nothing 4 Nothing Nothing
   case failure of
     ResolutionFailure _ explanation -> TextIO.hPutStr stderr explanation
     _ -> pure ()
   abort jsonSelected outcome
+
+jsonOutput :: CliOptions -> Bool
+jsonOutput options = case command options of
+  Just (FixturePlan _ selected) -> selected
+  Just (FixtureLoad _ _ selected) -> selected
+  Just (FixtureValidate _ _ selected) -> selected
+  Just (DbPrepare selected) -> selected
+  Just (DbAcquire _ selected) -> selected
+  Just (DbWith _ _ selected _) -> selected
+  Just (DbRelease _ selected) -> selected
+  Just (Inspect _ selected) -> selected
+  Just (Clean _ _ _ selected) -> selected
+  _ -> False
 
 abort :: Bool -> CliError -> IO a
 abort jsonSelected failure = do
@@ -261,6 +270,37 @@ discoverScenarios root = do
           yaml <- doesFileExist (directory </> "fixture.yaml")
           sql <- doesFileExist (directory </> "fixture.sql")
           pure (yaml || sql)
+
+cancelledError :: Int -> CliError
+cancelledError signal = CliError "command" "command_cancelled" "command cancelled before completion" Nothing Nothing Nothing Nothing (128 + signal) Nothing Nothing
+
+-- | A worker is joined even after cancellation. Its typed preparation result
+-- takes precedence over a generic cancellation; completed results are retained.
+validateBatches :: CancellationScope -> Int -> (Text.Text -> IO ValidationResult) -> [Text.Text] -> IO [ValidationResult]
+validateBatches scope size validate names = go (chunksOf size names)
+  where
+    cancelled name signal = ValidationResult name (Left (cancelledError signal))
+    run name = Async.withAsync (validate name) $ \worker -> do
+      raced <- Async.race (Async.waitCatch worker) (waitCancellation scope)
+      result <- case raced of
+        Left completed -> pure completed
+        Right signal -> do
+          Async.cancelWith worker (CommandCancelled signal)
+          Async.waitCatch worker
+      case result of
+        Right value -> pure value
+        Left exception -> case Control.Exception.fromException exception of
+          Just (CommandCancelled signal) -> pure (cancelled name signal)
+          Nothing -> Control.Exception.throwIO exception
+    go [] = pure []
+    go (batch : pending) = do
+      signal <- cancellationSignal scope
+      case signal of
+        Just number -> pure (map (\name -> cancelled name number) (concat (batch : pending)))
+        Nothing -> do
+          results <- Async.mapConcurrently run batch
+          rest <- go pending
+          pure (results <> rest)
 
 chunksOf :: Int -> [a] -> [[a]]
 chunksOf _ [] = []
