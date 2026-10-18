@@ -4,6 +4,8 @@ Status: Accepted
 
 Date: 2026-09-26
 
+Amended: 2026-10-18 (command-scoped cancellation for concurrent CLI children; implementation planned in ExecPlan 6)
+
 ## Context
 
 The old spec predates `mori://shinzui/hurl-workbench`. Services already bootstrap PostgreSQL, commonly on a Unix socket. The user wants a Haskell library and Settei settings.
@@ -19,6 +21,8 @@ Development tooling is bootstrapped by `mori://shinzui/seihou-modules/templates/
 Administration, setup, and application endpoints have explicit roles. Application handoff never implicitly uses administrative credentials. Suite-scoped resource limits and result classification belong to the library; adapters may map test-framework outcomes without introducing a framework dependency. Service bootstrap retains global-role ownership.
 
 The CLI adapts executable migration and verification commands into the library's setup-endpoint hooks. Each command has an explicit revision and deadline; a command path without a revision cannot authorize persistent baseline reuse. `db with` passes only the application endpoint through a fixed PostgreSQL environment overlay and, when needed, a private password file. It owns a generic child process group, forwards cancellation, reaps descendants before lease release, and retains the lease if process cleanup is uncertain. Workbench retains ownership of readiness, Hurl execution, and its nested service process group.
+
+The accepted design in [ExecPlan 6](../plans/6-expose-clone-preparation-hooks-through-the-cli.md), pending implementation, assigns SIGINT/SIGTERM handlers to one explicit CLI command scope shared by migration, verification, clone preparation, and application subprocesses. Concurrent child supervisors register with that scope and never install or restore process-wide handlers independently. The first signal cancels active work and stops further validation admission; the command settles bounded process and lease cleanup before restoring prior handlers and returning 130/143. Child registration must observe cancellation that races with spawning. Per-lease errors and uncertain-cleanup retention remain independent of the shared signal, and repeated signals must not interrupt cleanup again. This allows concurrent fixture validation without losing cancellation when children finish out of order.
 
 The [standards applicability audit](../research/haskell-standards-audit.md) defines the cross-package Haskell baseline and selected CLI patterns. Informational CLI paths are offline; Hurl standards apply to example services through workbench. Public module boundaries also prevent transitive generic-lens orphan exposure to consumers.
 

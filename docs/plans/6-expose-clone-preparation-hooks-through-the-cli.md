@@ -10,6 +10,18 @@ provenance:
     model: "gpt-6.1-sol"
     harness: "codex-cli"
     at: 2026-10-18T18:27:51Z
+  reviews:
+    - model: "gpt-6-astra"
+      harness: "codex-cli"
+      at: 2026-10-18T18:50:09Z
+      verdict: "changes-requested"
+      note: "Milestone 2 must define command-scoped SIGINT/SIGTERM ownership for concurrent runChild hooks, cancel all active and pending validation work, and test overlapping hooks plus aggregate 130/143 exits; current per-child global handler installation/restoration races."
+  revisions:
+    - model: "gpt-6-astra"
+      harness: "codex-cli"
+      at: 2026-10-18T18:52:33Z
+      mode: "update"
+      note: "Resolve concurrent cancellation review with command-scoped signal ownership, worker and child shutdown coordination, aggregate exit semantics, race coverage, and ADR 1 context."
 ---
 
 # Expose clone preparation hooks through the CLI
@@ -29,7 +41,7 @@ The hook must execute once per clone, including clones of a reused baseline. Sel
 
 
 - [ ] Milestone 1: Optional clone-preparation configuration resolves through existing CLI sources, rejects invalid settings, redacts secrets, and preserves configurations that omit it (AC-1).
-- [ ] Milestone 2: Native CLI acquisitions execute the selected command once before scenario loading and handoff, reuse unchanged baselines, and handle failure, cancellation, timeout, and uncertain cleanup safely (AC-2, AC-3, AC-4).
+- [ ] Milestone 2: Native CLI acquisitions execute the selected command once before scenario loading and handoff, reuse unchanged baselines, and handle failure, command-wide cancellation across concurrent validations, timeout, and uncertain cleanup safely (AC-2, AC-3, AC-4).
 - [ ] Milestone 3: The Keiro/workbench example seeds event-backed state through public command/store APIs and observes it through HTTP in independent clones (AC-5).
 - [ ] Milestone 4: User documentation, ADRs, package archives, and final regression evidence describe and verify the delivered behavior; IR-1 is completed only after all five criteria pass.
 
@@ -39,7 +51,7 @@ Implementation has not started. The request is accepted and linked to this plan;
 ## Surprises & Discoveries
 
 
-(None yet.)
+2026-10-18 review: `runChild` in `hinagata-cli/src/Hinagata/Cli/Process.hs` installs and restores process-wide SIGINT/SIGTERM handlers for each child. `fixture validate` in `hinagata-cli/app/Main.hs` uses concurrent workers and subsequently starts further batches. Overlapping hooks would replace each other's handlers; finishing out of order can restore a handler for an already-finished child. Per-child cancellation checks alone therefore cannot satisfy AC-4. The validation command also currently collapses all failed results to exit 1.
 
 
 ## Decision Log
@@ -48,6 +60,8 @@ Implementation has not started. The request is accepted and linked to this plan;
 2026-10-18: Use the configuration prefix `clone.preparation`, with no revision setting. Clone preparation changes disposable clone state, so it must not contribute to baseline fingerprints or require a migration/verification revision. Migration and verification revision behavior remains authoritative for baseline reuse.
 
 2026-10-18: Preserve the existing `BaselineSpec.clonePreparationHook` callback signature. Use its existing lifecycle position; add only the typed failure/cleanup information needed to adapt supervised commands safely. Direct Haskell hooks that return `Left Text` retain their existing generic, credential-safe failure behavior.
+
+2026-10-18: Give each CLI command one explicit cancellation scope, shared by all its supervised children and validation workers. The scope owns signal handlers and records the first SIGINT/SIGTERM; per-lease failure details remain separate. Cancellation stops further validation admission, settles active workers through bounded cleanup, and determines aggregate exit 130/143. This repairs the concurrent execution path required by AC-4 without serializing validation or changing the library hook signature. ADR 1 records this accepted design; implementation remains pending.
 
 2026-10-18: Extend the existing Keiro counter example rather than introduce a new service or require projection workers. Its command and stream-read helpers already use public runtime APIs. PostgreSQL startup, service startup, readiness, and any future projection workers stay caller-owned.
 
@@ -72,6 +86,8 @@ A baseline is a migrated, verified database sealed against ordinary connections 
 `hinagata-cli/src/Hinagata/Cli/Config.hs` declares migration and verification `HookSettings` through Settei and resolves YAML, explicit environment bindings, and repeated `--set` overrides. It currently has no clone-preparation declaration. `hinagata-cli/src/Hinagata/Cli/Command.hs` adapts those settings with `hookRunner`, but `prepareBaseline` always sets `clonePreparationHook = Nothing`. `hinagata-cli/src/Hinagata/Cli/Process.hs` supplies shell-free process execution, a setup/application endpoint overlay, a private password file, signal forwarding, and bounded process-group cleanup. Its current hook adapter checks cleanup failure, timeout, and exit status but does not check `cancelledBy` before accepting a zero exit status. Its asynchronous-exception cleanup path also discards `stopGroup`'s uncertain-cleanup result. These paths require explicit coverage for the new hook.
 
 `hinagata-cli/app/Main.hs` acquires clones for `db acquire`, `db with`, and `fixture validate`; `db prepare` only prepares the baseline. `fixture plan` is offline and `fixture load` targets a caller-owned existing database. `hinagata-cli/src/Hinagata/Cli/Output.hs` owns versioned JSON and text reports. All clone-acquiring commands must get the hook through the common baseline assembly, without duplicating seeding in command dispatch.
+
+Validation currently runs `Async.mapConcurrently` over bounded batches. Its workers will share the command's cancellation scope, while each acquisition retains its own preparation error and cleanup result. Move signal-handler ownership out of individual `runChild` calls so a completing hook cannot restore a handler while another hook is still active.
 
 `scripts/test-cli.sh` tests the CLI offline; `scripts/test-cli-postgres.sh` tests it against PostgreSQL supplied by `scripts/test-postgres.sh --cli`. `hinagata-postgres/test/Main.hs` already checks two legacy hook executions, unchanged baseline reuse, and no callback after a failed hook. Extend those tests where lifecycle behavior changes. `justfile` exposes the validation commands below.
 
@@ -110,11 +126,19 @@ Extend `LeaseError` with optional structured preparation context containing the 
 
 Check `ChildReport.cancelledBy` before accepting an otherwise successful hook exit. Hook cancellation must remain a failure even if a signal handler exits zero. For CLI SIGINT/SIGTERM, return 130/143 after cleanup, including preparation-phase cancellation before the application starts. Nonzero seed exits and spawn errors are operational failures (exit 1), rather than application child exit statuses. A hook deadline and the enclosing acquisition deadline must both prevent startup; annotate an acquisition timeout with the preparation phase when it expires inside this hook rather than scenario loading.
 
+Define an opaque `CancellationScope` and a bracketed `withCancellationScope` in `hinagata-cli/src/Hinagata/Cli/Process.hs`. Create one scope around command execution in `hinagata-cli/app/Main.hs`, before baseline preparation, and pass it explicitly through `prepareBaseline`, hook adapters, and `runChild`. The library hook closes over the scope and keeps its existing signature. Install SIGINT/SIGTERM handlers once for this scope; restore the prior handlers only after all workers and registered children have settled. The scope holds the first signal and a synchronized registry of active child supervisors. Signal handlers record and notify promptly; child supervisors perform forwarding and bounded escalation concurrently, rather than blocking the signal handler on cleanup. Repeated signals must not reset the shutdown budget or interrupt cleanup again.
+
+Make child registration, cancellation observation, and deregistration safe against races. Check cancellation before spawning; if it arrives between that check and process registration, the newly registered supervisor must observe it and stop the child. Keep a child registered until its bounded cleanup result is recorded, then remove it so later signals cannot target stale process identities. Per-child completion must never replace process-wide handlers. Migration, verification, preparation, and application commands all use this shared mechanism. Keep cleanup diagnostics per child and per lease, even though the cancellation signal is shared.
+
+In the validation coordinator in `hinagata-cli/app/Main.hs`, stop launching batches or admitting new scenario work once cancellation is observed. Request cancellation of already-started workers, including those compiling or waiting for manager admission, and join them through their existing exception-safe lease/process cleanup paths. Preserve typed uncertain-cleanup failures while settling sibling workers; returning early from the coordinator must not abandon them. Workers racing with cancellation must check the shared state before seed execution, scenario loading, and application handoff. Preserve completed results and report unstarted selections as cancelled without fabricated lease IDs or a claim that clone preparation ran. Aggregate exit status uses the first command signal (130 for SIGINT, 143 for SIGTERM), even when another scenario has an ordinary failure or cleanup fails; structured results still retain those independent failures. With no signal, retain the existing success/failure exit behavior.
+
 In `hinagata-cli/src/Hinagata/Cli/Process.hs`, ensure timeout and exception unwinding perform bounded process-group cleanup and retain its result. An uncertain stop during asynchronous unwinding must be reported through a typed cleanup exception rather than discarded or swallowed by the enclosing acquisition timeout. Translate that into the typed preparation failure before the library's generic exception/release branch. Update the existing application-command caller for any generic process exception added, preserving its existing retention behavior. Keep cancellation semantics for unrelated exceptions and do not use an unbounded uninterruptible wait.
 
 When stopping processes is proven, preparation failures release using existing ownership checks. When it is uncertain, mark the clone preserved with a bounded non-secret diagnostic, or leave an inspectable orphan if the ownership session has been lost; do not call database drop in that branch. Keep cleanup failure distinct from the primary preparation failure. `--preserve-on-failure` continues to describe consumer failures; an ordinary seed failure still releases, while uncertain seed-process cleanup requires preservation regardless of that flag.
 
 Prove failure, both deadline sources, SIGINT/SIGTERM, cancellation with a zero child exit, descendants that ignore TERM, and exception unwinding. Use a consumer startup marker and assert it never appears after failed preparation. Add deterministic fault injection at the process cleanup boundary for the rare uncertain-stop branch; a stubborn child killed successfully only proves successful escalation. Use an internal test seam or focused test component, never a public environment/configuration bypass. Assert bounded completion, stopped descendants where stoppage is provable, removed password files, secret-free structured errors, and an inspectable retained ownership record when stopping or release cannot safely complete. Add a real blocked-drop case using the existing PostgreSQL cleanup-test pattern. Keep existing direct-library hook tests passing.
+
+Add concurrent cancellation cases to `scripts/test-cli-postgres.sh` using at least two validation workers and a third scenario pending in a later batch. Synchronize helpers with explicit ready/release markers so both seeds overlap before sending each signal. Also finish the earlier-started seed while the later one remains active, and reverse that completion order in a separate case; cancellation must still reach every remaining child. Cover a zero-exit signal handler and a TERM-ignoring descendant, assert no pending seed or post-cancellation scenario/consumer marker starts, check each allocated lease's cleanup disposition, and assert aggregate 130/143 after bounded completion. Use a focused internal process test for handler restoration, cancellation during registration, and repeated signals. If a test component is added, wire it into `just test-cli-postgres` so the Milestone 2 gate actually executes it. Include a sibling ordinary failure and uncertain-cleanup injection to prove signal exit precedence preserves individual diagnostics.
 
 
 ### Milestone 3: Demonstrate a service-owned command seed over HTTP
@@ -157,7 +181,7 @@ nix develop -c just test-cli-postgres
 nix develop -c just test-postgres
 ```
 
-Expected result: CLI integration exits zero, and the PostgreSQL test suite passes legacy and extended lifecycle cases. Capture specific evidence for ordering, callback replacement, timeout/cancellation, and preserved uncertain-cleanup state rather than treating compilation as acceptance.
+Expected result: CLI integration exits zero, and the PostgreSQL test suite passes legacy and extended lifecycle cases. Capture specific evidence for ordering, callback replacement, timeout/cancellation, and preserved uncertain-cleanup state rather than treating compilation as acceptance. The concurrent validation cases must show every active seed settled, pending work unstarted, and command exits 130/143 for SIGINT/SIGTERM in both hook completion orders. Any internal process tests are executed by the CLI integration recipe.
 
 For Milestone 3:
 
@@ -210,6 +234,8 @@ AC-3 is proved by preparing a baseline, reusing it, changing clone executable/ar
 
 AC-4 is proved by real subprocess failure, spawn failure, deadline expiry at each boundary, and signal cancellation before startup; by zero consumer-start markers; by bounded descendant cleanup and private-password-file removal; and by deterministic uncertain-cleanup injection plus real database release failure. Inspect the retained/orphaned ownership record and bounded diagnostic. Verify credentials and secret sentinels are absent from configuration explanations and structured reports. Arbitrary user executable output remains the executable author's responsibility and is sent to stderr, never embedded in JSON errors.
 
+For concurrent validation, AC-4 additionally requires overlapping seeds, both completion orders, a pending scenario, and both signals. Cancellation must stop all active work, suppress pending work and later handoff, and yield aggregate 130/143 after cleanup, including when a child handles the signal by exiting zero or a sibling reports failure. Prove race-safe registration, restoration of the original handlers only at scope exit, and bounded behavior under repeated signals. Shared cancellation state must not overwrite per-lease errors or allow one uncertain cleanup to skip another lease's cleanup.
+
 AC-5 is proved by the packaged Keiro seed calling existing public command/store helpers and a later HTTP GET observing the expected event-backed counter value under the application role. Two distinct seed selections use independent clones of the same baseline. No fixture inserts runtime event/outbox/workflow rows. Source-archive builds include the seed executable, shared module, manifest, and Hurl file.
 
 The first representative interaction proof is the command-backed native PostgreSQL lease in Milestone 2, before adding HTTP variations. No dependency upgrade, broader orchestration feature, performance target, or new Linux-support claim is required for acceptance.
@@ -232,6 +258,10 @@ The durable CLI interface is the optional `clone.preparation` configuration reco
 
 Use existing `ChildSpec`/`ChildReport` and process-group supervision; do not introduce shell parsing or a second process runner. A typed uncertain-cleanup exception must survive asynchronous unwinding long enough for `Lease.hs` to select preservation. Existing consumer-command retention and cancellation behavior is part of the regression contract. Add a focused internal test component in `hinagata-cli/hinagata-cli.cabal` only if needed for deterministic cleanup fault injection.
 
+The CLI process interface becomes `withCancellationScope :: (CancellationScope -> IO a) -> IO a` and `runChild :: CancellationScope -> ChildSpec -> IO (Either ChildFailure ChildReport)`. Expose only the internal operations needed to observe cancellation and coordinate workers; keep the scope constructor and child registry private. Pass the same scope to baseline assembly and application execution. Process-wide signal registration belongs exclusively to the scope, while release safety and failure classification remain per acquisition. The coordinator must settle worker cleanup before restoring handlers or emitting its final exit status.
+
 No new external dependency or version change is planned. Configuration uses `mori://shinzui/settei/packages/settei`, `mori://shinzui/settei/packages/settei-env`, and the existing YAML/optparse adapters. Domain commands use `mori://shinzui/keiro/packages/keiro`; workbench remains `mori://shinzui/hurl-workbench` at the example's existing immutable revision. Discover dependency sources and documentation with `mori registry search`, `mori registry show --full`, and `mori registry docs` before relying on their APIs. If implementation requires changing dependency bounds or pins, verify current authoritative registry releases and upstream tags first. Never traverse `/nix/store` for source.
 
 This plan has no parent MasterPlan and no prerequisite implementation plan. Existing completed lifecycle and CLI behavior in the working tree supplies the starting point. IR-1 retains its stable acceptance conditions and its `targetPlan` reference throughout implementation and completion.
+
+Revision note (2026-10-18): Addressed the review's concurrent cancellation finding by specifying command-scoped signal ownership, race-safe child registration, cancellation of active and pending validation work, aggregate signal exit precedence, and executable overlap/race acceptance checks. Updated ADR 1 for the durable ownership decision. This is a plan revision; implementation and acceptance evidence remain pending.
