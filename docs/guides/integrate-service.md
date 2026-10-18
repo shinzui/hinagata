@@ -6,7 +6,7 @@ docId: DOC-2
 tags: ["integration", "access", "lifecycle"]
 generated:
   by: process:codex
-  at: 2026-10-18T19:46:53Z
+  at: 2026-10-18T20:45:25Z
 ---
 
 # Integrate a service
@@ -15,6 +15,10 @@ This procedure assumes that you have a test PostgreSQL server and a service test
 The server, global roles, and required extensions are prerequisites.
 `CONFIG` is your Hinagata YAML file.
 Replace all uppercase placeholders before execution.
+
+Hinagata's libraries and CLI do not depend on Keiro.
+Use your service's migration, verification, and optional preparation commands.
+The Keiro commands below illustrate those hooks in a test-only example.
 
 ## Prepare the service
 

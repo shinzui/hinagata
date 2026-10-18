@@ -6,7 +6,7 @@ docId: DOC-6
 tags: ["lifecycle", "fixtures"]
 generated:
   by: process:codex
-  at: 2026-10-02T16:49:46Z
+  at: 2026-10-18T20:45:25Z
 ---
 
 # How Hinagata works
@@ -14,6 +14,9 @@ generated:
 Hinagata prepares PostgreSQL data before a test starts.
 Your test system starts PostgreSQL and supplies the endpoint.
 Hinagata does not start a server, container, or daemon.
+The libraries and CLI do not require Keiro or a particular service framework.
+Your service supplies its migration and verification hooks.
+The [Keiro service](../../examples/keiro-service/README.md) is a test-only integration example.
 
 ## Direct loading
 
@@ -39,8 +42,18 @@ These inputs include hook revisions, base fixtures, the server major version, an
 Unchanged inputs permit reuse of a valid sealed generation.
 Changed inputs select a new generation.
 Missing migration or verification revisions disable persistent reuse.
+The CLI accepts manual revisions or derives them from declared executable bytes, files, and non-secret values.
+Declare all relevant inputs; Hinagata does not discover arbitrary dependencies or remote state.
+See [Content-derived baseline revisions](configuration.md#content-derived-baseline-revisions).
 
-Each [clone](../terminology/clone.md) receives its scenario fixtures before the test starts.
+Each [clone](../terminology/clone.md) can run an optional preparation hook with setup access before receiving scenario fixtures.
+The hook can create domain state through the service's command APIs before service startup.
+It runs for each new clone, including clones of a reused baseline, and does not change baseline identity.
+Failure, timeout, or cancellation prevents application handoff.
+Uncertain process cleanup preserves the lease for inspection.
+See [Per-clone preparation](configuration.md#per-clone-preparation).
+
+The clone receives its scenario fixtures before the test starts.
 Changes in one clone do not change another clone.
 A [lease](../terminology/lease.md) controls use and cleanup of that clone.
 
@@ -48,6 +61,7 @@ A [lease](../terminology/lease.md) controls use and cleanup of that clone.
 Caller starts PostgreSQL
   -> build or reuse sealed baseline
   -> create clone
+  -> run optional clone preparation with setup access
   -> load scenario fixtures
   -> run service or test
   -> stop service and close connections

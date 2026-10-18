@@ -6,7 +6,7 @@ docId: DOC-5
 tags: ["getting-started", "fixtures"]
 generated:
   by: process:codex
-  at: 2026-10-02T16:49:46Z
+  at: 2026-10-18T20:45:25Z
 ---
 
 # Run your first fixture plan
@@ -14,6 +14,10 @@ generated:
 This tutorial starts from a Hinagata checkout with Nix available.
 Run all commands from the repository root.
 The first procedure does not connect to PostgreSQL.
+
+The libraries and CLI have no Keiro dependency.
+The root `cabal.project` also includes the test-only Keiro example, so Cabal resolves its dependencies with the workspace.
+Selecting `hinagata-cli` builds the CLI and its dependencies; it does not build the Keiro example.
 
 ## Compile a fixture
 

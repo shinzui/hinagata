@@ -2,6 +2,8 @@
 
 Start with the [service integration guide](guides/integrate-service.md) for an ordered procedure.
 
+`hinagata-core`, `hinagata-postgres`, and `hinagata-cli` have no Keiro dependency. The test-only [Keiro example](../examples/keiro-service/README.md) verifies the generic migration, verification, and clone-preparation hooks with a real service. Other services supply their own commands and can use Hinagata without Keiro. The root `cabal.project` includes the example, so Cabal resolves its dependencies as part of the development workspace; the packaged libraries and CLI do not inherit them.
+
 Hinagata uses PostgreSQL that the caller already runs. The service owns its migrations, schema verification, and application connection pool. Hinagata connects directly through a Unix socket or an explicitly configured TCP endpoint, builds a sealed baseline, and gives each suite a fresh clone. The development shell is bootstrapped from `mori://shinzui/seihou-modules/templates/nix-haskell-flake` and includes PostgreSQL 18, Hurl, and hurlfmt.
 
 Run the complete consumer proof from the repository root:
