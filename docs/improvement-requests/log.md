@@ -1,6 +1,7 @@
 # Bundle Update Log
 
 ## 2026-10-18
+* **Update**: Completed IR-2 under ExecPlan 7: AC-1 through AC-5 passed deterministic and filesystem checks, offline declarations/redaction, native SQL cache and mutation/lock waiting, six consumed Keiro input variants, and all regression/documentation/archive gates.
 * **Update**: Started IR-2 implementation under ExecPlan 7; declared-input revision acceptance evidence is pending.
 * **Update**: Completed IR-1 with AC-1 through AC-5 evidence: offline configuration, native per-clone ordering/reuse and cancellation/cleanup faults, Keiro HTTP seed totals 2/5, and all regression/archive gates passed under ExecPlan 6.
 * **Update**: Started IR-1 implementation under ExecPlan 6; acceptance evidence remains pending.

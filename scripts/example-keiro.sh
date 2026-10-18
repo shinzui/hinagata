@@ -38,37 +38,33 @@ export HINAGATA_SETUP_USER=hinagata_example_setup
 export HINAGATA_SETUP_DATABASE="$HINAGATA_TEST_PGDATABASE"
 export HINAGATA_APPLICATION_USER=hinagata_example_app
 export HINAGATA_APPLICATION_DATABASE="$HINAGATA_TEST_PGDATABASE"
-export HINAGATA_MIGRATION_EXECUTABLE="$migrate_binary"
-export HINAGATA_VERIFICATION_EXECUTABLE="$migrate_binary"
-revision="$(shasum -a 256 "$migrate_binary" | cut -d ' ' -f 1)"
-export HINAGATA_MIGRATION_REVISION="$revision"
-export HINAGATA_VERIFICATION_REVISION="$revision"
+unset HINAGATA_MIGRATION_EXECUTABLE HINAGATA_VERIFICATION_EXECUTABLE
+unset HINAGATA_MIGRATION_REVISION HINAGATA_VERIFICATION_REVISION
+unset HINAGATA_MIGRATION_REVISION_EXECUTABLE HINAGATA_VERIFICATION_REVISION_EXECUTABLE
+python3 scripts/keiro-revision-inputs.py write "$binary" "$example" "$migrate_binary" "$workspace"
 export EXAMPLE_SERVICE_PID_DIR="$workspace/pids"
 
-"$binary" --config "$example/hinagata.yaml" --check-config > "$workspace/check.txt"
-"$binary" --config "$example/hinagata.yaml" fixture plan service-scenario --json > "$workspace/plan.json"
-"$binary" --config "$example/hinagata.yaml" db prepare --json > "$workspace/prepare-cold.json"
-"$binary" --config "$example/hinagata.yaml" db prepare --json > "$workspace/prepare-warm.json"
+"$binary" --config "$example/hinagata.yaml" --config "$workspace/revision-inputs.yaml" --check-config > "$workspace/check.txt"
+"$binary" --config "$example/hinagata.yaml" --config "$workspace/revision-inputs.yaml" fixture plan service-scenario --json > "$workspace/plan.json"
+"$binary" --config "$example/hinagata.yaml" --config "$workspace/revision-inputs.yaml" db prepare --json > "$workspace/prepare-cold.json"
+"$binary" --config "$example/hinagata.yaml" --config "$workspace/revision-inputs.yaml" db prepare --json > "$workspace/prepare-warm.json"
 
-export HINAGATA_MIGRATION_REVISION="$revision-change-probe"
-"$binary" --config "$example/hinagata.yaml" db prepare --json > "$workspace/prepare-migration-changed.json"
-export HINAGATA_MIGRATION_REVISION="$revision"
+python3 scripts/keiro-revision-inputs.py test "$binary" "$example" "$migrate_binary" "$workspace"
 
 cp -R "$example/fixtures" "$workspace/changed-fixtures"
 printf '\n-- changed base-fixture identity probe\n' >> "$workspace/changed-fixtures/reference-seed/fixture.sql"
 export HINAGATA_FIXTURE_ROOT="$workspace/changed-fixtures"
-"$binary" --config "$example/hinagata.yaml" db prepare --json > "$workspace/prepare-fixture-changed.json"
+"$binary" --config "$example/hinagata.yaml" --config "$workspace/revision-inputs.yaml" db prepare --json > "$workspace/prepare-fixture-changed.json"
 export HINAGATA_FIXTURE_ROOT="$example/fixtures"
 
-python3 - "$workspace/prepare-cold.json" "$workspace/prepare-warm.json" "$workspace/prepare-migration-changed.json" "$workspace/prepare-fixture-changed.json" <<'PY'
+python3 - "$workspace/prepare-cold.json" "$workspace/prepare-warm.json" "$workspace/prepare-fixture-changed.json" <<'PY'
 import json
 import pathlib
 import sys
 
-cold, warm, migration, fixture = (json.loads(pathlib.Path(path).read_text()) for path in sys.argv[1:])
+cold, warm, fixture = (json.loads(pathlib.Path(path).read_text()) for path in sys.argv[1:])
 assert cold["result"] == "Built" and warm["result"] == "Reused"
 assert cold["fingerprint"] == warm["fingerprint"]
-assert migration["result"] == "Built" and migration["fingerprint"] != cold["fingerprint"]
 assert fixture["result"] == "Built" and fixture["fingerprint"] != cold["fingerprint"]
 PY
 
@@ -91,8 +87,8 @@ run_suite() {
   local started elapsed
   started="$(python3 -c 'import time; print(time.monotonic_ns())')"
   printf 'clone:\n  preparation:\n    argv: [seeded, "%s"]\n' "$seed_total" > "$workspace/seed-$label.yaml"
-  "$binary" --config "$example/hinagata.yaml" --config "$workspace/seed-$label.yaml" db prepare --json > "$workspace/prepare-$label.json"
-  "$binary" --config "$example/hinagata.yaml" --config "$workspace/seed-$label.yaml" db with --fixture "$fixture" --json -- \
+  "$binary" --config "$example/hinagata.yaml" --config "$workspace/revision-inputs.yaml" --config "$workspace/seed-$label.yaml" db prepare --json > "$workspace/prepare-$label.json"
+  "$binary" --config "$example/hinagata.yaml" --config "$workspace/revision-inputs.yaml" --config "$workspace/seed-$label.yaml" db with --fixture "$fixture" --json -- \
     nix shell "$workbench_ref" -c hurl-workbench \
       --workspace "$example/hurl-workbench.dhall" \
       test suite "$suite" "${mutation_flag[@]}" \
@@ -164,7 +160,7 @@ PYSEED
 run_suite command counter-write "$first_port" yes > "$workspace/command-lease"
 run_suite generated generated-id "$second_port" yes > "$workspace/generated-lease"
 
-"$binary" --config "$example/hinagata.yaml" db acquire --fixture service-scenario --json > "$workspace/role-lease.json"
+"$binary" --config "$example/hinagata.yaml" --config "$workspace/revision-inputs.yaml" db acquire --fixture service-scenario --json > "$workspace/role-lease.json"
 read -r role_lease role_database < <(python3 - "$workspace/role-lease.json" <<'PY'
 import json
 import pathlib
@@ -182,10 +178,10 @@ if psql -h "$HINAGATA_TEST_PGHOST" -p "$HINAGATA_TEST_PGPORT" -U hinagata_exampl
   exit 1
 fi
 rg -q '42501' "$workspace/privileged.err"
-"$binary" --config "$example/hinagata.yaml" db release "$role_lease" --json > "$workspace/release-role.json"
+"$binary" --config "$example/hinagata.yaml" --config "$workspace/revision-inputs.yaml" db release "$role_lease" --json > "$workspace/release-role.json"
 
 for lease in "$first_lease" "$second_lease"; do
-  "$binary" --config "$example/hinagata.yaml" inspect "$lease" --json > "$workspace/inspect-$lease.json"
+  "$binary" --config "$example/hinagata.yaml" --config "$workspace/revision-inputs.yaml" inspect "$lease" --json > "$workspace/inspect-$lease.json"
   python3 - "$workspace/inspect-$lease.json" <<'PY'
 import json
 import pathlib
@@ -198,7 +194,7 @@ done
 
 service_binary="$EXAMPLE_SERVICE_BINARY"
 export EXAMPLE_SERVICE_BINARY=/usr/bin/false
-if "$binary" --config "$example/hinagata.yaml" db with --fixture service-scenario --json -- \
+if "$binary" --config "$example/hinagata.yaml" --config "$workspace/revision-inputs.yaml" db with --fixture service-scenario --json -- \
   nix shell "$workbench_ref" -c hurl-workbench \
     --workspace "$example/hurl-workbench.dhall" \
     test suite default \
@@ -221,7 +217,7 @@ assert result["disposition"] == "LeaseReleased"
 PY
 
 export EXAMPLE_SERVICE_READY_FILE="$workspace/cancellation-service-pid"
-"$binary" --config "$example/hinagata.yaml" db with --fixture service-scenario --json -- \
+"$binary" --config "$example/hinagata.yaml" --config "$workspace/revision-inputs.yaml" db with --fixture service-scenario --json -- \
   nix shell "$workbench_ref" -c hurl-workbench \
     --workspace "$example/hurl-workbench.dhall" \
     test suite cancellation \
@@ -265,7 +261,7 @@ for pid_file in "$workspace"/pids/*; do
   test -f "$pid_file" || continue
   ! kill -0 "$(cat "$pid_file")" 2>/dev/null
   lease="$(basename "$pid_file")"
-  "$binary" --config "$example/hinagata.yaml" inspect "$lease" --json > "$workspace/final-inspect-$lease.json"
+  "$binary" --config "$example/hinagata.yaml" --config "$workspace/revision-inputs.yaml" inspect "$lease" --json > "$workspace/final-inspect-$lease.json"
   python3 - "$workspace/final-inspect-$lease.json" <<'PYRELEASE'
 import json
 import pathlib

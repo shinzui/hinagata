@@ -6,7 +6,7 @@ docId: DOC-2
 tags: ["cli", "operations"]
 generated:
   by: process:codex
-  at: 2026-10-18T19:08:35Z
+  at: 2026-10-18T19:46:53Z
 ---
 
 # Command reference
@@ -30,6 +30,7 @@ cabal run hinagata -- --config CONFIG fixture plan NAME --json
 Help, version, completions, and configuration descriptions need no configuration file.
 Configuration checks and fixture plans need [valid settings](configuration.md).
 They do not connect to PostgreSQL.
+Checks validate revision declarations without reading their selected files; explanations redact revision input/value arrays.
 A fixture plan captures files into a [fixture bundle](../terminology/fixture-bundle.md).
 It does not prove that SQL will succeed.
 
@@ -138,3 +139,11 @@ A failing or timed-out seed prevents consumer startup and releases the clone onc
 An uncertain process stop preserves the database regardless of `--preserve-on-failure`.
 Establish process stoppage before explicit release; a lost ownership session leaves an inspectable orphan.
 Database release failure remains separate from the preparation cause and leaves an inspectable cleanup record.
+
+
+Baseline content inputs are captured for `db prepare`, `db acquire`, `db with`, and `fixture validate`, even on reuse.
+The [content-derived revision reference](configuration.md#content-derived-baseline-revisions) defines selectors, precedence, paths, and the stable-input contract.
+Unreadable selected inputs return phase `hook-revision`, code `hook_revision_input_unreadable`, exit `1`, before either baseline hook runs.
+Detected mutation returns `hook_revision_inputs_changed` and prevents result handoff; an earlier command failure retains its cause.
+These diagnostics omit selected contents, values, physical input paths, and raw filesystem errors.
+Invalid/conflicting declarations return configuration exit `4` even through `--check-config`.

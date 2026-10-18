@@ -32,6 +32,8 @@ Amended: 2026-10-02 (verify only the scenario suffix on repeated leases)
 
 Amended: 2026-10-18 (supervised CLI clone preparation and uncertain-stop preservation)
 
+Amended: 2026-10-18 (declared content-derived baseline hook identities)
+
 ## Context
 
 Reuse must not silently test stale migrations or share scenario state. CREATE/DROP DATABASE are nontransactional, and copying a template requires no connected sessions.
@@ -61,6 +63,8 @@ A crash after CREATE or after writing the ownership marker but before binding th
 
 Classified lease outcomes report separate monotonic timings for catalog setup, generation-lock wait, clone creation and identity binding, scenario loading, and completion. Manager admission adds active- and setup-queue wait; direct leases record zero queue time. These are caller-visible stage durations, not a cluster-wide throughput guarantee.
 
+Migration and verification identities may be caller-managed text or versioned digests of explicitly named file bytes and non-secret values. Logical names and kinds determine identity; physical locations, timestamps, and permissions do not. Both hooks need a revision to enable reuse, and conflicting manual/derived declarations fail offline. The CLI captures both selected sets before any reuse/build, checks both around successful hook execution, and checks again after the result, including lock waiting. Initial unreadability starts neither hook; observed build-time mutation prevents publication. An original command failure retains its cause. A final mutation check can refuse handoff after publication without deleting a shared generation. This is a stable-input contract, not an atomic filesystem snapshot: reverted changes between checks, undeclared dependencies, and remote state remain caller-owned. Source manifests do not imply transitive input discovery.
+
 ## Consequences
 
-Warm runs amortize migration/base loading. Sealed baselines are cluster-local snapshots; multiple fingerprinted variants allow a frequently reused bulk scenario to be loaded once. Cloning copies data and is not promised constant-time. Portable dump snapshots are deferred. Opaque commands need an explicit trustworthy revision or force a rebuild. Hinagata reapplies database grants and settings to clones; schema privileges copied with a template are still asserted from the declaration for consistency. Applications own global roles. Crashes can leave inspectable resources rather than risk guessed deletion. Snapshot portability and schema-reset shortcuts await measured need. Precreated spare clones remain an experiment pending evidence that clone allocation dominates; idle sessions or elapsed time alone never authorize reclaiming a live lease. See the [prior-art review](../research/prior-art.md).
+Warm runs amortize migration/base loading. Sealed baselines are cluster-local snapshots; multiple fingerprinted variants allow a frequently reused bulk scenario to be loaded once. Cloning copies data and is not promised constant-time. Portable dump snapshots are deferred. Opaque commands need a truthful manual or declared-content revision or force a rebuild. Hinagata reapplies database grants and settings to clones; schema privileges copied with a template are still asserted from the declaration for consistency. Applications own global roles. Crashes can leave inspectable resources rather than risk guessed deletion. Snapshot portability and schema-reset shortcuts await measured need. Precreated spare clones remain an experiment pending evidence that clone allocation dominates; idle sessions or elapsed time alone never authorize reclaiming a live lease. See the [prior-art review](../research/prior-art.md).

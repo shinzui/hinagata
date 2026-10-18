@@ -2,7 +2,7 @@
 
 From the Hinagata repository root, run `nix develop -c just example-keiro`. The command builds the test-only service, migration, and seed executables, starts a disposable PostgreSQL socket cluster, creates separate setup and application roles, and runs the pinned `mori://shinzui/hurl-workbench` revision `a29d26ad5e90aa762de88be18f06fddf67b6d02f`.
 
-The migration executable composes Kiroku, Keiro, and application migrations in one pg-migrate plan. Its `up` command runs the full plan; `verify` checks the complete ledger and the application-owned live schema separately. The script hashes the migration executable for both Hinagata hook revisions, so changed embedded SQL or a changed runtime cohort causes a new baseline. The checked-in YAML leaves the machine-specific socket, paths, roles, and executable locations to explicit Settei environment bindings supplied by the script.
+The migration executable composes Kiroku, Keiro, and application migrations in one pg-migrate plan. Its `up` command runs the full plan; `verify` checks the complete ledger and the application-owned live schema separately. The service-owned manifest `migration/manifest.json` supplies the application migration ID and a relative SQL filename; the executable reads `migration/application.sql` relative to that manifest. Runtime migrations still come from their public APIs. `migration/verify.sh` invokes the built verifier and executes sibling `verify.sql`, which checks the baseline reference fixture. The checked-in YAML leaves machine-specific connections and roles to environment bindings; a later generated YAML overlay supplies hook executables, argv/environment, and declared inputs. The driver clears inherited hook executable/manual revision/selection bindings so they cannot bypass this overlay.
 
 `reference-seed` is the baseline fixture: IDs 1 and 2, codes `alpha` and `beta`. `service-scenario` includes that same fixture and adds ID 3, `gamma`; `service-scenario-alternate` adds ID 3, `delta`. Hinagata confirms the overlap against captured fixture identity and loads only the scenario suffix on each clone. The driver runs both read suites concurrently on separate ports and leases, and each observes its own third row. The `generated-id` suite then inserts a row without an explicit ID and observes ID 4.
 
@@ -11,3 +11,19 @@ The ordinary `default` and `alternate` suites contain independent read-only heal
 The service wrapper maps Hinagata's application `PG*` lease variables to service-owned `SERVICE_*` Settei settings before startup. Workbench owns readiness and service shutdown. One workbench suite uses one clone, so separate `db with` invocations provide suite isolation. The script confirms released leases after normal completion, after an unready service fails to start, and after interrupting the full workbench/service scope. The test-only `/hold` route keeps the cancellation suite active long enough to observe process-group shutdown. The script prints end-to-end elapsed milliseconds for each normal workbench suite.
 
 The seed is independent of HTTP startup. PostgreSQL, global roles, service readiness, and any projection workers stay caller-owned. Baseline SQL supplies shared reference rows, domain commands seed per-clone event-backed state, and scenario SQL supplies independent reference changes. No fixture writes runtime event/outbox/workflow tables. The opt-in mutating suite uses its own counter ID, so it does not depend on the seeded counter.
+
+
+The [revision driver](../../scripts/keiro-revision-inputs.py) uses disposable copies and declares executable bytes, the SQL and manifest shared by both hooks, verification program/SQL, and a non-secret schema marker.
+`EXAMPLE_MIGRATION_MANIFEST`, `EXAMPLE_VERIFY_BINARY`, and `EXAMPLE_SCHEMA_MARKER` configure the service commands; the same driver variables generate their selected identities.
+The marker becomes a safely quoted table comment that verification reads; it creates no runtime event/outbox/workflow rows.
+The wrapper clears the old verifier argv and runs on every new baseline, including a deliberate failing verification-SQL regression.
+
+For each executable, SQL, manifest, verification-script, verification-SQL, and marker variant, the driver starts with `Reused`, changes only that class, observes `Built`, and then observes `Reused` again.
+The SQL variant adds a column and proves the migration executable digest is unchanged. Fresh clones prove the column, reference rows, and marker; changed manifests are checked through the complete migration ledger.
+A temporary executable copy receives inert trailing bytes; the driver verifies the platform can execute that copy before the build assertion. Original developer files and live binaries are never overwritten.
+All normal HTTP, role separation, startup-failure, and cancellation paths use the same derived overlay.
+
+See [Content-derived baseline revisions](../../docs/user/configuration.md#content-derived-baseline-revisions) for names, encoding, precedence, and relative-path rules.
+Declarations do not discover manifest dependencies, shared libraries, undeclared argv/environment effects, or remote state.
+Inputs must stay stable throughout preparation; boundary checks are not an atomic filesystem snapshot.
+A truthful manual revision remains the fallback for remote/secret-controlled effects; omitting either revision still disables reuse. Never hash secrets into a public identity.

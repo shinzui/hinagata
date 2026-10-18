@@ -43,8 +43,8 @@ def declarations(manual=(), missing=()):
     overlay.write_text(text)
 
 
-def call(args=("db", "prepare", "--json"), status=0):
-    result = subprocess.run(base + list(args), capture_output=True, text=True, timeout=30)
+def call(args=("db", "prepare", "--json"), status=0, cwd=None):
+    result = subprocess.run(base + list(args), capture_output=True, text=True, timeout=30, cwd=cwd)
     assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
     output = result.stdout
     for private in (str(source), str(verify_source), "content-sentinel", "literal-sentinel"):
@@ -80,6 +80,17 @@ verify_source.unlink()
 capture_failure()
 verify_source.write_text("SELECT count(*) FROM declared_sql;\n")
 first = pair()
+# Without explicit hook cwd, relative inputs use invocation cwd, not YAML location.
+with_cwd = overlay.read_text()
+overlay.write_text(with_cwd.replace("  cwd: " + json.dumps(str(root)) + "\n", ""))
+capture_failure()
+assert call(cwd=root)["result"] == "Reused"
+original_sql = source.read_bytes()
+source.write_bytes(original_sql + b"-- invocation cwd variant\n")
+assert call(cwd=root)["result"] == "Built"
+assert call(cwd=root)["result"] == "Reused"
+source.write_bytes(original_sql)
+overlay.write_text(with_cwd)
 original_digest = hashlib.sha256(program.read_bytes()).digest()
 source.write_text("CREATE TABLE declared_sql (id integer, added text); -- content-sentinel\n")
 changed = pair()
@@ -113,12 +124,15 @@ for manual in ("migration", "verification"):
     declarations(manual=(manual,))
     pair()
 declarations()
+maintenance = os.environ["HINAGATA_TEST_PGDATABASE"]
 # Mutation of the other hook's inputs must fail before publication.
 for mode in ("change", "delete", "fail"):
     source.write_text(source.read_text() + "-- unique " + mode + "\n")
     saved = verify_source.read_bytes()
     (root / "mutation").write_text(mode)
+    ready_count = sql(maintenance, "SELECT count(*) FROM hinagata.generations WHERE project_id='cli-direct-load' AND state='Ready'")
     failure = call(status=1)
+    assert sql(maintenance, "SELECT count(*) FROM hinagata.generations WHERE project_id='cli-direct-load' AND state='Ready'") == ready_count, "mutation must not publish a Ready generation"
     assert failure["error"]["code"] == ("baseline_failed" if mode == "fail" else "hook_revision_inputs_changed"), failure
     (root / "mutation").unlink()
     verify_source.write_bytes(saved)

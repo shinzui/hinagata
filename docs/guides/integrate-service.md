@@ -6,7 +6,7 @@ docId: DOC-2
 tags: ["integration", "access", "lifecycle"]
 generated:
   by: process:codex
-  at: 2026-10-18T19:08:35Z
+  at: 2026-10-18T19:46:53Z
 ---
 
 # Integrate a service
@@ -27,7 +27,7 @@ Replace all uppercase placeholders before execution.
 
 2. Supply a migration executable that uses the setup connection from PostgreSQL environment variables.
 3. Supply a verification executable that checks the migrated schema.
-4. Set truthful `migration.revision` and `verification.revision` values.
+4. Set truthful `migration.revision` and `verification.revision` values, or declare complete content inputs for each hook as below.
 5. Make each executable close its database connections before exit.
 6. Put shared data in `baseline.fixtures`.
 7. Configure optional `clone.preparation` for per-clone state that must be created through domain commands.
@@ -36,6 +36,22 @@ Replace all uppercase placeholders before execution.
    A scenario can include a base fixture when its captured identity is unchanged.
    Hinagata does not load the shared base fixture twice.
    Service migrations must grant application access to tables and sequences.
+
+## Identify external migration and verification inputs
+
+Use `revision_executable: true` with an absolute executable, `revision_inputs` for every SQL/manifest/code file consumed, and `revision_values` for selected non-secret configuration.
+See the complete [configuration example and rules](../user/configuration.md#content-derived-baseline-revisions).
+Relative inputs resolve against the hook cwd or invocation directory, never the YAML location.
+A manifest does not automatically select its referenced files. Declare the manifest and those files separately, including shared files read by verification.
+Pass the same selected paths and values to the commands through explicit argv/environment overlays.
+Keep selected inputs stable throughout preparation; concurrent edits can fail checks without providing an atomic snapshot.
+
+The [Keiro driver](../../scripts/keiro-revision-inputs.py) generates paths, a schema-marker command overlay, and identity declarations from the same variables.
+It changes external application SQL while proving the migration executable digest stays equal, then observes `Built` followed by `Reused` and queries the added column in a clone.
+It independently tests the manifest, executable, verification script/SQL, and consumed marker.
+Use a manual revision such as `service-deployment-v12` for remote/secret-controlled effects; do not hash secrets or assume remote state is inspected.
+Omitting both authoring modes preserves rebuild-on-each-preparation behavior.
+`--check-config` validates declarations offline; only operational preparation reads selected content.
 
 ## Seed domain state before service startup
 

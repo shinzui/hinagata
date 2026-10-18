@@ -6,7 +6,7 @@ docId: DOC-3
 tags: ["configuration", "access"]
 generated:
   by: process:codex
-  at: 2026-10-18T19:08:35Z
+  at: 2026-10-18T19:46:53Z
 ---
 
 # Configuration reference
@@ -44,8 +44,8 @@ Core bindings use the `HINAGATA_` prefix and uppercase setting names.
 Replace dots with underscores.
 For example, `fixture.root` becomes `HINAGATA_FIXTURE_ROOT`.
 
-CLI hook bindings cover `executable`, `cwd`, `revision`, and `deadline_ms` for `migration` and `verification`.
-Use YAML for `baseline.fixtures`, hook `argv`, and hook `environment` arrays.
+CLI hook bindings cover `executable`, `cwd`, `revision`, `revision_executable`, and `deadline_ms` for `migration` and `verification`.
+Use YAML for `baseline.fixtures`, hook `argv`, hook `environment`, `revision_inputs`, and `revision_values` arrays.
 These arrays have no environment binding.
 Clone preparation binds its scalar settings to `HINAGATA_CLONE_PREPARATION_EXECUTABLE`,
 `HINAGATA_CLONE_PREPARATION_CWD`, and `HINAGATA_CLONE_PREPARATION_DEADLINE_MS`.
@@ -55,7 +55,7 @@ cabal run hinagata -- --config CONFIG --check-config
 cabal run hinagata -- --config CONFIG --set limits.active_leases=4 --explain-config
 ```
 
-Configuration explanations hide passwords, hook arguments, and hook environment values.
+Configuration explanations hide passwords, hook arguments, hook environment values, and revision input/value arrays.
 Do not put passwords in shell command arguments.
 
 ## Baseline hooks
@@ -69,15 +69,100 @@ The `migration` and `verification` records accept these keys:
 | `argv` | YAML array of arguments, without shell evaluation. |
 | `cwd` | Absolute working directory. |
 | `environment` | YAML array of `NAME=VALUE` entries. |
-| `revision` | Identity of the program's effects. |
+| `revision` | Caller-managed identity of the program's effects. |
+| `revision_executable` | Select executable bytes; Boolean, default `false`. Requires an absolute executable. |
+| `revision_inputs` | YAML array of named `NAME=PATH` file inputs; default `[]`. |
+| `revision_values` | YAML array of named `NAME=VALUE` non-secret literal inputs; default `[]`. |
 | `deadline_ms` | Positive execution limit; default `300000` milliseconds. |
 
 Hooks receive the setup connection through PostgreSQL environment variables.
 Close all hook connections before the program exits.
 A revision requires an executable.
-If either revision is absent, Hinagata builds a new baseline on each preparation.
+If either hook has neither a manual nor a derived revision, Hinagata builds a new baseline on each preparation.
 A program path alone does not establish a reusable revision.
 Change the revision when the hook's effects change.
+
+## Content-derived baseline revisions
+
+Declare the complete set of files and non-secret values that determine each hook's effects.
+For example, layer this fragment over complete database/fixture settings:
+
+```yaml
+migration:
+  executable: /absolute/service/migrate
+  argv: [up]
+  cwd: /absolute/service
+  environment: ["SERVICE_SQL=migration/application.sql", "SERVICE_MODE=test-v1"]
+  revision_executable: true
+  revision_inputs: ["application/sql=migration/application.sql"]
+  revision_values: ["mode=test-v1"]
+verification:
+  executable: /absolute/service/verify
+  cwd: /absolute/service
+  revision_executable: true
+  revision_inputs: ["application/sql=migration/application.sql", "verification/sql=migration/verify.sql"]
+```
+
+The service commands must actually consume the declared files/values through their own arguments or environment.
+A declaration identifies content; it does not pass it to the command.
+Generate each selected value and its command overlay from the same source variable.
+Editing external `application.sql` selects a new baseline even when `migrate` has identical bytes.
+See the runnable [Keiro example](../../examples/keiro-service/README.md), which also consumes a manifest and a schema-marker value.
+
+Names start with a lowercase ASCII letter and use only lowercase letters, digits, `.`, `_`, `-`, and `/`.
+Slash components cannot be empty, `.` or `..`. Names are unique across files and values.
+Executable selection contributes a file named `executable`, so another input cannot use that name when selected.
+Entries split at the first `=`; paths and values may contain further equals signs.
+Paths must be nonempty and contain no NUL. Empty literal values are valid.
+Relative paths resolve against the hook's absolute `cwd`, or the invocation directory captured once when cwd is omitted.
+The YAML file's directory is never the input root.
+Symlinks to regular files are allowed; targets are read and rechecked. Directories, pipes, and other streams are rejected.
+Executable permission is excluded from identity; process startup still requires an executable command.
+Basename commands remain supported when executable bytes are not selected.
+
+Any effective selector chooses derived mode. Setting a manual `revision`, even an empty string, together with a selector is a configuration error.
+Empty arrays and `revision_executable: false` select no content; manual/omitted revision behavior then applies.
+Later YAML arrays replace earlier arrays as a whole; `[]` clears an array.
+Scalar environment bindings `HINAGATA_MIGRATION_REVISION_EXECUTABLE` and `HINAGATA_VERIFICATION_REVISION_EXECUTABLE` override YAML.
+Repeated scalar `--set` overrides beat environment bindings.
+Arrays require YAML; `--set migration.revision_inputs=[]` is a type error, not an array clear.
+To return to manual mode, clear both arrays and disable executable selection in a later YAML layer, then set `revision`.
+Clone preparation has none of these revision selectors and remains outside baseline identity.
+
+`--check-config` validates names, entries, modes, executable requirements, and duplicates offline without reading selected files.
+Configuration explanations also perform these checks and redact the input/value arrays.
+Operational `db prepare`, `db acquire`, `db with`, and `fixture validate` capture both hooks' selected contents before baseline preparation.
+An unreadable input fails before reuse or either hook runs, with phase `hook-revision`, code `hook_revision_input_unreadable`, and exit `1`.
+Malformed/conflicting declarations fail resolution with exit `4`.
+Both captured sets are checked before and after each successful build-time hook and after the build/reuse result, including after lock waiting.
+Detected changes return `hook_revision_inputs_changed` with exit `1`; an original hook failure keeps its original cause.
+Revision diagnostics contain only safe hook/logical labels, never selected file bytes, literal values, physical paths, or raw filesystem exceptions.
+Child-owned stderr remains the command's responsibility.
+
+Keep selected inputs stable throughout preparation. Boundary checks do not provide a filesystem transaction, freeze arbitrary process dependencies, or detect a change reverted between checks.
+Changes detected around hooks prevent publication; a change detected only after publication returns an error without handing out the result.
+That final error does not delete a shared generation. Start a fresh preparation from stable inputs.
+
+Only declared content contributes to this identity. A manifest's referenced files are not discovered transitively: list every file.
+Undeclared argv/environment/cwd effects, shared libraries, remote services, and other process behavior remain caller-owned.
+Raw byte changes, including comments, newlines, and formatting, invalidate identity. No SQL/JSON semantic equivalence is inferred.
+Use a truthful manual `revision` for remote or secret-controlled effects that cannot be represented by selected content.
+A non-secret remote deployment/version identifier may be a declared value, but Hinagata cannot verify that it matches remote state.
+Never select secrets as file contents or literal values; hashing does not protect a secret in a public identity.
+
+### Version-1 encoding
+
+The reusable `Hinagata.Hook.Revision` helper accepts a nonempty list of `FileInput` and `ValueInput` entries with smart-constructed `InputName` values.
+`deriveHookRevision` returns opaque evidence, `hookRevision` returns its revision, and `verifyHookRevisionInputs` checks the selected files again.
+`revisionInputLabels` exposes only safe names and kinds. Direct callers pass the derived text through the existing `Maybe Text` baseline revision fields and own the same execution-boundary checks.
+
+The printable format is `hinagata-hook-revision-v1:sha256:` plus 64 lowercase hexadecimal digits.
+Hash an encoding beginning with UTF-8 `hinagata-hook-revision-v1` and a zero byte, followed by the entry count.
+Sort entries by the UTF-8 bytes of the logical name. Encode each name's byte length followed by its bytes, then a one-byte kind tag (`1` file, `2` value).
+File payloads are the byte count followed by 32 raw SHA-256 digest bytes; values are their UTF-8 byte length followed by exact UTF-8 bytes.
+All lengths/counts are unsigned 64-bit big-endian integers.
+File lengths are counted from the same bytes fed to the incremental hash, with bounded read memory.
+Physical paths, mtimes, access times, inode numbers, permissions, and declaration order are excluded; logical name and kind changes are included.
 
 ## Per-clone preparation
 
@@ -94,7 +179,7 @@ clone:
     deadline_ms: "10000"
 ```
 
-The record accepts the baseline hook command keys above except `revision`.
+The record accepts only `executable`, `argv`, `cwd`, `environment`, and `deadline_ms`.
 Changing the executable, arguments, or other preparation settings leaves an unchanged baseline reusable.
 The command runs once on each new clone, including clones of a reused baseline.
 It runs after clone access is configured, before the scenario suffix loads, and before application handoff.

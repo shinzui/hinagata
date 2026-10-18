@@ -4,9 +4,21 @@ title: "Derive baseline hook revisions from declared content inputs"
 description: "Provide deterministic content-derived migration and verification revisions from explicit executable, SQL, manifest, and configuration inputs so fixture authors can keep reusable baselines aligned with changing schema effects."
 generated:
   by: codex-cli/gpt-6.1-sol
-  at: "2026-10-18T19:39:30Z"
+  at: "2026-10-18T19:51:17Z"
 requestId: IR-2
-status: in-progress
+status: completed
+completedAt: "2026-10-18T19:51:17Z"
+resolution: >-
+  Implemented versioned named-content hook revisions with deterministic vectors and
+  relocation/order/timestamp independence (AC-1). Native PostgreSQL and the Keiro
+  example prove independent executable, external SQL, manifest, verification code/SQL,
+  and consumed non-secret marker invalidation with Built then Reused (AC-2).
+  Initial missing/unreadable inputs run neither hook; redaction, mutation/deletion,
+  no-publication, and advisory-lock-wait checks pass (AC-3). Manual, independently
+  missing, mixed, and conflicting revision regressions pass (AC-4). References, ADRs,
+  and the runnable example define declared dependencies and manual fallback (AC-5).
+  All required regression, strict documentation, formatting, and isolated archive
+  build/test/Haddock plus packaged migration/verification gates passed under ExecPlan 7.
 targetPlan: docs/plans/7-derive-baseline-hook-revisions-from-declared-content-inputs.md
 origin: mori://shinzui/rei/masterplans/29-close-rei-cli-and-http-api-gaps-on-the-haskell-jitsurei-contract
 acceptanceCriteria:
@@ -46,7 +58,7 @@ reviews:
 
 ## Context
 
-Baseline fingerprints include migration and verification revisions. CLI configuration currently relies on callers supplying those revision strings; missing revisions correctly disable persistent reuse. The Keiro example hashes its built migration executable, which is appropriate for its embedded SQL but does not by itself identify arbitrary external files or configuration read by another hook.
+Baseline fingerprints include migration and verification revisions. At request time, CLI configuration relied on callers supplying those revision strings; missing revisions correctly disable persistent reuse. The Keiro example then hashed its built migration executable, which was appropriate for its embedded SQL but does not by itself identify arbitrary external files or configuration read by another hook.
 
 mori://shinzui/rei/masterplans/29-close-rei-cli-and-http-api-gaps-on-the-haskell-jitsurei-contract changes inline read-model DDL, indexes, and migration manifests across many milestones. A declared-input helper would reduce accidental reuse of a baseline whose schema inputs changed. This is an authoring convenience over the existing cache contract, not evidence that a current cache defect has been reproduced.
 
@@ -62,4 +74,4 @@ Recommended before relying on persistent baseline reuse during rapid schema deve
 
 ## Implementation plan
 
-Accepted for implementation in [ExecPlan 7: Derive baseline hook revisions from declared content inputs](../plans/7-derive-baseline-hook-revisions-from-declared-content-inputs.md). The plan covers AC-1 through AC-5; implementation and acceptance verification are in progress.
+Completed in [ExecPlan 7: Derive baseline hook revisions from declared content inputs](../plans/7-derive-baseline-hook-revisions-from-declared-content-inputs.md). AC-1 through AC-5 passed the deterministic helper, offline configuration, native PostgreSQL, and consumed-input Keiro example checks. The plan records final regression and unpacked archive evidence. Existing author assessment provenance remains separate from implementation verification.
