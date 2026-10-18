@@ -2,8 +2,8 @@ module Main (main) where
 
 import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, readMVar, takeMVar, tryReadMVar)
-import Control.Exception (AsyncException (ThreadKilled), SomeException, bracket, fromException, try)
-import Control.Monad (forM_)
+import Control.Exception (AsyncException (ThreadKilled), SomeException, bracket, bracket_, fromException, try)
+import Control.Monad (forM, forM_)
 import Data.ByteString.Char8 qualified as ByteString
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.List (find, nub, sort)
@@ -18,7 +18,7 @@ import Hinagata.Fixture.Bundle
 import Hinagata.Fixture.Types
 import Hinagata.Postgres.Baseline hiding (elapsedMs)
 import Hinagata.Postgres.Cleanup
-import Hinagata.Postgres.Error (LoadError (..), LoadPhase (..))
+import Hinagata.Postgres.Error (FixtureLoadContext (..), LoadError (..), LoadPhase (..), loadErrorContext)
 import Hinagata.Postgres.Lease
 import Hinagata.Postgres.Load
 import Hinagata.Postgres.Manager
@@ -305,9 +305,21 @@ endpointTests workspace socket connection fixtureRoot bundleRoot = do
   createDirectoryIfMissing True directory
   ByteString.writeFile (directory </> "fixture.sql") "INSERT INTO endpoint_probe VALUES (1);"
   execCheck connection "CREATE TABLE endpoint_probe (id integer)"
-  run "127.0.0.2" ["--endpoint-worker", fixtureRoot, bundleRoot, socket, "success"]
+  start <- newEmptyMVar
+  completed <- forM [("valid", "127.0.0.2", socket, "success"), ("missing", "127.0.0.1", socket </> "missing", "failure")] $ \(label, address, selectedHost, expected) -> do
+    let private = workspace </> ("endpoint-" ++ label)
+    createDirectoryIfMissing True private
+    finished <- newEmptyMVar
+    _ <-
+      forkIO $
+        try @SomeException
+          (readMVar start >> runEndpointWorker private address ["--endpoint-worker", fixtureRoot, private </> "bundles", selectedHost, expected])
+          >>= putMVar finished
+    pure finished
+  putMVar start ()
+  outcomes <- mapM takeMVar completed
+  assert "concurrent explicit endpoint workers stay independent" (all (either (const False) (const True)) outcomes)
   run "" ["--endpoint-worker", fixtureRoot, bundleRoot, socket, "success"]
-  run "127.0.0.1" ["--endpoint-worker", fixtureRoot, bundleRoot, socket </> "missing", "failure"]
   assert "missing socket never dispatches to reachable TCP" =<< ((== 2) <$> queryInt connection "SELECT count(*) FROM endpoint_probe")
   tcpEnabled <- lookupEnv "HINAGATA_TEST_TCP"
   when (tcpEnabled == Just "1") $ do
@@ -553,6 +565,10 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   failedLoad <- withDatabase lifecycleConfig firstRef badScenario (\_ -> pure ())
   assert "failed scenario load refuses callback" (case failedLoad of Left _ -> True; Right _ -> False)
   assert "failed scenario load releases its clone" =<< ((== 6) <$> queryInt connection "SELECT count(*) FROM hinagata_test.leases WHERE state = 'Released'")
+  assert "lease scenario preserves primary SQLSTATE" (case failedLoad of Left LeaseError {sqlState = Just "23505"} -> True; _ -> False)
+  directFailure <- withDatabase lifecycleConfig firstRef goodPlan (\LeaseInfo {applicationTarget} -> loadInto applicationTarget defaultSessionOptions badScenario)
+  assert "direct scenario observes the same constraint failure" (case directFailure of Right (Left LoadError {phase = ExecuteSql, sqlState = Just "23505"}) -> True; _ -> False)
+  assert "lease and direct load preserve matching structured context" (case (failedLoad, directFailure) of (Left LeaseError {fixtureLoadContext = Just context}, Right (Left direct)) -> context == loadErrorContext direct; _ -> False)
   createDirectoryIfMissing True (fixtureRoot </> "slow-acquisition")
   ByteString.writeFile (fixtureRoot </> "slow-acquisition" </> "fixture.sql") "SELECT pg_sleep(2);"
   slowScenario <- bundleOrFail =<< compileFixtures (BundleConfig fixtureRoot bundleRoot (positive 1048576) (positive 65536)) [fixtureName "good", fixtureName "slow-acquisition"]
@@ -681,6 +697,7 @@ lifecycleTests target connection host port adminUser database fixtureRoot bundle
   bulkRequested <- (== Just "1") <$> lookupEnv "HINAGATA_TEST_BULK_BASELINE"
   when bulkRequested (bulkBaselineTests lifecycleConfig fixtureRoot bundleRoot connection)
   missingCreatedbTests lifecycleConfig baselineSpec connection database
+  structuredLoadErrorTests lifecycleConfig baselineSpec goodPlan fixtureRoot bundleRoot connection
   roleSettingTests lifecycleConfig baselineSpec scenarioPlan connection
   generationLifecycleTests lifecycleConfig baselineSpec firstRef scenarioPlan fixtureRoot bundleRoot connection migrationCalls messageSetting target catalogSchema
 
@@ -1267,69 +1284,138 @@ cleanupLifecycleTests lifecycleConfig catalog firstRef scenarioPlan connection d
   protectedApply <- applyCleanup lifecycleConfig IncludeRetained [protectedId]
   assert "maintenance database is protected even with a catalog allocation" (case protectedApply of Right [Refused identifier _] -> identifier == protectedId; _ -> False)
 
-roleSettingTests :: HinagataConfig -> BaselineSpec -> FixturePlan -> PQ.Connection -> IO ()
-roleSettingTests configuration specification scenario observer = do
-  searchPath <- orFail (mkSqlIdentifier "search_path")
-  custom <- orFail (mkSqlIdentifier "hinagata.setting_probe")
-  readOnly <- orFail (mkSqlIdentifier "default_transaction_read_only")
-  transactionReadOnly <- orFail (mkSqlIdentifier "transaction_read_only")
-  messages <- orFail (mkSqlIdentifier "client_min_messages")
-  execCheck observer "GRANT SET ON PARAMETER \"hinagata.setting_probe\" TO hinagata_app"
-  project <- orFail (mkProjectId "setting-semantics-test")
-  let customValue = "apostrophe' backslash\\; SELECT secret_setting_probe;"
-      appPath = "\"$user\", \"comma,schema\", public, pg_catalog"
-      selected =
-        configuration
-          { project,
-            setupSettings = [RoleSetting messages "warning", RoleSetting searchPath "public, pg_catalog"],
-            applicationSettings = [RoleSetting searchPath appPath, RoleSetting custom customValue, RoleSetting readOnly "on", RoleSetting transactionReadOnly "on", RoleSetting messages "notice"]
-          }
-      migrate target = bracket (PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString target)))) PQ.finish $ \connection -> do
-        schemas <- queryText connection "SELECT array_to_string(current_schemas(false), ',')"
-        assert "setup search_path is a schema list before migration" (schemas == "public,pg_catalog")
-        execCheck connection "CREATE TABLE items (id integer PRIMARY KEY, note text NOT NULL)"
-        execCheck connection "GRANT SELECT, INSERT ON items TO hinagata_app"
-        execCheck connection "CREATE SCHEMA \"comma,schema\""
-        execCheck connection "CREATE TABLE \"comma,schema\".setting_relation (value integer)"
-        execCheck connection "INSERT INTO \"comma,schema\".setting_relation VALUES (42)"
-        execCheck connection "GRANT USAGE ON SCHEMA \"comma,schema\" TO hinagata_app"
-        execCheck connection "GRANT SELECT ON \"comma,schema\".setting_relation TO hinagata_app"
+structuredLoadErrorTests :: HinagataConfig -> BaselineSpec -> FixturePlan -> FilePath -> FilePath -> PQ.Connection -> IO ()
+structuredLoadErrorTests configuration specification goodPlan fixtureRoot bundleRoot observer = do
+  project <- orFail (mkProjectId "structured-error-test")
+  secret <- orFail (mkSecret "fixture-password-secret")
+  let selected = configuration {project, setup = (setup configuration) {password = Just secret}, application = (application configuration) {password = Just secret}}
+      migrate target = do
+        original <- migrationHook specification target
+        case original of
+          Left problem -> pure (Left problem)
+          Right () -> bracket (PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString target)))) PQ.finish $ \connection -> do
+            execCheck connection "CREATE TABLE secret_items (id text PRIMARY KEY)"
+            execCheck connection "CREATE TABLE parent_items (id integer PRIMARY KEY)"
+            execCheck connection "CREATE TABLE child_items (parent_id integer REFERENCES parent_items(id) DEFERRABLE INITIALLY DEFERRED)"
+            execCheck connection "GRANT SELECT, INSERT ON secret_items, child_items TO hinagata_app"
+            pure (Right ())
+      spec = specification {configuration = selected, migrationRevision = Just "structured-errors-v1", migrationHook = migrate}
+      config = BundleConfig fixtureRoot bundleRoot (positive 1048576) (positive 65536)
+      sqlDirectory = fixtureRoot </> "error-sql"
+      copyDirectory = fixtureRoot </> "error-copy"
+      terminateDirectory = fixtureRoot </> "error-terminate"
+  mapM_ (createDirectoryIfMissing True) [sqlDirectory, copyDirectory, terminateDirectory]
+  ByteString.writeFile (sqlDirectory </> "fixture.yaml") "name: error-sql\nsteps:\n  - sql: first.sql\n  - sql: fail.sql\n"
+  ByteString.writeFile (sqlDirectory </> "first.sql") "INSERT INTO secret_items VALUES ('fixture-value-secret');"
+  ByteString.writeFile (sqlDirectory </> "fail.sql") "INSERT INTO secret_items VALUES ('fixture-value-secret');"
+  ByteString.writeFile (copyDirectory </> "fixture.yaml") "name: error-copy\nsteps:\n  - sql: first.sql\n  - copy:\n      table: {schema: public, name: secret_items}\n      columns: [id]\n      file: rows.csv\n      format: csv\n      header: false\n"
+  ByteString.writeFile (copyDirectory </> "first.sql") "INSERT INTO items VALUES (13, 'early write');"
+  ByteString.writeFile (copyDirectory </> "rows.csv") "fixture-copy-secret\nfixture-copy-secret\n"
+  ByteString.writeFile (terminateDirectory </> "fixture.sql") "SELECT pg_terminate_backend(pg_backend_pid());"
+  (baseline, _) <- orFail =<< ensureBaseline spec
+  withManager selected $ \manager -> forM_ [("error-sql", ExecuteSql, Just 1, "23505"), ("error-copy", ExecuteCopy, Just 1, "23505"), ("deferred", CommitLoad, Nothing, "23503")] $ \(name, expectedPhase, expectedStep, expectedState) -> do
+    plan <- bundleOrFail =<< compileFixtures config [fixtureName name]
+    combined <- bundleOrFail =<< compileFixtures config [fixtureName "good", fixtureName name]
+    direct <- orFail =<< withDatabase selected baseline goodPlan (\LeaseInfo {applicationTarget} -> loadInto applicationTarget defaultSessionOptions plan)
+    loadFailure <- case direct of Left problem -> pure problem; Right _ -> fail "expected direct fixture failure"
+    let expected = loadErrorContext loadFailure
+        matches context = context == Just expected
+    assert "direct load attributes SQL/COPY/COMMIT errors" (case expected of FixtureLoadContext {phase, fixture, stepIndex, sqlState} -> phase == expectedPhase && stepIndex == expectedStep && sqlState == Just expectedState && fixture == (if expectedPhase == CommitLoad then Nothing else Just (fixtureName name)))
+    baseFailure <- ensureBaseline spec {basePlan = combined}
+    assert "baseline retains structured fixture failure" (case baseFailure of Left BaselineError {sqlState, fixtureLoadContext} -> sqlState == Just expectedState && matches fixtureLoadContext; _ -> False)
+    leaseFailure <- withDatabaseClassified selected baseline plan ReleaseAlways (const False) (const (fail "failed scenario reached callback"))
+    managedFailure <- withManagedDatabaseClassified manager baseline plan ReleaseAlways (const False) (const (fail "failed managed scenario reached callback"))
+    assert "lease retains structured fixture failure" (case leaseFailure of Left LeaseError {sqlState, fixtureLoadContext} -> sqlState == Just expectedState && matches fixtureLoadContext; _ -> False)
+    assert "manager forwards original fixture context" (case managedFailure of Left LeaseError {sqlState, fixtureLoadContext} -> sqlState == Just expectedState && matches fixtureLoadContext; _ -> False)
+    let safe = Text.pack (show (fmap (const ()) baseFailure, fmap (const ()) leaseFailure, fmap (const ()) managedFailure))
+    assert "lifecycle Show omits fixture data credentials and endpoints" (all (not . (`Text.isInfixOf` safe)) ["fixture-value-secret", "fixture-copy-secret", "fixture-password-secret", "ConnectionTarget"])
+  preparedTarget <- newEmptyMVar
+  let hook target = bracket (PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString target)))) PQ.finish $ \connection -> do
+        execCheck connection "BEGIN; INSERT INTO secret_items VALUES ('prepared'); PREPARE TRANSACTION 'hinagata_error_cleanup'"
+        putMVar preparedTarget target
         pure (Right ())
-      spec = specification {configuration = selected, migrationHook = migrate, verificationHook = const (pure (Right ()))}
-      consume LeaseInfo {applicationTarget} = bracket (PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString applicationTarget)))) PQ.finish $ \connection -> do
-        path <- queryText connection "SHOW search_path"
-        assert "application path preserves user token and quoted comma schema" (path == Encoding.encodeUtf8 appPath)
-        assert "quoted comma schema resolves as one name" =<< ((== 42) <$> queryInt connection "SELECT value FROM setting_relation")
-        assert "custom setting preserves apostrophe and backslash as data" =<< ((== Encoding.encodeUtf8 customValue) <$> queryText connection "SHOW hinagata.setting_probe")
-        assert "default read-only setting persists without blocking its own ALTER" =<< ((== "on") <$> queryText connection "SHOW default_transaction_read_only")
-        assert "scalar setting retains meaning" =<< ((== "notice") <$> queryText connection "SHOW client_min_messages")
-  (baseline, built) <- orFail =<< ensureBaseline spec
-  assert "setting semantics baseline built" (kind built == Built)
-  (_, warm) <- orFail =<< ensureBaseline spec
-  assert "corrected settings baseline reuses" (kind warm == Reused)
-  void (orFail =<< withDatabase selected baseline scenario consume)
-  let database = databaseNameText (baselineDatabase baseline)
-      selector = " WHERE database_name='" <> database <> "'"
-      legacyManifest = "replace(fingerprint_manifest->>'manifest', 'hinagata-fingerprint-v2', 'hinagata-fingerprint-v1')"
-  assert "corrected fingerprints have v2 marker" =<< ((== 1) <$> queryInt observer (Encoding.encodeUtf8 ("SELECT count(*) FROM hinagata_test.generations" <> selector <> " AND fingerprint_manifest->>'manifest' LIKE 'hinagata-fingerprint-v2%'")))
-  -- Exercise supported old-manifest comparison through an opaque public handle;
-  -- keep its selected digest stable while changing only the stored format marker.
-  execCheck observer (Encoding.encodeUtf8 ("UPDATE hinagata_test.generations SET fingerprint_manifest=jsonb_set(fingerprint_manifest, '{manifest}', to_jsonb(" <> legacyManifest <> "))" <> selector))
-  (_, compared) <- orFail =<< ensureBaseline spec {compareAgainst = Just baseline}
-  assert "v1 comparison identifies only fingerprint version" (fmap changedComponents (comparison compared) == Just [FingerprintVersion])
-  -- Now give that synthetic legacy generation its genuine v1 manifest digest.
-  execCheck observer (Encoding.encodeUtf8 ("UPDATE hinagata_test.generations SET fingerprint=encode(sha256(convert_to(fingerprint_manifest->>'manifest','UTF8')), 'hex')" <> selector))
-  (corrected, rebuilt) <- orFail =<< ensureBaseline spec
-  assert "legacy semantics generation is not reused" (kind rebuilt == Built && baselineDatabase corrected /= baselineDatabase baseline)
-  (_, reused) <- orFail =<< ensureBaseline spec
-  assert "new semantics reuse after legacy invalidation" (kind reused == Reused)
-  assert "legacy baseline stays sealed and inspectable" =<< ((== 1) <$> queryInt observer (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname='" <> database <> "' AND NOT datallowconn")))
-  void (orFail =<< withDatabase selected corrected scenario consume)
-  invalid <- orFail (mkSqlIdentifier "hinagata_unknown_parameter")
-  let invalidSpec = spec {configuration = selected {applicationSettings = [RoleSetting custom "half-persisted-probe", RoleSetting invalid "bad"]}}
-  failed <- ensureBaseline invalidSpec
-  assert "invalid role setting fails preparation" (case failed of Left _ -> True; _ -> False)
-  assert "failed role-setting transaction leaves no partial setting" =<< ((== 0) <$> queryInt observer "SELECT count(*) FROM pg_db_role_setting WHERE setconfig @> ARRAY['hinagata.setting_probe=half-persisted-probe']")
+  (hooked, _) <- orFail =<< ensureBaseline spec {clonePreparationHook = Just hook}
+  terminating <- bundleOrFail =<< compileFixtures config [fixtureName "error-terminate"]
+  directTermination <- orFail =<< withDatabase selected baseline goodPlan (\LeaseInfo {applicationTarget} -> loadInto applicationTarget defaultSessionOptions terminating)
+  originalContext <- case directTermination of Left problem -> pure (loadErrorContext problem); Right _ -> fail "expected terminated direct load"
+  doubleFailure <- withDatabaseClassified selected hooked terminating ReleaseAlways (const False) (const (fail "terminated load reached callback"))
+  assert "direct disconnect records rollback failure" (case originalContext of FixtureLoadContext {phase = ExecuteSql, rollbackFailure = Just _} -> True; _ -> False)
+  -- Disconnect timing can change whether libpq receives the server SQLSTATE.
+  -- Check that release cannot replace the actual primary state with DROP's state.
+  assert ("rollback and clone release failures keep primary load context: " ++ show (fmap (const ()) doubleFailure)) (case doubleFailure of Left LeaseError {cause = "scenario fixture load failed", sqlState, fixtureLoadContext = Just FixtureLoadContext {phase = ExecuteSql, fixture = Just name, stepIndex = Just 0, sqlState = loadState, rollbackFailure = Just _}, cleanupFailure = Just _} -> name == fixtureName "error-terminate" && sqlState == loadState && sqlState /= Just "55006"; _ -> False)
+  target <- takeMVar preparedTarget
+  bracket (PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString target)))) PQ.finish $ \connection -> execCheck connection "ROLLBACK PREPARED 'hinagata_error_cleanup'"
+  identifier <- queryText observer (Encoding.encodeUtf8 ("SELECT l.id FROM hinagata_test.leases l JOIN hinagata_test.allocations a ON a.id=l.allocation_id WHERE a.database_name='" <> databaseNameText (connectionDatabase target) <> "'"))
+  released <- orFail =<< releaseLease selected (Encoding.decodeUtf8 identifier)
+  assert "double failure stays recoverable through explicit release" (case released of Released _ -> True; _ -> False)
+
+roleSettingTests :: HinagataConfig -> BaselineSpec -> FixturePlan -> PQ.Connection -> IO ()
+roleSettingTests configuration specification scenario observer =
+  bracket_
+    (execCheck observer "ALTER ROLE hinagata_app SET standard_conforming_strings=off")
+    (execCheck observer "ALTER ROLE hinagata_app RESET standard_conforming_strings")
+    $ do
+      searchPath <- orFail (mkSqlIdentifier "search_path")
+      custom <- orFail (mkSqlIdentifier "hinagata.setting_probe")
+      readOnly <- orFail (mkSqlIdentifier "default_transaction_read_only")
+      transactionReadOnly <- orFail (mkSqlIdentifier "transaction_read_only")
+      messages <- orFail (mkSqlIdentifier "client_min_messages")
+      execCheck observer "GRANT SET ON PARAMETER \"hinagata.setting_probe\" TO hinagata_app"
+      project <- orFail (mkProjectId "setting-semantics-test")
+      let customValue = "apostrophe' backslash\\; SELECT secret_setting_probe;"
+          appPath = "\"$user\", \"comma,schema\", public, pg_catalog"
+          selected =
+            configuration
+              { project,
+                setupSettings = [RoleSetting messages "warning", RoleSetting searchPath "public, pg_catalog"],
+                applicationSettings = [RoleSetting searchPath appPath, RoleSetting custom customValue, RoleSetting readOnly "on", RoleSetting transactionReadOnly "on", RoleSetting messages "notice"]
+              }
+          migrate target = bracket (PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString target)))) PQ.finish $ \connection -> do
+            schemas <- queryText connection "SELECT array_to_string(current_schemas(false), ',')"
+            assert "setup search_path is a schema list before migration" (schemas == "public,pg_catalog")
+            execCheck connection "CREATE TABLE items (id integer PRIMARY KEY, note text NOT NULL)"
+            execCheck connection "GRANT SELECT, INSERT ON items TO hinagata_app"
+            execCheck connection "CREATE SCHEMA \"comma,schema\""
+            execCheck connection "CREATE TABLE \"comma,schema\".setting_relation (value integer)"
+            execCheck connection "INSERT INTO \"comma,schema\".setting_relation VALUES (42)"
+            execCheck connection "GRANT USAGE ON SCHEMA \"comma,schema\" TO hinagata_app"
+            execCheck connection "GRANT SELECT ON \"comma,schema\".setting_relation TO hinagata_app"
+            pure (Right ())
+          spec = specification {configuration = selected, migrationHook = migrate, verificationHook = const (pure (Right ()))}
+          consume LeaseInfo {applicationTarget} = bracket (PQ.connectdb (Encoding.encodeUtf8 (connectionStringText (renderConnectionString applicationTarget)))) PQ.finish $ \connection -> do
+            path <- queryText connection "SHOW search_path"
+            assert "application path preserves user token and quoted comma schema" (path == Encoding.encodeUtf8 appPath)
+            assert "quoted comma schema resolves as one name" =<< ((== 42) <$> queryInt connection "SELECT value FROM setting_relation")
+            assert "custom setting preserves apostrophe and backslash as data" =<< ((== Encoding.encodeUtf8 customValue) <$> queryText connection "SHOW hinagata.setting_probe")
+            assert "default read-only setting persists without blocking its own ALTER" =<< ((== "on") <$> queryText connection "SHOW default_transaction_read_only")
+            assert "scalar setting retains meaning" =<< ((== "notice") <$> queryText connection "SHOW client_min_messages")
+      (baseline, built) <- orFail =<< ensureBaseline spec
+      assert "setting semantics baseline built" (kind built == Built)
+      (_, warm) <- orFail =<< ensureBaseline spec
+      assert "corrected settings baseline reuses" (kind warm == Reused)
+      void (orFail =<< withDatabase selected baseline scenario consume)
+      let database = databaseNameText (baselineDatabase baseline)
+          selector = " WHERE database_name='" <> database <> "'"
+          legacyManifest = "replace(fingerprint_manifest->>'manifest', 'hinagata-fingerprint-v2', 'hinagata-fingerprint-v1')"
+      assert "corrected fingerprints have v2 marker" =<< ((== 1) <$> queryInt observer (Encoding.encodeUtf8 ("SELECT count(*) FROM hinagata_test.generations" <> selector <> " AND fingerprint_manifest->>'manifest' LIKE 'hinagata-fingerprint-v2%'")))
+      -- Exercise supported old-manifest comparison through an opaque public handle;
+      -- keep its selected digest stable while changing only the stored format marker.
+      execCheck observer (Encoding.encodeUtf8 ("UPDATE hinagata_test.generations SET fingerprint_manifest=jsonb_set(fingerprint_manifest, '{manifest}', to_jsonb(" <> legacyManifest <> "))" <> selector))
+      (_, compared) <- orFail =<< ensureBaseline spec {compareAgainst = Just baseline}
+      assert "v1 comparison identifies only fingerprint version" (fmap changedComponents (comparison compared) == Just [FingerprintVersion])
+      -- Now give that synthetic legacy generation its genuine v1 manifest digest.
+      execCheck observer (Encoding.encodeUtf8 ("UPDATE hinagata_test.generations SET fingerprint=encode(sha256(convert_to(fingerprint_manifest->>'manifest','UTF8')), 'hex')" <> selector))
+      (corrected, rebuilt) <- orFail =<< ensureBaseline spec
+      assert "legacy semantics generation is not reused" (kind rebuilt == Built && baselineDatabase corrected /= baselineDatabase baseline)
+      (_, reused) <- orFail =<< ensureBaseline spec
+      assert "new semantics reuse after legacy invalidation" (kind reused == Reused)
+      assert "legacy baseline stays sealed and inspectable" =<< ((== 1) <$> queryInt observer (Encoding.encodeUtf8 ("SELECT count(*) FROM pg_database WHERE datname='" <> database <> "' AND NOT datallowconn")))
+      void (orFail =<< withDatabase selected corrected scenario consume)
+      invalid <- orFail (mkSqlIdentifier "hinagata_unknown_parameter")
+      let invalidSpec = spec {configuration = selected {applicationSettings = [RoleSetting custom "half-persisted-probe", RoleSetting invalid "bad"]}}
+      failed <- ensureBaseline invalidSpec
+      assert "invalid role setting fails preparation" (case failed of Left _ -> True; _ -> False)
+      assert "failed role-setting transaction leaves no partial setting" =<< ((== 0) <$> queryInt observer "SELECT count(*) FROM pg_db_role_setting WHERE setconfig @> ARRAY['hinagata.setting_probe=half-persisted-probe']")
 
 completionCancellationTests :: HinagataConfig -> BaselineRef -> FixturePlan -> PQ.Connection -> ConnectionTarget -> IO ()
 completionCancellationTests configuration baseline scenario observer target =

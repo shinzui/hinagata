@@ -26,7 +26,7 @@ intention: "intention_01m58e4vxke9stryg9na9xc9em"
 # Fix code and API audit findings
 
 
-This MasterPlan coordinates fixes for all seven findings from the 2026-10-18 code/API audit. Its registry owns child status; child ExecPlans own milestones and implementation evidence. This planning task creates the documents, not the fixes. Intention `intention_01m58e4vxke9stryg9na9xc9em` was created with `mina ci --json` at the user's request.
+This MasterPlan coordinates fixes for all seven findings from the 2026-10-18 code/API audit. Its registry owns child status; child ExecPlans own milestones and implementation evidence. Implementation follows the serial registry order, with finding-specific evidence recorded in each child. Intention `intention_01m58e4vxke9stryg9na9xc9em` was created with `mina ci --json` at the user's request.
 
 
 ## Vision & Scope
@@ -60,7 +60,7 @@ Relevant local decisions are [ADR 1](../adr/1-library-boundary-and-service-owned
 | 9 | Explicit connection targets | [9-honor-explicit-postgresql-connection-targets.md](../plans/9-honor-explicit-postgresql-connection-targets.md) | None | EP-8 | Complete |
 | 10 | Cancellation and resource lifetimes | [10-propagate-cancellation-through-commands-and-resource-lifetimes.md](../plans/10-propagate-cancellation-through-commands-and-resource-lifetimes.md) | None | EP-9 | Complete |
 | 11 | Role-setting semantics and cache identity | [11-apply-postgresql-role-settings-without-changing-their-meaning.md](../plans/11-apply-postgresql-role-settings-without-changing-their-meaning.md) | None | None | Complete |
-| 12 | Structured lifecycle errors | [12-preserve-structured-fixture-errors-across-lifecycle-apis.md](../plans/12-preserve-structured-fixture-errors-across-lifecycle-apis.md) | None | EP-10, EP-11 | Not Started |
+| 12 | Structured lifecycle errors | [12-preserve-structured-fixture-errors-across-lifecycle-apis.md](../plans/12-preserve-structured-fixture-errors-across-lifecycle-apis.md) | None | EP-10, EP-11 | Complete |
 
 Status values are Not Started, In Progress, Complete, or Cancelled. F1 maps to EP-8; F3 to EP-9; F2/F4/F5 to EP-10; F6 to EP-11; F7 to EP-12. Every finding has one accountable owner.
 
@@ -90,9 +90,9 @@ Durable exception/ownership rules belong in ADRs 1–3 when implemented. Endpoin
 ## Progress
 
 
-EP-8 and EP-9 are accepted with core, socket/TCP, and CLI/native regressions. EP-10 is also accepted, including cancelled acquisition under conflicting endpoint defaults and recovery after interrupted completion. EP-11 is accepted with setting semantics and v1/v2 cache compatibility evidence. EP-12 remains, followed by the combined integration gate. No child is blocked by a hard dependency. This master plan is not complete until every child is accepted and the combined integration gate below passes.
+All five children are Complete. The combined integration gate passed on 2026-10-18 with fresh disposable clusters and HINAGATA_TEST_PGHOST unset. Concurrent endpoint isolation, cancellation with conflicting routing defaults, independent cleanup diagnostics, retained-clone recovery, and all seven finding-specific outcomes are accepted. No integration gate remains. ADR distillation across this MasterPlan and all children is complete in ADRs 1–3.
 
-The final gate runs from the repository root in the development environment with `HINAGATA_TEST_PGHOST` unset. Use fresh disposable clusters and retain concise evidence on the final combined tree:
+The accepted final gate runs from the repository root in the development environment with `HINAGATA_TEST_PGHOST` unset. Use fresh disposable clusters and retain concise evidence on the final combined tree:
 
 ```bash
 cabal build all --enable-tests --enable-benchmarks
@@ -106,13 +106,15 @@ just check-docs
 git diff --check
 ```
 
-All tests/checks must pass. Reuse already recorded results from the same combined tree unless changes invalidate them. Verify the seven finding-specific acceptance outcomes, the endpoint-plus-cancellation integration proof, redaction, unchanged caller-owned data on rejected/cancelled loads, and recoverability of retained clones. Build examples and benchmarks through `cabal build all --enable-tests --enable-benchmarks` so public error changes cannot leave consumers broken. Do not run the aggregate release/package-publication workflow as part of this gate. Update registry and outcomes only after observed acceptance, then complete ADR distillation.
+All listed tests/checks passed. Reuse recorded results from the same combined tree unless changes invalidate them. Verify the seven finding-specific acceptance outcomes, the endpoint-plus-cancellation integration proof, redaction, unchanged caller-owned data on rejected/cancelled loads, and recoverability of retained clones. Build examples and benchmarks through `cabal build all --enable-tests --enable-benchmarks` so public error changes cannot leave consumers broken. Do not run the aggregate release/package-publication workflow as part of this gate. Registry, outcomes, and ADR distillation now reflect observed acceptance.
 
 
 ## Surprises & Discoveries
 
 
 The original test suites passed despite the six demonstrated bugs. New behavior-specific regressions are therefore mandatory. Role-setting repair also needs semantic fingerprint invalidation; otherwise a matching sealed baseline can preserve the old behavior even after the setter changes. The child plan handles supported old/new comparisons explicitly.
+
+Implementation confirmed that idle GC could hide the acquisition leak; the peer regression disables idle GC and observes explicit socket closure. Applying every role value to the current session would make read-only persistence fail, so quoted lists use server interpretation while scalars use mode-independent escape literals in one role-owned transaction. Cancellation delivery ownership must be latched with the first signal and checked again at successful handoff. Forced disconnection may yield no SQLSTATE; this remains distinct from rollback and clone-release failures. These findings are distilled in ADRs 1–3.
 
 
 ## Decision Log
@@ -128,4 +130,10 @@ The original test suites passed despite the six demonstrated bugs. New behavior-
 ## Outcomes & Retrospective
 
 
-Pending implementation. The planning deliverable is this coordination document and five self-contained child ExecPlans. No finding is claimed fixed. Record accepted behaviors, remaining limitations, and ADR updates here when all children and the final gate complete.
+All seven audit findings are fixed and regression-tested. SQL separators cannot bypass fixture transaction preflight; explicit endpoints resist ambient address/service defaults, including concurrent target-specific workers. CLI cancellation stops uncommitted native work, interrupted acquisition closes its handle without GC, and completion cancellation propagates while leaving ownership-checked recovery available.
+
+Role settings retain scalar and schema-list meaning under existing role permissions, including quoted names and backslashes with nonstandard string defaults. Fingerprint v2 excludes old semantics while preserving supported manifest comparison and the old sealed databases. Safe structured fixture failures reach baseline, lease, manager, and CLI consumers without losing primary context or merging rollback with release diagnostics.
+
+The complete build, core/process tests, fresh socket/TCP native suites, offline/connected CLI suites, conventions, docs validation, and diff checks passed. Examples and benchmarks compile with the extended public records. ADR 1 records root/delegated cancellation boundaries; ADR 2 records lexical policy, explicit routing, and acquisition ownership; ADR 3 records setting interpretation, cache compatibility, and error separation. All child decisions, discoveries, and outcomes were reviewed for this distillation.
+
+The trusted-SQL scope, nontransactional sequence/external effects, inability to undo an already confirmed commit, and explicit recovery of retained resources remain intentional boundaries. BaselineError and LeaseError construction is source-visible because of the new optional context field; the migration is documented. Package release, publication, versions, tags, dependency refreshes, and provisioning remain outside this initiative.

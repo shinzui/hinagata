@@ -26,7 +26,7 @@ import GHC.Clock (getMonotonicTimeNSec)
 import Hinagata.Config
 import Hinagata.Connection
 import Hinagata.Fixture.Bundle
-import Hinagata.Postgres.Error (NativeError (..), NativePhase (..), SessionError (..))
+import Hinagata.Postgres.Error (FixtureLoadContext, LoadError (..), NativeError (..), NativePhase (..), SessionError (..), loadErrorContext)
 import Hinagata.Postgres.Internal.Access qualified as Access
 import Hinagata.Postgres.Internal.BaselineRef
 import Hinagata.Postgres.Internal.Libpq
@@ -105,7 +105,8 @@ data PreparationReport = PreparationReport
 -- for explicit inspection instead of being guessed safe to delete.
 data BaselineError = BaselineError
   { cause :: !Text,
-    sqlState :: !(Maybe Text)
+    sqlState :: !(Maybe Text),
+    fixtureLoadContext :: !(Maybe FixtureLoadContext)
   }
   deriving stock (Eq, Show)
 
@@ -120,8 +121,8 @@ ensureBaseline spec@BaselineSpec {configuration} = do
   start <- getMonotonicTimeNSec
   verified <- try @IOException (verifyPlan (basePlan spec))
   case verified of
-    Left _ -> pure (Left (BaselineError "base fixture bundle could not be verified" Nothing))
-    Right False -> pure (Left (BaselineError "base fixture bundle changed" Nothing))
+    Left _ -> pure (Left (BaselineError "base fixture bundle could not be verified" Nothing Nothing))
+    Right False -> pure (Left (BaselineError "base fixture bundle changed" Nothing Nothing))
     Right True -> startCatalog start
   where
     startCatalog start = case first accessFailure (Access.adminTarget configuration (maintenanceDatabase configuration)) of
@@ -130,7 +131,7 @@ ensureBaseline spec@BaselineSpec {configuration} = do
         let options = defaultSessionOptions {operationDeadlineMs = positiveValue (setupDeadlineMs configuration)}
         catalog <- ensureCatalog maintenance (maintenanceSchema configuration) options
         case catalog of
-          Left CatalogError {cause, sqlState} -> pure (Left (BaselineError cause sqlState))
+          Left CatalogError {cause, sqlState} -> pure (Left (BaselineError cause sqlState Nothing))
           Right identity -> do
             opened <- withSession maintenance options $ \session ->
               runExclusive session $ \connection sessionOptions -> do
@@ -155,9 +156,9 @@ retireBaseline configuration baseline =
       let options = defaultSessionOptions {operationDeadlineMs = positiveValue (setupDeadlineMs configuration)}
       catalog <- inspectCatalog maintenance (maintenanceSchema configuration) options
       case catalog of
-        Left CatalogError {cause, sqlState} -> pure (Left (BaselineError cause sqlState))
+        Left CatalogError {cause, sqlState} -> pure (Left (BaselineError cause sqlState Nothing))
         Right identity
-          | identity /= clusterIdentity baseline -> pure (Left (BaselineError "baseline belongs to a different catalog or cluster" Nothing))
+          | identity /= clusterIdentity baseline -> pure (Left (BaselineError "baseline belongs to a different catalog or cluster" Nothing Nothing))
           | otherwise -> do
               opened <- withSession maintenance options $ \session ->
                 runExclusive session $ \connection sessionOptions -> do
@@ -187,19 +188,19 @@ retireLocked connection maintenance options identity configuration baseline dead
           && state `elem` ["Ready", "Retiring"] -> do
           evidence <- verifyOwnedDatabase maintenance options identity (ownership baseline)
           case evidence of
-            Left CatalogError {cause, sqlState} -> pure (Left (BaselineError cause sqlState))
-            Right OwnershipMismatch -> pure (Left (BaselineError "baseline ownership changed; retirement refused" Nothing))
+            Left CatalogError {cause, sqlState} -> pure (Left (BaselineError cause sqlState Nothing))
+            Right OwnershipMismatch -> pure (Left (BaselineError "baseline ownership changed; retirement refused" Nothing Nothing))
             Right OwnershipMissing
               | state == "Retiring" -> pure (Right ())
-              | otherwise -> pure (Left (BaselineError "ready baseline is missing; retirement refused" Nothing))
+              | otherwise -> pure (Left (BaselineError "ready baseline is missing; retirement refused" Nothing Nothing))
             Right OwnershipMatches -> do
               marked <- if state == "Retiring" then pure (Right []) else queryParamRows connection deadline Sql (Encoding.encodeUtf8 ("UPDATE " <> table <> " SET state = 'Retiring', updated_at = clock_timestamp() WHERE id = $1 AND state = 'Ready' RETURNING id")) [Just (Encoding.encodeUtf8 (generationId baseline))] 1
               case marked of
                 Left problem -> pure (Left (nativeFailure problem))
                 Right [[Just _]] | state == "Ready" -> dropTemplate connection options baseline
                 Right [] | state == "Retiring" -> dropTemplate connection options baseline
-                Right _ -> pure (Left (BaselineError "baseline state changed during retirement" Nothing))
-    Right _ -> pure (Left (BaselineError "baseline generation is missing or has changed identity" Nothing))
+                Right _ -> pure (Left (BaselineError "baseline state changed during retirement" Nothing Nothing))
+    Right _ -> pure (Left (BaselineError "baseline generation is missing or has changed identity" Nothing Nothing))
 
 dropTemplate :: PQ.Connection -> SessionOptions -> BaselineRef -> IO (Either BaselineError ())
 dropTemplate connection options baseline = do
@@ -244,16 +245,16 @@ prepareLocked comparison connection maintenance options identity configuration b
               sealed <- queryParamRows connection deadline Sql "SELECT datallowconn::text FROM pg_database WHERE datname = $1" [Just (Encoding.encodeUtf8 (databaseNameText (baselineDatabase baseline)))] 1
               pure $ case sealed of
                 Right [[Just "false"]] -> Right (baseline {clusterIdentity = identity}, Reused, comparison)
-                Right _ -> Left (BaselineError "ready generation is not sealed" Nothing)
+                Right _ -> Left (BaselineError "ready generation is not sealed" Nothing Nothing)
                 Left failure -> Left (nativeFailure failure)
-            Right _ -> pure (Left (BaselineError "ready generation lost positive database ownership" Nothing))
-            Left CatalogError {cause, sqlState} -> pure (Left (BaselineError cause sqlState))
+            Right _ -> pure (Left (BaselineError "ready generation lost positive database ownership" Nothing Nothing))
+            Left CatalogError {cause, sqlState} -> pure (Left (BaselineError cause sqlState Nothing))
         Right Nothing -> fmap (fmap (\(baseline, kind) -> (baseline, kind, comparison))) (buildGeneration connection maintenance options identity configuration basePlan projectText digest manifest spec deadline)
 
 comparePrevious :: PQ.Connection -> HinagataConfig -> CatalogIdentity -> Maybe BaselineRef -> Text -> Deadline -> IO (Either BaselineError (Maybe FingerprintComparison))
 comparePrevious _ _ _ Nothing _ _ = pure (Right Nothing)
 comparePrevious connection configuration identity (Just previous) manifest deadline
-  | clusterIdentity previous /= identity = pure (Left (BaselineError "comparison generation belongs to a different catalog or cluster" Nothing))
+  | clusterIdentity previous /= identity = pure (Left (BaselineError "comparison generation belongs to a different catalog or cluster" Nothing Nothing))
   | otherwise = do
       let table = quoteSqlIdentifier (maintenanceSchema configuration) <> ".\"generations\""
           statement = Encoding.encodeUtf8 ("SELECT fingerprint::text, fingerprint_manifest->>'manifest' FROM " <> table <> " WHERE id = $1 AND project_id = $2")
@@ -266,9 +267,9 @@ comparePrevious connection configuration identity (Just previous) manifest deadl
               let before = Text.lines (Encoding.decodeUtf8 recordedManifest)
                   after = Text.lines manifest
                in if length before /= length fingerprintComponents || length after /= length fingerprintComponents || listToMaybe before `notElem` map Just ["hinagata-fingerprint-v1", "hinagata-fingerprint-v2"]
-                    then Left (BaselineError "comparison generation has an unsupported fingerprint manifest" Nothing)
+                    then Left (BaselineError "comparison generation has an unsupported fingerprint manifest" Nothing Nothing)
                     else Right (Just (FingerprintComparison (baselineFingerprint previous) [component | (component, old, new) <- zip3 fingerprintComponents before after, old /= new]))
-        Right _ -> Left (BaselineError "comparison generation is missing or has changed fingerprint identity" Nothing)
+        Right _ -> Left (BaselineError "comparison generation is missing or has changed fingerprint identity" Nothing Nothing)
 
 -- | Ordered category names shared by version-1 and version-2 fingerprint manifests.
 fingerprintComponents :: [FingerprintComponent]
@@ -301,11 +302,11 @@ lookupReady connection configuration plan hook deadline project digest = do
     Left failure -> Left (nativeFailure failure)
     Right [] -> Right Nothing
     Right [[Just generationId, Just name, Just oid, Just token]] -> do
-      database <- maybe (Left (BaselineError "ready generation has an invalid database name" Nothing)) Right (either (const Nothing) Just (mkDatabaseName (Encoding.decodeUtf8 name)))
-      number <- maybe (Left (BaselineError "ready generation has an invalid database OID" Nothing)) Right (readMaybe (Text.unpack (Encoding.decodeUtf8 oid)))
+      database <- maybe (Left (BaselineError "ready generation has an invalid database name" Nothing Nothing)) Right (either (const Nothing) Just (mkDatabaseName (Encoding.decodeUtf8 name)))
+      number <- maybe (Left (BaselineError "ready generation has an invalid database OID" Nothing Nothing)) Right (readMaybe (Text.unpack (Encoding.decodeUtf8 oid)))
       let owned = OwnedDatabase database number (Encoding.decodeUtf8 token)
       Right (Just (BaselineRef database (Encoding.decodeUtf8 generationId) digest (CatalogIdentity 2 "") owned plan hook))
-    Right _ -> Left (BaselineError "ready generation has incomplete identity" Nothing)
+    Right _ -> Left (BaselineError "ready generation has incomplete identity" Nothing Nothing)
 
 buildGeneration :: PQ.Connection -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> HinagataConfig -> FixturePlan -> Text -> Text -> Text -> BaselineSpec -> Deadline -> IO (Either BaselineError (BaselineRef, PreparationKind))
 buildGeneration connection maintenance options identity configuration plan project digest manifest spec deadline = do
@@ -316,7 +317,7 @@ buildGeneration connection maintenance options identity configuration plan proje
           token = Encoding.decodeUtf8 tokenBytes
           databaseText = "hg_" <> Text.take 8 digest <> "_" <> Text.take 20 (Text.filter (/= '-') token)
       case mkDatabaseName databaseText of
-        Left _ -> pure (Left (BaselineError "generated database name is invalid" Nothing))
+        Left _ -> pure (Left (BaselineError "generated database name is invalid" Nothing Nothing))
         Right database -> do
           let table = quoteSqlIdentifier (maintenanceSchema configuration) <> ".\"generations\""
               insertSql = Encoding.encodeUtf8 ("INSERT INTO " <> table <> " (id, project_id, fingerprint, fingerprint_manifest, database_name, ownership_token, state) VALUES ($1, $2, $3, jsonb_build_object('version', 1, 'manifest', $4::text), $5, $6::uuid, 'Building')")
@@ -338,14 +339,14 @@ buildGeneration connection maintenance options identity configuration plan proje
                     Left failure -> Left (nativeFailure failure)
                     Right _ -> Right (BaselineRef database generationId digest identity owned plan (clonePreparationHook spec), Built)
     Left failure -> pure (Left (nativeFailure failure))
-    Right _ -> pure (Left (BaselineError "UUID generation returned an invalid result" Nothing))
+    Right _ -> pure (Left (BaselineError "UUID generation returned an invalid result" Nothing Nothing))
 
 construct :: PQ.Connection -> ConnectionTarget -> SessionOptions -> CatalogIdentity -> HinagataConfig -> FixturePlan -> Text -> DatabaseName -> Text -> BaselineSpec -> Deadline -> IO (Either BaselineError OwnedDatabase)
 construct connection maintenance options identity configuration plan generationId database token BaselineSpec {migrationHook, verificationHook, requiredExtensions, requiredLocale} deadline = do
   let quoted = Access.quoteDatabase database
   created <- query connection deadline Sql (Encoding.encodeUtf8 ("CREATE DATABASE " <> quoted <> " TEMPLATE template0"))
   case created of
-    Left NativeError {sqlState = Just "42501"} -> pure (Left (BaselineError "administration role lacks CREATEDB or template access" (Just "42501")))
+    Left NativeError {sqlState = Just "42501"} -> pure (Left (BaselineError "administration role lacks CREATEDB or template access" (Just "42501") Nothing))
     Left failure -> pure (Left (nativeFailure failure))
     Right () -> do
       let marker = "hinagata:v1:" <> clusterUuid identity <> ":" <> token
@@ -356,7 +357,7 @@ construct connection maintenance options identity configuration plan generationI
           observed <- queryParamRows connection deadline Sql "SELECT oid::text FROM pg_database WHERE datname = $1" [Just (Encoding.encodeUtf8 (databaseNameText database))] 1
           case observed of
             Right [[Just oidBytes]] -> case readMaybe (Text.unpack (Encoding.decodeUtf8 oidBytes)) of
-              Nothing -> pure (Left (BaselineError "created database has an invalid OID" Nothing))
+              Nothing -> pure (Left (BaselineError "created database has an invalid OID" Nothing Nothing))
               Just number -> do
                 let owned = OwnedDatabase database number token
                     table = quoteSqlIdentifier (maintenanceSchema configuration) <> ".\"generations\""
@@ -374,17 +375,17 @@ construct connection maintenance options identity configuration plan generationI
                           Right setupTarget -> do
                             migrated <- timeout (positiveValue (setupDeadlineMs configuration) * 1000) (migrationHook setupTarget)
                             case migrated of
-                              Nothing -> pure (Left (BaselineError "migration hook timed out" Nothing))
-                              Just (Left _) -> pure (Left (BaselineError "migration hook failed" Nothing))
+                              Nothing -> pure (Left (BaselineError "migration hook timed out" Nothing Nothing))
+                              Just (Left _) -> pure (Left (BaselineError "migration hook failed" Nothing Nothing))
                               Just (Right ()) -> do
                                 loaded <- loadInto setupTarget options plan
                                 case loaded of
-                                  Left _ -> pure (Left (BaselineError "base fixture load failed" Nothing))
+                                  Left problem@LoadError {sqlState} -> pure (Left (BaselineError "base fixture load failed" sqlState (Just (loadErrorContext problem))))
                                   Right _ -> do
                                     verified <- timeout (positiveValue (setupDeadlineMs configuration) * 1000) (verificationHook setupTarget)
                                     case verified of
-                                      Nothing -> pure (Left (BaselineError "verification hook timed out" Nothing))
-                                      Just (Left _) -> pure (Left (BaselineError "verification hook failed" Nothing))
+                                      Nothing -> pure (Left (BaselineError "verification hook timed out" Nothing Nothing))
+                                      Just (Left _) -> pure (Left (BaselineError "verification hook failed" Nothing Nothing))
                                       Just (Right ()) -> do
                                         requirements <- checkRequirements connection options setupTarget database requiredExtensions requiredLocale deadline
                                         case requirements of
@@ -403,14 +404,14 @@ construct connection maintenance options identity configuration plan generationI
                                                         evidence <- verifyOwnedDatabase maintenance options identity owned
                                                         pure $ case evidence of
                                                           Right OwnershipMatches -> Right owned
-                                                          Right _ -> Left (BaselineError "sealed generation lost positive ownership" Nothing)
-                                                          Left CatalogError {cause, sqlState} -> Left (BaselineError cause sqlState)
-                                                      Right _ -> pure (Left (BaselineError "sealed baseline gained an open session" Nothing))
+                                                          Right _ -> Left (BaselineError "sealed generation lost positive ownership" Nothing Nothing)
+                                                          Left CatalogError {cause, sqlState} -> Left (BaselineError cause sqlState Nothing)
+                                                      Right _ -> pure (Left (BaselineError "sealed baseline gained an open session" Nothing Nothing))
                                                       Left failure -> pure (Left (nativeFailure failure))
-                                              Right _ -> pure (Left (BaselineError "baseline still has open sessions" Nothing))
+                                              Right _ -> pure (Left (BaselineError "baseline still has open sessions" Nothing Nothing))
                                               Left failure -> pure (Left (nativeFailure failure))
-                  Right _ -> pure (Left (BaselineError "generation identity could not be bound" Nothing))
-            Right _ -> pure (Left (BaselineError "created database is missing from the catalog" Nothing))
+                  Right _ -> pure (Left (BaselineError "generation identity could not be bound" Nothing Nothing))
+            Right _ -> pure (Left (BaselineError "created database is missing from the catalog" Nothing Nothing))
             Left failure -> pure (Left (nativeFailure failure))
 
 checkRequirements :: PQ.Connection -> SessionOptions -> ConnectionTarget -> DatabaseName -> [Text] -> Maybe Text -> Deadline -> IO (Either BaselineError ())
@@ -421,7 +422,7 @@ checkRequirements maintenance options setupTarget database extensions locale dea
       observed <- queryParamRows maintenance deadline Sql "SELECT datcollate FROM pg_database WHERE datname = $1" [Just (Encoding.encodeUtf8 (databaseNameText database))] 1
       pure $ case observed of
         Right [[Just actual]] | actual == Encoding.encodeUtf8 expected -> Right ()
-        Right _ -> Left (BaselineError "baseline locale differs from the declared requirement" Nothing)
+        Right _ -> Left (BaselineError "baseline locale differs from the declared requirement" Nothing Nothing)
         Left failure -> Left (nativeFailure failure)
   case localeResult of
     Left failure -> pure (Left failure)
@@ -444,7 +445,7 @@ checkExtension connection deadline extension = do
   observed <- queryParamRows connection deadline Sql "SELECT extname::text FROM pg_extension WHERE extname = $1" [Just (Encoding.encodeUtf8 extension)] 1
   pure $ case observed of
     Right [[Just _]] -> Right ()
-    Right _ -> Left (BaselineError "baseline lacks a declared extension" Nothing)
+    Right _ -> Left (BaselineError "baseline lacks a declared extension" Nothing Nothing)
     Left failure -> Left (nativeFailure failure)
 
 fingerprintManifest :: Int -> BaselineSpec -> Text
@@ -482,10 +483,10 @@ hex = Text.pack . concatMap digits . ByteString.unpack
     digits byte = case showHex byte "" of [digit] -> ['0', digit]; value -> value
 
 nativeFailure :: NativeError -> BaselineError
-nativeFailure NativeError {reason, sqlState} = BaselineError reason sqlState
+nativeFailure NativeError {reason, sqlState} = BaselineError reason sqlState Nothing
 
 accessFailure :: Access.AccessError -> BaselineError
-accessFailure Access.AccessError {cause, sqlState} = BaselineError cause sqlState
+accessFailure Access.AccessError {cause, sqlState} = BaselineError cause sqlState Nothing
 
 sessionFailure :: SessionError -> BaselineError
-sessionFailure failure = BaselineError (Text.pack (show failure)) Nothing
+sessionFailure failure = BaselineError (Text.pack (show failure)) Nothing Nothing

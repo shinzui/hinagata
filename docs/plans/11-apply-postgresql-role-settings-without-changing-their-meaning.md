@@ -54,7 +54,7 @@ A native prototype proved that set_config(transaction_read_only, on, true) makes
 ## Decision Log
 
 
-2026-10-18: Refine the prototype to server-interpreted quoted lists and literal scalar assignment, after observing SQLSTATE 25006 for an active read-only setting. This preserves existing scalar support while correcting list semantics; all settings still persist atomically.
+2026-10-18: Refine the prototype to server-interpreted quoted lists and literal scalar assignment, after observing SQLSTATE 25006 for an active read-only setting. This preserves existing scalar support while correcting list semantics; all settings still persist atomically. Final integration uses explicit escape-string literals for scalars and tests a role with standard_conforming_strings disabled, so backslashes remain data under either server mode.
 
 2026-10-18: Version the baseline fingerprint with the semantics repair. Otherwise unchanged declarations could select a sealed database prepared under the previous, incorrect search_path interpretation. Use server interpretation rather than ad hoc list parsing.
 

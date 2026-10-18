@@ -97,7 +97,12 @@ setRoleSetting connection deadline role database RoleSetting {name, value}
           case interpreted of
             Left failure -> pure (Left (accessNativeFailure failure))
             Right _ -> persist " FROM CURRENT"
-        else persist (" TO " <> quoteLiteral value)
+        else persist (" TO " <> quoteSettingLiteral value)
+
+-- Explicit escape-string syntax preserves backslashes independently of the
+-- persistence role's standard_conforming_strings default.
+quoteSettingLiteral :: Text -> Text
+quoteSettingLiteral value = "E'" <> Text.replace "'" "''" (Text.replace "\\" "\\\\" value) <> "'"
 
 -- PostgreSQL's GUC_LIST_QUOTE parameters (also enumerated by pg_dump).
 -- A single SQL literal would quote the entire list as one item. Other settings

@@ -247,4 +247,4 @@ closeGate gate = modifyMVar_ (state gate) $ \current -> do
   pure current {queued = [], closed = True}
 
 admissionError :: Text -> LeaseError
-admissionError cause = LeaseError cause Nothing Nothing Nothing
+admissionError cause = LeaseError cause Nothing Nothing Nothing Nothing

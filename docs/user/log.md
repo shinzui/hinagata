@@ -1,6 +1,7 @@
 # Bundle Update Log
 
 ## 2026-10-18
+* **Update**: Document additive structured fixture-load context and independent rollback/release diagnostics.
 * **Update**: Document PostgreSQL role-setting list semantics, atomic persistence, and permissions.
 * **Update**: Document native command cancellation, first-signal cleanup, and transaction limits.
 * **Update**: Document explicit native endpoint precedence and preserved authentication/TLS defaults.

@@ -48,7 +48,7 @@ Accepted 2026-10-18: isolated endpoint loads failed on the original renderer, th
 ## Surprises & Discoveries
 
 
-Mori has no registered postgresql-libpq source. Upstream PostgreSQL REL_18_STABLE `fe-connect.c` confirms explicit non-null option values, including empty hostaddr, bypass environment and service defaults; an empty address selects the supplied host. The native lifecycle subprocess runs before the parent observer connects, preserving the existing nine-connection budget test.
+Mori did not provide the native binding's source. PostgreSQL's option-defaulting implementation (canonical project `mori://postgres/postgres`, project-relative `src/interfaces/libpq/fe-connect.c` at `REL_18_STABLE`; artifact-level URI pending and project resolution unavailable in the local registry) confirms explicit non-null option values, including empty hostaddr, bypass environment and service defaults; an empty address selects the supplied host. The native lifecycle subprocess runs before the parent observer connects, preserving the existing nine-connection budget test.
 
 
 ## Decision Log
@@ -60,7 +60,7 @@ Mori has no registered postgresql-libpq source. Upstream PostgreSQL REL_18_STABL
 ## Outcomes & Retrospective
 
 
-F3 is fixed centrally in public connection rendering. Endpoint and lifecycle regressions pass without mutating process-global environment. Authentication/TLS defaults remain supported; ADR 2 and the configuration reference document this boundary.
+F3 is fixed centrally in public connection rendering. Endpoint and lifecycle regressions, including concurrent valid/missing endpoint subprocesses with private service files, pass without mutating process-global environment. Authentication/TLS defaults remain supported; ADR 2 and the configuration reference document this boundary.
 
 
 ## Context and Orientation

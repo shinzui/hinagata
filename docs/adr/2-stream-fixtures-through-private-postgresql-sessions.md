@@ -4,7 +4,7 @@ Status: Accepted
 
 Date: 2026-09-26
 
-Amended: 2026-10-18 (recognize PostgreSQL ASCII whitespace during SQL policy checks)
+Amended: 2026-10-18 (SQL preflight, explicit routing, and native acquisition ownership)
 
 ## Context
 

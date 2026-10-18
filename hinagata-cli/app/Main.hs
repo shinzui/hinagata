@@ -67,17 +67,17 @@ dispatch :: CancellationScope -> HinagataConfig -> CliSettings -> CliOptions -> 
 dispatch scope configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLimit, chunkSize} settings options = case command options of
   Just (FixturePlan roots jsonSelected) ->
     case traverse mkFixtureName roots of
-      Left problem -> abort jsonSelected (CliError "options" "fixture_name_invalid" problem Nothing Nothing Nothing Nothing 2 Nothing Nothing)
+      Left problem -> abort jsonSelected (CliError "options" "fixture_name_invalid" problem Nothing Nothing Nothing Nothing 2 Nothing Nothing Nothing Nothing)
       Right names -> do
         let bundle = BundleConfig fixtureRoot bundleRoot sqlSizeLimit chunkSize
         compiled <- compileFixtures bundle names
         case compiled of
           Left problem -> abort jsonSelected (bundleError problem)
-          Right plan -> emitPlan jsonSelected plan
+          Right plan -> checkCancellation scope >> emitPlan jsonSelected plan
   Just (FixtureLoad roots databaseText jsonSelected) ->
     case (traverse mkFixtureName roots, mkDatabaseName databaseText) of
-      (Left problem, _) -> abort jsonSelected (CliError "options" "fixture_name_invalid" problem Nothing Nothing Nothing Nothing 2 Nothing Nothing)
-      (_, Left problem) -> abort jsonSelected (CliError "options" "target_database_invalid" problem Nothing Nothing Nothing Nothing 2 Nothing Nothing)
+      (Left problem, _) -> abort jsonSelected (CliError "options" "fixture_name_invalid" problem Nothing Nothing Nothing Nothing 2 Nothing Nothing Nothing Nothing)
+      (_, Left problem) -> abort jsonSelected (CliError "options" "target_database_invalid" problem Nothing Nothing Nothing Nothing 2 Nothing Nothing Nothing Nothing)
       (Right names, Right database) -> do
         let bundle = BundleConfig fixtureRoot bundleRoot sqlSizeLimit chunkSize
         compiled <- compileFixtures bundle names
@@ -88,19 +88,19 @@ dispatch scope configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLim
                 AccessConfig {user = roleUser, password = rolePassword} = setup configuration
                 sessionOptions = defaultSessionOptions {operationDeadlineMs = positiveValue (setupDeadlineMs configuration), statementDeadlineMs = positiveValue (setupDeadlineMs configuration)}
             case mkConnectionTarget serverHost serverPort roleUser database rolePassword of
-              Left problem -> abort jsonSelected (CliError "options" "target_invalid" problem Nothing Nothing Nothing Nothing 2 Nothing Nothing)
+              Left problem -> abort jsonSelected (CliError "options" "target_invalid" problem Nothing Nothing Nothing Nothing 2 Nothing Nothing Nothing Nothing)
               Right target -> do
                 loaded <- loadInto target sessionOptions plan
                 case loaded of
                   Left problem -> abort jsonSelected (loadError problem)
                   Right report -> checkCancellation scope >> emitLoad jsonSelected database report
   Just (FixtureValidate roots allSelected jsonSelected)
-    | allSelected && not (null roots) -> abort jsonSelected (CliError "options" "validate_selection_invalid" "choose names or --all" Nothing Nothing Nothing Nothing 2 Nothing Nothing)
-    | not allSelected && null roots -> abort jsonSelected (CliError "options" "validate_selection_required" "choose scenario names or --all" Nothing Nothing Nothing Nothing 2 Nothing Nothing)
+    | allSelected && not (null roots) -> abort jsonSelected (CliError "options" "validate_selection_invalid" "choose names or --all" Nothing Nothing Nothing Nothing 2 Nothing Nothing Nothing Nothing)
+    | not allSelected && null roots -> abort jsonSelected (CliError "options" "validate_selection_required" "choose scenario names or --all" Nothing Nothing Nothing Nothing 2 Nothing Nothing Nothing Nothing)
     | otherwise -> do
         selected <- if allSelected then discoverScenarios fixtureRoot else pure roots
         if null selected
-          then abort jsonSelected (CliError "options" "validate_selection_empty" "no scenario fixtures were found" Nothing Nothing Nothing Nothing 2 Nothing Nothing)
+          then abort jsonSelected (CliError "options" "validate_selection_empty" "no scenario fixtures were found" Nothing Nothing Nothing Nothing 2 Nothing Nothing Nothing Nothing)
           else do
             prepared <- prepareBaseline scope configuration settings
             case prepared of
@@ -116,15 +116,17 @@ dispatch scope configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLim
                           completed <- withManagedDatabaseClassified manager baseline scenarioPlan ReleaseAlways (const False) (const (checkCancellation scope))
                           pure $ ValidationResult name $ case completed of
                             Left problem -> Left (leaseError "fixture-validate" (Just name) problem)
-                            Right LeaseOutcome {cleanupDiagnostic = Just LeaseError {cause, sqlState}} -> Left (CliError "fixture-validate" "cleanup_failed" cause (Just name) Nothing sqlState Nothing 1 Nothing Nothing)
+                            Right LeaseOutcome {cleanupDiagnostic = Just LeaseError {cause, sqlState}} -> Left (CliError "fixture-validate" "cleanup_failed" cause (Just name) Nothing sqlState Nothing 1 Nothing Nothing Nothing Nothing)
                             Right LeaseOutcome {timings} -> Right timings
                 results <- withManager configuration $ \manager ->
                   validateBatches scope workerCount (validate manager) selected
+                let failed = any (\ValidationResult {result} -> either (const True) (const False) result) results
+                if failed then pure () else checkCancellation scope
                 emitValidation jsonSelected results
-                if any (\ValidationResult {result} -> either (const True) (const False) result) results then exitWith (ExitFailure 1) else pure ()
+                if failed then exitWith (ExitFailure 1) else pure ()
   Just (DbPrepare jsonSelected) -> do
     prepared <- prepareBaseline scope configuration settings
-    either (abort jsonSelected) (emitPreparation jsonSelected . snd) prepared
+    either (abort jsonSelected) (\(_, report) -> checkCancellation scope >> emitPreparation jsonSelected report) prepared
   Just (DbAcquire roots jsonSelected) -> do
     scenario <- compileScenario configuration roots
     case scenario of
@@ -139,9 +141,9 @@ dispatch scope configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLim
             case acquired of
               Left problem -> abort jsonSelected (leaseError "lease-acquire" Nothing problem)
               Right LeaseOutcome {cleanupDiagnostic = Just LeaseError {cause, sqlState}} ->
-                abort jsonSelected (CliError "lease-acquire" "lease_cleanup_failed" cause Nothing Nothing sqlState Nothing 1 Nothing Nothing)
-              Right LeaseOutcome {leaseInfo, timings} -> emitAcquisition jsonSelected leaseInfo timings
-  Just (DbWith _ _ jsonSelected []) -> abort jsonSelected (CliError "options" "program_required" "db with requires a program after --" Nothing Nothing Nothing Nothing 2 Nothing Nothing)
+                abort jsonSelected (CliError "lease-acquire" "lease_cleanup_failed" cause Nothing Nothing sqlState Nothing 1 Nothing Nothing Nothing Nothing)
+              Right LeaseOutcome {leaseInfo, timings} -> checkCancellation scope >> emitAcquisition jsonSelected leaseInfo timings
+  Just (DbWith _ _ jsonSelected []) -> abort jsonSelected (CliError "options" "program_required" "db with requires a program after --" Nothing Nothing Nothing Nothing 2 Nothing Nothing Nothing Nothing)
   Just (DbWith roots preserveOnFailure jsonSelected (program : programArguments)) -> do
     scenario <- compileScenario configuration roots
     case scenario of
@@ -183,8 +185,9 @@ dispatch scope configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLim
             case completed of
               Left problem -> abort jsonSelected (leaseError "lease-acquire" Nothing problem)
               Right outcome -> do
-                emitWith jsonSelected outcome
                 let status = withExitCode outcome
+                if status == 0 then checkCancellation scope else pure ()
+                emitWith jsonSelected outcome
                 if status == 0 then pure () else exitWith (ExitFailure status)
   Just (Inspect identifier jsonSelected) -> do
     inspected <- inspectLease configuration identifier
@@ -201,11 +204,11 @@ dispatch scope configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLim
           _ -> pure ()
   Just (Clean apply includeRetained identifiers jsonSelected)
     | not apply && (includeRetained || not (null identifiers)) ->
-        abort jsonSelected (CliError "options" "clean_preview_options_invalid" "--id and --include-retained require --apply" Nothing Nothing Nothing Nothing 2 Nothing Nothing)
+        abort jsonSelected (CliError "options" "clean_preview_options_invalid" "--id and --include-retained require --apply" Nothing Nothing Nothing Nothing 2 Nothing Nothing Nothing Nothing)
     | apply && null identifiers ->
-        abort jsonSelected (CliError "options" "clean_selection_required" "--apply requires one or more --id selections" Nothing Nothing Nothing Nothing 2 Nothing Nothing)
+        abort jsonSelected (CliError "options" "clean_selection_required" "--apply requires one or more --id selections" Nothing Nothing Nothing Nothing 2 Nothing Nothing Nothing Nothing)
     | includeRetained && null identifiers ->
-        abort jsonSelected (CliError "options" "clean_retained_selection_required" "retained cleanup requires selected allocation IDs" Nothing Nothing Nothing Nothing 2 Nothing Nothing)
+        abort jsonSelected (CliError "options" "clean_retained_selection_required" "retained cleanup requires selected allocation IDs" Nothing Nothing Nothing Nothing 2 Nothing Nothing Nothing Nothing)
     | apply -> do
         let selection = if includeRetained then IncludeRetained else OrphansOnly
         applied <- applyCleanup configuration selection identifiers
@@ -217,7 +220,7 @@ dispatch scope configuration@HinagataConfig {fixtureRoot, bundleRoot, sqlSizeLim
     | otherwise -> do
         planned <- planCleanup configuration
         either (abort jsonSelected . cleanupError) (emitCleanupPlan jsonSelected) planned
-  Nothing -> abort False (CliError "options" "command_required" "choose a command or configuration diagnostic" Nothing Nothing Nothing Nothing 2 Nothing Nothing)
+  Nothing -> abort False (CliError "options" "command_required" "choose a command or configuration diagnostic" Nothing Nothing Nothing Nothing 2 Nothing Nothing Nothing Nothing)
   Just (Completions _) -> pure ()
   where
     unsuccessful (Refused _ _) = True
@@ -228,8 +231,8 @@ reportConfigFailure :: CliOptions -> ConfigFailure -> IO ()
 reportConfigFailure options failure = do
   let jsonSelected = jsonOutput options
       outcome = case failure of
-        SourceFailure message -> CliError "configuration-source" "config_source_invalid" message Nothing Nothing Nothing Nothing 3 Nothing Nothing
-        ResolutionFailure message _ -> CliError "configuration-resolution" "config_resolution_invalid" message Nothing Nothing Nothing Nothing 4 Nothing Nothing
+        SourceFailure message -> CliError "configuration-source" "config_source_invalid" message Nothing Nothing Nothing Nothing 3 Nothing Nothing Nothing Nothing
+        ResolutionFailure message _ -> CliError "configuration-resolution" "config_resolution_invalid" message Nothing Nothing Nothing Nothing 4 Nothing Nothing Nothing Nothing
   case failure of
     ResolutionFailure _ explanation -> TextIO.hPutStr stderr explanation
     _ -> pure ()

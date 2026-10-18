@@ -37,3 +37,23 @@ Changing SQL with unchanged executable bytes builds a new baseline; moving equiv
 Declare every relevant file explicitly, including transitive manifest references, and generate selected values with the command overlay from one variable.
 Inputs must remain stable during preparation. Checks reject observed mutation but do not create an atomic snapshot or identify undeclared/remote state.
 Manual revisions remain available for remote or secret-controlled effects; never include secrets in public content identities.
+
+## Structured fixture failures
+
+`BaselineError` and `LeaseError` expose `fixtureLoadContext :: Maybe FixtureLoadContext`.
+Import `FixtureLoadContext` and `loadErrorContext` from `Hinagata.Postgres.Error` to inspect the
+load phase, optional fixture, zero-based step, SQLSTATE, generic cause, and rollback failure.
+The conversion deliberately excludes the endpoint identity carried by a direct `LoadError`.
+A deferred commit error can have no attributable fixture or step, and a disconnect may lack SQLSTATE.
+
+The existing lifecycle cause and SQLSTATE remain available. A lease's outer `cleanupFailure`
+reports clone release independently of the nested `rollbackFailure`; manager APIs forward both.
+Callback values and cleanup diagnostics remain separate, and asynchronous cancellation still throws
+instead of becoming a structured fixture failure. A failed or interrupted release can leave an
+inspectable owned allocation for explicit recovery.
+
+These public record extensions are source-visible: add the optional context argument to positional
+`BaselineError`/`LeaseError` constructions, or initialize `fixtureLoadContext` in record construction.
+Use `Nothing` for non-load failures and `Just (loadErrorContext failure)` for a loader failure.
+Patterns that select only existing record fields continue to work. No package release is included
+in this implementation change.

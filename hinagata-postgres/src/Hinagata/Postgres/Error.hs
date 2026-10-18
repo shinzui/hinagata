@@ -5,6 +5,8 @@ module Hinagata.Postgres.Error
     NativeError (..),
     LoadPhase (..),
     LoadError (..),
+    FixtureLoadContext (..),
+    loadErrorContext,
   )
 where
 
@@ -48,3 +50,20 @@ data LoadError = LoadError
     cleanupFailure :: !(Maybe Text)
   }
   deriving stock (Eq, Show)
+
+-- | Safe fixture failure context for lifecycle APIs. Endpoint identity and raw
+-- server messages are deliberately excluded. Rollback is independent of clone
+-- release, which the enclosing lifecycle error reports separately.
+data FixtureLoadContext = FixtureLoadContext
+  { phase :: !LoadPhase,
+    fixture :: !(Maybe FixtureName),
+    stepIndex :: !(Maybe Int),
+    sqlState :: !(Maybe Text),
+    cause :: !Text,
+    rollbackFailure :: !(Maybe Text)
+  }
+  deriving stock (Eq, Show)
+
+loadErrorContext :: LoadError -> FixtureLoadContext
+loadErrorContext LoadError {phase, fixture, stepIndex, sqlState, cause, cleanupFailure} =
+  FixtureLoadContext {phase, fixture, stepIndex, sqlState, cause, rollbackFailure = cleanupFailure}

@@ -16,6 +16,11 @@ provenance:
       at: 2026-10-18T21:23:51Z
       mode: "other"
       note: "Complete audit remediation scope, regression acceptance, integration ownership, and Mina intention linkage."
+    - model: "gpt-6.1-sol"
+      harness: "codex-cli"
+      at: 2026-10-18T21:49:09Z
+      mode: "implement"
+      note: "Preserve safe structured load failures through lifecycle, manager, and CLI APIs."
 intention: "intention_01m58e4vxke9stryg9na9xc9em"
 ---
 
@@ -34,16 +39,16 @@ Fix audit finding F7 (P2): a failing base or scenario fixture must retain its sa
 ## Progress
 
 
-- [ ] M1: Public baseline/lease errors retain structured load context without exposing fixture data or credentials.
-- [ ] M2: Manager and CLI consumers report matching context, with primary and cleanup failures kept separate.
+- [x] M1: Public baseline/lease errors retain structured load context without exposing fixture data or credentials.
+- [x] M2: Manager and CLI consumers report matching context, with primary and cleanup failures kept separate.
 
-Implementation has not started. The audit observations below describe the original defect, not acceptance of a fix.
+Accepted 2026-10-18: the original lease path fails the primary-SQLSTATE regression. The repaired path preserves matching context from direct loading through baseline, lease, and manager APIs for SQL, COPY, and deferred COMMIT failures. Test-owned backend termination plus a prepared transaction proves independent rollback/release diagnostics and explicit recovery. CLI tests cover db prepare/acquire/with, fixture validate, direct loading, JSON/plain output, zero-based steps, unattributed commit failures, and unique data/password/argument redaction sentinels. The full combined MasterPlan gate passes, including every example and benchmark build, both PostgreSQL transports, core/process tests, CLI suites, conventions, docs, and whitespace checks.
 
 
 ## Surprises & Discoveries
 
 
-None recorded during implementation yet.
+A forced native disconnect can lose the server SQLSTATE before libpq delivers a result; preserve Nothing and the original load phase rather than inventing a code. A prepared transaction independently blocks clone DROP, proving nested rollback and outer release diagnostics survive together and remain recoverable. Final integration also tightened cancellation success boundaries so the new error plumbing cannot let a first signal escape a finishing supervisor.
 
 
 ## Decision Log
@@ -55,7 +60,7 @@ None recorded during implementation yet.
 ## Outcomes & Retrospective
 
 
-Pending implementation and acceptance evidence.
+F7 is fixed with exported FixtureLoadContext/loadErrorContext, optional context on BaselineError and LeaseError, consistent primary SQLSTATE, and independent rollback/clone-release diagnostics. Manager forwarding and the CLI preserve the safe context; existing lifecycle codes and JSON formatVersion 1 remain stable with additive fields. Public Haskell record construction must initialize the new optional field. All consumers compile. ADR 3 and API/CLI documentation record the contract; no new exception conversion, dependency, catalog migration, public fault switch, or release work was introduced.
 
 
 ## Context and Orientation

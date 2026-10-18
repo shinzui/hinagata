@@ -21,7 +21,7 @@ effectiveRevision (HookRevision _ revision _) = revision
 
 captureHookRevision :: FilePath -> Text -> HookSettings -> IO (Either CliError HookRevision)
 captureHookRevision invocation name settings = case revisionDeclarations settings of
-  Left _ -> pure (Left (CliError "config-resolution" "config_resolution_invalid" (name <> ": invalid revision declaration") Nothing Nothing Nothing Nothing 4 Nothing Nothing))
+  Left _ -> pure (Left (CliError "config-resolution" "config_resolution_invalid" (name <> ": invalid revision declaration") Nothing Nothing Nothing Nothing 4 Nothing Nothing Nothing Nothing))
   Right [] -> pure (Right (HookRevision name (revision settings) Nothing))
   Right inputs -> do
     let root = maybe invocation Text.unpack (workingDirectory settings)
@@ -42,7 +42,7 @@ verifyHookRevisions (HookRevision name _ (Just evidence) : rest) = do
     Right () -> verifyHookRevisions rest
 
 revisionError :: Text -> Revision.RevisionError -> CliError
-revisionError hook failure = CliError "hook-revision" code (hook <> ": " <> message) Nothing Nothing Nothing Nothing 1 Nothing Nothing
+revisionError hook failure = CliError "hook-revision" code (hook <> ": " <> message) Nothing Nothing Nothing Nothing 1 Nothing Nothing Nothing Nothing
   where
     (code, message) = case failure of
       Revision.InputsChanged label -> ("hook_revision_inputs_changed", "selected input changed: " <> Revision.inputNameText label)

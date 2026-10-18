@@ -1,6 +1,7 @@
 module Hinagata.Cli.Output
   ( CliError (..),
     bundleError,
+    baselineError,
     leaseError,
     loadError,
     cleanupError,
@@ -28,9 +29,9 @@ import Hinagata.Cli.Process (ChildFailure (..), ChildReport (..))
 import Hinagata.Connection (connectionDatabase, connectionHost, connectionPort, connectionUser, hostText)
 import Hinagata.Fixture.Bundle
 import Hinagata.Fixture.Types (fixtureNameText)
-import Hinagata.Postgres.Baseline (FingerprintComparison (..), PreparationKind (..), PreparationReport (..), fingerprintComponents)
+import Hinagata.Postgres.Baseline (BaselineError (..), FingerprintComparison (..), PreparationKind (..), PreparationReport (..), fingerprintComponents)
 import Hinagata.Postgres.Cleanup (CleanupCandidate (..), CleanupDisposition (..), CleanupError (..), CleanupResult (..))
-import Hinagata.Postgres.Error (LoadError (..))
+import Hinagata.Postgres.Error (FixtureLoadContext (..), LoadError (..), loadErrorContext)
 import Hinagata.Postgres.Lease (LeaseError (..), LeaseInfo (..), LeaseOutcome (..), LeaseTimings (..), PreparationContext (..), PreparationFailure (..), PreparationFailureKind (..))
 import Hinagata.Postgres.Load (LoadReport (..))
 import Hinagata.Types (DatabaseName, databaseNameText, portNumber)
@@ -47,7 +48,9 @@ data CliError = CliError
     target :: !(Maybe Text.Text),
     exitCode :: !Int,
     errorRunId :: !(Maybe Text.Text),
-    errorLeaseId :: !(Maybe Text.Text)
+    errorLeaseId :: !(Maybe Text.Text),
+    loadContext :: !(Maybe FixtureLoadContext),
+    errorCleanupFailure :: !(Maybe Text.Text)
   }
   deriving stock (Eq, Show)
 
@@ -67,32 +70,43 @@ bundleError problem = case problem of
   SqlStepTooLarge path -> failure "fixture_sql_too_large" (Text.pack path) Nothing
   InvalidSql path _ -> failure "fixture_sql_invalid" (Text.pack path) Nothing
   where
-    failure code message fixture = CliError "fixture-plan" code message fixture Nothing Nothing Nothing 1 Nothing Nothing
+    failure code message fixture = CliError "fixture-plan" code message fixture Nothing Nothing Nothing 1 Nothing Nothing Nothing Nothing
 
 loadError :: LoadError -> CliError
-loadError LoadError {phase, targetIdentity, fixture, stepIndex, cause, sqlState} =
-  CliError (Text.pack (show phase)) "load_failed" cause (fixtureNameText <$> fixture) stepIndex sqlState targetIdentity 1 Nothing Nothing
+loadError problem@LoadError {phase, targetIdentity, fixture, stepIndex, cause, sqlState} =
+  attachFixtureContext (Just (loadErrorContext problem)) $ CliError (Text.pack (show phase)) "load_failed" cause (fixtureNameText <$> fixture) stepIndex sqlState targetIdentity 1 Nothing Nothing Nothing Nothing
+
+-- | Preserve lifecycle identity while adding safe fixture details.
+baselineError :: BaselineError -> CliError
+baselineError BaselineError {cause, sqlState, fixtureLoadContext} =
+  attachFixtureContext fixtureLoadContext (CliError "baseline-prepare" "baseline_failed" cause Nothing Nothing sqlState Nothing 1 Nothing Nothing Nothing Nothing)
+
+attachFixtureContext :: Maybe FixtureLoadContext -> CliError -> CliError
+attachFixtureContext Nothing problem = problem
+attachFixtureContext selected@(Just FixtureLoadContext {fixture, stepIndex, sqlState}) problem =
+  problem {fixture = fixtureNameText <$> fixture, stepIndex, sqlState, loadContext = selected}
 
 cleanupError :: CleanupError -> CliError
-cleanupError CleanupError {cause, sqlState} = CliError "cleanup" "cleanup_failed" cause Nothing Nothing sqlState Nothing 1 Nothing Nothing
+cleanupError CleanupError {cause, sqlState} = CliError "cleanup" "cleanup_failed" cause Nothing Nothing sqlState Nothing 1 Nothing Nothing Nothing Nothing
 
 -- | Common acquisition mapping keeps per-lease failures independent of the
 -- command's shared cancellation status.
 leaseError :: Text.Text -> Maybe Text.Text -> LeaseError -> CliError
-leaseError fallback fixture LeaseError {cause, sqlState, cleanupFailure, preparationContext} =
-  let message = cause <> maybe "" ("; cleanup: " <>) cleanupFailure
-   in case preparationContext of
-        Nothing -> CliError fallback "lease_failed" message fixture Nothing sqlState Nothing 1 Nothing Nothing
-        Just PreparationContext {preparationFailure = PreparationFailure {failureKind, releaseSafe}, preparationRunId, preparationLeaseId} ->
-          let code =
-                if not releaseSafe
-                  then "clone_preparation_cleanup_failed"
-                  else case failureKind of
-                    PreparationTimeout -> "clone_preparation_timeout"
-                    PreparationCancelled _ -> "clone_preparation_cancelled"
-                    _ -> "clone_preparation_failed"
-              status = case failureKind of PreparationCancelled signal -> 128 + signal; _ -> 1
-           in CliError "clone-preparation" code message fixture Nothing sqlState Nothing status (Just preparationRunId) (Just preparationLeaseId)
+leaseError fallback fixture LeaseError {cause, sqlState, cleanupFailure, preparationContext, fixtureLoadContext} =
+  attachFixtureContext fixtureLoadContext $
+    let message = cause <> maybe "" ("; cleanup: " <>) cleanupFailure
+     in case preparationContext of
+          Nothing -> CliError fallback "lease_failed" message fixture Nothing sqlState Nothing 1 Nothing Nothing Nothing cleanupFailure
+          Just PreparationContext {preparationFailure = PreparationFailure {failureKind, releaseSafe}, preparationRunId, preparationLeaseId} ->
+            let code =
+                  if not releaseSafe
+                    then "clone_preparation_cleanup_failed"
+                    else case failureKind of
+                      PreparationTimeout -> "clone_preparation_timeout"
+                      PreparationCancelled _ -> "clone_preparation_cancelled"
+                      _ -> "clone_preparation_failed"
+                status = case failureKind of PreparationCancelled signal -> 128 + signal; _ -> 1
+             in CliError "clone-preparation" code message fixture Nothing sqlState Nothing status (Just preparationRunId) (Just preparationLeaseId) Nothing cleanupFailure
 
 emitCandidate :: Bool -> Maybe CleanupCandidate -> IO ()
 emitCandidate jsonSelected found =
@@ -166,7 +180,7 @@ emitValidation :: Bool -> [ValidationResult] -> IO ()
 emitValidation jsonSelected results =
   if jsonSelected
     then emitValue (Json.object ["formatVersion" .= (1 :: Int), "ok" .= all passed results, "kind" .= ("fixture-validate" :: Text.Text), "results" .= map resultValue results])
-    else mapM_ (\ValidationResult {scenario, result} -> TextIO.putStrLn (scenario <> if either (const False) (const True) result then " passed" else " failed")) results
+    else mapM_ (\ValidationResult {scenario, result} -> TextIO.putStrLn (scenario <> either (\problem -> " failed: " <> errorText problem) (const " passed") result)) results
   where
     passed ValidationResult {result} = either (const False) (const True) result
     resultValue ValidationResult {scenario, result} =
@@ -175,8 +189,23 @@ emitValidation jsonSelected results =
       Json.object ["queueWait" .= queueWaitMs, "catalog" .= catalogMs, "generationLock" .= generationLockMs, "clone" .= cloneMs, "scenarioLoad" .= scenarioLoadMs, "completion" .= completionMs]
 
 validationErrorValue :: CliError -> Json.Value
-validationErrorValue CliError {phase, code, message, fixture, stepIndex, sqlState, target, errorRunId, errorLeaseId} =
-  Json.object ["phase" .= phase, "code" .= code, "message" .= message, "fixture" .= fixture, "stepIndex" .= stepIndex, "sqlState" .= sqlState, "target" .= target, "runId" .= errorRunId, "leaseId" .= errorLeaseId]
+validationErrorValue CliError {phase, code, message, fixture, stepIndex, sqlState, target, errorRunId, errorLeaseId, loadContext, errorCleanupFailure} =
+  Json.object ["phase" .= phase, "code" .= code, "message" .= message, "fixture" .= fixture, "stepIndex" .= stepIndex, "sqlState" .= sqlState, "target" .= target, "runId" .= errorRunId, "leaseId" .= errorLeaseId, "loadContext" .= fmap loadContextValue loadContext, "cleanupFailure" .= errorCleanupFailure]
+
+loadContextValue :: FixtureLoadContext -> Json.Value
+loadContextValue FixtureLoadContext {phase, fixture, stepIndex, sqlState, cause, rollbackFailure} =
+  Json.object ["phase" .= Text.pack (show phase), "fixture" .= fmap fixtureNameText fixture, "stepIndex" .= stepIndex, "sqlState" .= sqlState, "cause" .= cause, "rollbackFailure" .= rollbackFailure]
+
+errorText :: CliError -> Text.Text
+errorText CliError {phase, code, message, fixture, stepIndex, loadContext} =
+  phase
+    <> ": "
+    <> code
+    <> ": "
+    <> message
+    <> maybe "" ("; fixture " <>) fixture
+    <> maybe "" (\index -> "; step " <> Text.pack (show index)) stepIndex
+    <> maybe "" (\FixtureLoadContext {phase = loadPhase} -> "; load " <> Text.pack (show loadPhase)) loadContext
 
 emitPreparation :: Bool -> PreparationReport -> IO ()
 emitPreparation jsonSelected PreparationReport {kind, fingerprint, elapsedMs, comparison} =
@@ -228,8 +257,8 @@ emitWith jsonSelected outcome@LeaseOutcome {callbackValue, leaseInfo = LeaseInfo
     exitNumber (ExitFailure status) = if status < 0 then 128 - status else status
 
 emitError :: Bool -> CliError -> IO ()
-emitError jsonSelected failure@CliError {phase, code, message} = do
-  TextIO.hPutStrLn IO.stderr (phase <> ": " <> code <> ": " <> message)
+emitError jsonSelected failure = do
+  TextIO.hPutStrLn IO.stderr (errorText failure)
   if jsonSelected
     then emitValue (Json.object ["formatVersion" .= (1 :: Int), "ok" .= False, "error" .= validationErrorValue failure])
     else pure ()

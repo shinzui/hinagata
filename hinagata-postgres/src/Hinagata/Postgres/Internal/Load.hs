@@ -17,7 +17,7 @@ import GHC.Clock (getMonotonicTimeNSec)
 import Hinagata.Connection (ConnectionTarget)
 import Hinagata.Fixture.Bundle
 import Hinagata.Fixture.Types (FixtureName)
-import Hinagata.Postgres.Error
+import Hinagata.Postgres.Error (LoadError (..), LoadPhase (..), NativeError (..), NativePhase (..), SessionError)
 import Hinagata.Postgres.Internal.Copy (copyCsv)
 import Hinagata.Postgres.Internal.Libpq
 import Hinagata.Postgres.Internal.Sql

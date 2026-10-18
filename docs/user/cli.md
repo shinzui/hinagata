@@ -116,6 +116,26 @@ Successful reports identify the command through `kind`.
 Errors contain a stable `error.code`.
 Available context includes the phase, fixture, step, SQLSTATE, and safe connection fields.
 Reports omit credentials.
+Fixture failures also include `error.loadContext` (or a validation result's `error.loadContext`):
+
+```json
+{
+  "phase": "ExecuteSql",
+  "fixture": "example",
+  "stepIndex": 1,
+  "sqlState": "23505",
+  "cause": "FatalError",
+  "rollbackFailure": null
+}
+```
+
+`stepIndex` is zero-based. A deferred constraint failure at `CommitLoad` can have null fixture and step.
+Baseline/scenario failures keep their existing outer phase and error code (`baseline_failed` or `lease_failed`),
+with the actual load phase in `loadContext`. Top-level fixture, step, and SQLSTATE also reflect that load.
+`error.cleanupFailure` describes clone-release failure separately from `loadContext.rollbackFailure`.
+The context is null for errors unrelated to fixture loading; a disconnect may provide no SQLSTATE.
+These fields extend `formatVersion: 1`. Plain diagnostics include the actual fixture and step when known.
+Raw SQL, row values, server exception text, credentials, and child arguments are excluded.
 
 | Exit code | Meaning |
 | --- | --- |

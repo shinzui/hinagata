@@ -8,7 +8,7 @@ import Hinagata.Cli.Output (CliError (..), ValidationResult (..))
 import Hinagata.Cli.Process (CancellationScope, CommandCancelled (..), cancellationSignal, waitCancellation, withCooperativeCancellation)
 
 cancelledError :: Int -> CliError
-cancelledError signal = CliError "command" "command_cancelled" "command cancelled before completion" Nothing Nothing Nothing Nothing (128 + signal) Nothing Nothing
+cancelledError signal = CliError "command" "command_cancelled" "command cancelled before completion" Nothing Nothing Nothing Nothing (128 + signal) Nothing Nothing Nothing Nothing
 
 -- | A worker is joined even after cancellation. Its typed preparation result
 -- takes precedence over a generic cancellation; completed results are retained.

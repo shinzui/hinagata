@@ -57,7 +57,7 @@ The stalled-peer test initially passed on the old adapter because idle GC finali
 
 2026-10-18: Treat CLI signal propagation, exception-safe connection ownership, and cancellation during lease completion as one functional stream. Fixing only the command supervisor would expose the native leaks and swallowed exceptions to more callers.
 
-2026-10-18: Latch delivery ownership with the first signal. An existing child or validation supervisor owns cooperative cancellation and its typed cleanup result; otherwise the root interrupts the command worker once. Joining that worker avoids a second interruption of unsafe-child bookkeeping. Root supervision begins before configuration file resolution.
+2026-10-18: Latch delivery ownership with the first signal. An existing child or validation supervisor owns cooperative cancellation and its typed cleanup result; otherwise the root interrupts the command worker once. Joining that worker avoids a second interruption of unsafe-child bookkeeping. Root supervision begins before configuration file resolution. Final integration also restricts cooperation to actual supervised work and checks cancellation again after a successful hook and before success output, closing the first-signal handoff window.
 
 
 ## Outcomes & Retrospective

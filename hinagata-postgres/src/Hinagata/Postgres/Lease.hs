@@ -28,7 +28,8 @@ import GHC.Clock (getMonotonicTimeNSec)
 import Hinagata.Config
 import Hinagata.Connection (ConnectionTarget)
 import Hinagata.Fixture.Bundle
-import Hinagata.Postgres.Error (NativeError (..), NativePhase (..), SessionError)
+import Hinagata.Postgres.Error (FixtureLoadContext, NativeError (..), NativePhase (..), SessionError, loadErrorContext)
+import Hinagata.Postgres.Error qualified as Error
 import Hinagata.Postgres.Internal.Access qualified as Access
 import Hinagata.Postgres.Internal.BaselineRef
 import Hinagata.Postgres.Internal.Libpq
@@ -53,7 +54,8 @@ data LeaseError = LeaseError
   { cause :: !Text,
     sqlState :: !(Maybe Text),
     cleanupFailure :: !(Maybe Text),
-    preparationContext :: !(Maybe PreparationContext)
+    preparationContext :: !(Maybe PreparationContext),
+    fixtureLoadContext :: !(Maybe FixtureLoadContext)
   }
   deriving stock (Eq, Show)
 
@@ -166,7 +168,7 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
         modifyIORef' timingRef (\record -> record {catalogMs = catalogDuration})
         let catalog = maybe (Left (CatalogError "acquisition deadline expired" Nothing Nothing)) id timedCatalog
         case catalog of
-          Left CatalogError {cause, sqlState} -> pure (Left (LeaseError cause sqlState Nothing Nothing))
+          Left CatalogError {cause, sqlState} -> pure (Left (LeaseError cause sqlState Nothing Nothing Nothing))
           Right identity
             | identity /= clusterIdentity baseline -> pure (Left (failure "baseline belongs to a different catalog or cluster"))
             | otherwise -> do
@@ -307,7 +309,7 @@ withDatabaseClassified configuration baseline scenario policy classifyResult cal
                 modifyIORef' timingRef (\record -> record {scenarioLoadMs = duration})
                 case loaded of
                   Left problem -> pure (Left (sessionFailure problem))
-                  Right (Left _) -> pure (Left (failure "scenario fixture load failed"))
+                  Right (Left problem@Error.LoadError {Error.sqlState}) -> pure (Left (LeaseError "scenario fixture load failed" sqlState Nothing Nothing (Just (loadErrorContext problem))))
                   Right (Right _) -> do
                     active <- markState configuration session clone "Active"
                     case active of
@@ -364,7 +366,7 @@ allocate timingRef configuration baseline session maintenance options identity =
                   pure (Keep created)
               )
         Right _ -> pure (Left (failure "baseline lost positive ownership"))
-        Left CatalogError {cause, sqlState} -> pure (Left (LeaseError cause sqlState Nothing Nothing))
+        Left CatalogError {cause, sqlState} -> pure (Left (LeaseError cause sqlState Nothing Nothing Nothing))
 
 createClone :: HinagataConfig -> BaselineRef -> PQ.Connection -> SessionOptions -> CatalogIdentity -> IO (Either LeaseError Clone)
 createClone configuration baseline connection sessionOptions identity = do
@@ -475,7 +477,7 @@ release :: HinagataConfig -> Session -> ConnectionTarget -> SessionOptions -> Ca
 release configuration session maintenance options identity clone = do
   evidence <- verifyOwnedDatabase maintenance options identity (owned clone)
   case evidence of
-    Left CatalogError {cause, sqlState} -> pure (Left (LeaseError cause sqlState Nothing Nothing))
+    Left CatalogError {cause, sqlState} -> pure (Left (LeaseError cause sqlState Nothing Nothing Nothing))
     Right OwnershipMismatch -> pure (Left (failure "clone ownership changed; release refused"))
     Right OwnershipMissing -> markState configuration session clone "Released"
     Right OwnershipMatches -> do
@@ -498,7 +500,7 @@ release configuration session maintenance options identity clone = do
               marked <- markStateWithDiagnostic configuration session clone "CleanupFailed" (Just dropCause)
               pure $ case marked of
                 Right () -> Left problem
-                Left LeaseError {cause = recordCause} -> Left (LeaseError dropCause dropState (Just ("could not record cleanup failure: " <> recordCause)) Nothing)
+                Left LeaseError {cause = recordCause} -> Left (LeaseError dropCause dropState (Just ("could not record cleanup failure: " <> recordCause)) Nothing Nothing)
             Right () -> markState configuration session clone "Released"
 
 mergeCleanup :: Either LeaseError a -> Either SomeException (Either LeaseError ()) -> Either LeaseError a
@@ -515,13 +517,13 @@ flatten :: Either SessionError (Either LeaseError a) -> Either LeaseError a
 flatten = either (Left . sessionFailure) id
 
 failure :: Text -> LeaseError
-failure cause = LeaseError cause Nothing Nothing Nothing
+failure cause = LeaseError cause Nothing Nothing Nothing Nothing
 
 nativeFailure :: NativeError -> LeaseError
-nativeFailure NativeError {reason, sqlState} = LeaseError reason sqlState Nothing Nothing
+nativeFailure NativeError {reason, sqlState} = LeaseError reason sqlState Nothing Nothing Nothing
 
 accessFailure :: Access.AccessError -> LeaseError
-accessFailure Access.AccessError {cause, sqlState} = LeaseError cause sqlState Nothing Nothing
+accessFailure Access.AccessError {cause, sqlState} = LeaseError cause sqlState Nothing Nothing Nothing
 
 sessionFailure :: SessionError -> LeaseError
 sessionFailure problem = failure (Text.pack (show problem))
@@ -569,6 +571,7 @@ preparationError clone detail =
     Nothing
     (if releaseSafe detail then Nothing else Just "child process cleanup uncertain; clone preserved")
     (Just (PreparationContext detail (cloneRunId clone) (cloneLeaseId clone)))
+    Nothing
   where
     reason = \case
       PreparationSpawnFailed -> "clone preparation command could not be started"
@@ -579,4 +582,4 @@ preparationError clone detail =
       PreparationCleanupFailed -> "clone preparation process cleanup could not be proven"
 
 withCleanupDiagnostic :: LeaseError -> Text -> LeaseError
-withCleanupDiagnostic LeaseError {cause, sqlState, preparationContext} diagnostic = LeaseError cause sqlState (Just diagnostic) preparationContext
+withCleanupDiagnostic LeaseError {cause, sqlState, preparationContext, fixtureLoadContext} diagnostic = LeaseError cause sqlState (Just diagnostic) preparationContext fixtureLoadContext
